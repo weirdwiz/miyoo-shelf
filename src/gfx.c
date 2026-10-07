@@ -215,6 +215,12 @@ void gfx_fill_rect(Image *dst, int x, int y, int w, int h, uint32_t c)
 
 void gfx_fill_rrect(Image *dst, float x, float y, float w, float h, float r, uint32_t c)
 {
+    gfx_fill_rrect_around(dst, x, y, w, h, r, 0, 0, 0, 0, c);
+}
+
+void gfx_fill_rrect_around(Image *dst, float x, float y, float w, float h, float r,
+                           int hx0, int hy0, int hx1, int hy1, uint32_t c)
+{
     if (r > w / 2) r = w / 2;
     if (r > h / 2) r = h / 2;
     int x0 = (int)floorf(x), y0 = (int)floorf(y), x1 = (int)ceilf(x + w), y1 = (int)ceilf(y + h);
@@ -224,6 +230,7 @@ void gfx_fill_rrect(Image *dst, float x, float y, float w, float h, float r, uin
     if (y1 > dst->h) y1 = dst->h;
     for (int yy = y0; yy < y1; yy++)
         for (int xx = x0; xx < x1; xx++) {
+            if (yy >= hy0 && yy < hy1 && xx == hx0 && hx1 > hx0) { xx = hx1 - 1; continue; }
             float cv = rrect_cov(xx + 0.5f, yy + 0.5f, x, y, w, h, r);
             if (cv <= 0) continue;
             uint32_t *d = &dst->px[yy * dst->w + xx];
@@ -331,6 +338,15 @@ void gfx_blit_scaled(Image *dst, const Image *src, float x, float y, float w, fl
     }
 }
 
+static inline uint32_t lerp_px(uint32_t q, uint32_t p, uint32_t a)
+{
+    uint32_t rb = (p & 0x00ff00ffu) * a + (q & 0x00ff00ffu) * (255 - a) + 0x00800080u;
+    rb = ((rb + ((rb >> 8) & 0x00ff00ffu)) >> 8) & 0x00ff00ffu;
+    uint32_t ag = ((p >> 8) & 0x00ff00ffu) * a + ((q >> 8) & 0x00ff00ffu) * (255 - a) + 0x00800080u;
+    ag = (ag + ((ag >> 8) & 0x00ff00ffu)) & 0xff00ff00u;
+    return rb | ag;
+}
+
 // dst = s * a + d * (255 - a), per channel, rounded like over().
 static void lerp_row(uint32_t *dst, const uint32_t *d, const uint32_t *s, int n, uint32_t a)
 {
@@ -346,13 +362,77 @@ static void lerp_row(uint32_t *dst, const uint32_t *d, const uint32_t *s, int n,
         vst1q_u8((uint8_t *)(dst + i), vcombine_u8(rlo, rhi));
     }
 #endif
-    for (; i < n; i++) {
-        uint32_t p = s[i], q = d[i];
-        uint32_t rb = (p & 0x00ff00ffu) * a + (q & 0x00ff00ffu) * (255 - a) + 0x00800080u;
-        rb = ((rb + ((rb >> 8) & 0x00ff00ffu)) >> 8) & 0x00ff00ffu;
-        uint32_t ag = ((p >> 8) & 0x00ff00ffu) * a + ((q >> 8) & 0x00ff00ffu) * (255 - a) + 0x00800080u;
-        ag = (ag + ((ag >> 8) & 0x00ff00ffu)) & 0xff00ff00u;
-        dst[i] = rb | ag;
+    for (; i < n; i++) dst[i] = lerp_px(d[i], s[i], a);
+}
+
+void gfx_lerp(Image *dst, const Image *a, const Image *b, uint8_t t)
+{
+    lerp_row(dst->px, a->px, b->px, dst->w * dst->h, t);
+}
+
+// Source coordinate and 0..255 weight of the next sample for each of n bilinear outputs.
+static void bilinear_taps(int n, int src_n, int *index, uint8_t *weight)
+{
+    for (int i = 0; i < n; i++) {
+        float f = (i + .5f) * src_n / n - .5f;
+        if (f < 0) f = 0;
+        int a = (int)f;
+        if (a >= src_n - 1) { a = src_n - 1; f = (float)a; }
+        index[i] = a;
+        weight[i] = (uint8_t)lroundf((f - a) * 255);
+    }
+}
+
+void gfx_upscale(Image *dst, const Image *src)
+{
+    int W = dst->w, H = dst->h;
+    int xi[W], yi[H];
+    uint8_t xw[W], yw[H];
+    uint32_t *rows = malloc((size_t)W * src->h * sizeof *rows);
+    if (!rows) return;
+    bilinear_taps(W, src->w, xi, xw);
+    bilinear_taps(H, src->h, yi, yw);
+    // Widen every source row once, then each output row is one lerp of two of them.
+    for (int y = 0; y < src->h; y++) {
+        const uint32_t *s = src->px + y * src->w;
+        uint32_t *r = rows + y * W;
+        for (int x = 0; x < W; x++) {
+            int a = xi[x], b = a + 1 < src->w ? a + 1 : a;
+            r[x] = lerp_px(s[a], s[b], xw[x]);
+        }
+    }
+    for (int y = 0; y < H; y++) {
+        int a = yi[y], b = a + 1 < src->h ? a + 1 : a;
+        lerp_row(dst->px + y * W, rows + a * W, rows + b * W, W, yw[y]);
+    }
+    free(rows);
+}
+
+void gfx_blit_scaled_nearest(Image *dst, const Image *src, float x, float y, float w, float h)
+{
+    if (w <= 0 || h <= 0) return;
+    int x0 = (int)floorf(x), y0 = (int)floorf(y), x1 = (int)ceilf(x + w), y1 = (int)ceilf(y + h);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > dst->w) x1 = dst->w;
+    if (y1 > dst->h) y1 = dst->h;
+    if (x1 <= x0 || y1 <= y0) return;
+    float kx = src->w / w, ky = src->h / h;
+    int columns[x1 - x0];
+    for (int xx = x0; xx < x1; xx++) {
+        int sx = (int)((xx + .5f - x) * kx);
+        columns[xx - x0] = sx < 0 ? 0 : sx >= src->w ? src->w - 1 : sx;
+    }
+    for (int yy = y0; yy < y1; yy++) {
+        int sy = (int)((yy + .5f - y) * ky);
+        if (sy < 0 || sy >= src->h) continue;
+        const uint32_t *s = src->px + sy * src->w;
+        uint32_t *row = dst->px + yy * dst->w + x0;
+        int a = src->spans ? src->spans[2 * sy] : src->w, b = src->spans ? src->spans[2 * sy + 1] : 0;
+        for (int i = 0; i < x1 - x0; i++) {
+            int sx = columns[i];
+            row[i] = sx >= a && sx < b ? s[sx] : over(row[i], s[sx]);
+        }
     }
 }
 

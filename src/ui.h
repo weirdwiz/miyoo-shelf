@@ -42,5 +42,7 @@ void ui_switch_hooks(const Image *(*card)(int), const Image *(*full)(int), void 
 enum { SW_TOAST_NONE, SW_TOAST_SAVING, SW_TOAST_SAVED, SW_TOAST_FAILED };
 void ui_switch_saving(int toast);
 int ui_switch_target(void);
+// Benchmark: play the opening zoom again, from full screen into the row.
+void ui_switch_reopen(void);
 
 #endif

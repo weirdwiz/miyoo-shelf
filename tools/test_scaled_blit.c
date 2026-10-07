@@ -104,6 +104,63 @@ int main(void)
         img_free(under); img_free(src);
     }
     puts("fused fade matches copy-then-blend within rounding (300 clipped cases)");
+
+    // Nearest blit: span-copied middles equal blending every pixel.
+    for (int n = 0; n < 300; n++) {
+        Image *src = img_new(1 + random_word() % 60, 1 + random_word() % 60);
+        gfx_fill_rrect(src, 1.5f, 2.5f, src->w - 3.f, src->h - 4.f, (random_word() % 12) + .5f,
+                       random_word() | 0xff000000u);
+        for (int i = 0; i < a->w * a->h; i++) a->px[i] = b->px[i] = random_word() | 0xff000000u;
+        float x = (int)(random_word() % 120) - 40 + .29f, y = (int)(random_word() % 100) - 40 + .63f;
+        float w = .1f + random_word() % 100, h = .1f + random_word() % 90;
+        gfx_blit_scaled_nearest(a, src, x, y, w, h);
+        img_find_spans(src);
+        gfx_blit_scaled_nearest(b, src, x, y, w, h);
+        assert(!memcmp(a->px, b->px, (size_t)a->w * a->h * 4));
+        img_free(src);
+    }
+    puts("nearest blit with spans matches blended nearest blit (300 clipped cases)");
+
+    // A frame filled around a hole: the hole untouched, everything else as gfx_fill_rrect.
+    for (int n = 0; n < 300; n++) {
+        for (int i = 0; i < a->w * a->h; i++) a->px[i] = b->px[i] = random_word() | 0xff000000u;
+        float x = (int)(random_word() % 60) - 10 + .4f, y = (int)(random_word() % 40) - 10 + .7f;
+        float w = 1 + random_word() % 70, h = 1 + random_word() % 60, r = random_word() % 15;
+        int hx0 = (int)x + random_word() % 10, hy0 = (int)y + random_word() % 10;
+        int hx1 = hx0 + random_word() % 40, hy1 = hy0 + random_word() % 40;
+        uint32_t c = argb(random_word(), random_word(), random_word(), random_word());
+        gfx_fill_rrect(a, x, y, w, h, r, c);
+        gfx_fill_rrect_around(b, x, y, w, h, r, hx0, hy0, hx1, hy1, c);
+        for (int yy = 0; yy < a->h; yy++)
+            for (int xx = 0; xx < a->w; xx++) {
+                int i = yy * a->w + xx, hole = xx >= hx0 && xx < hx1 && yy >= hy0 && yy < hy1;
+                if (!hole) assert(a->px[i] == b->px[i]);
+            }
+    }
+    puts("rrect around a hole matches gfx_fill_rrect outside it (300 cases)");
+
+    // Upscale: bilinear like sample(), within rounding; lerp: the per-pixel lerp.
+    for (int n = 0; n < 50; n++) {
+        Image *src = img_new(2 + random_word() % 20, 2 + random_word() % 15);
+        for (int i = 0; i < src->w * src->h; i++) src->px[i] = random_word() | 0xff000000u;
+        gfx_upscale(a, src);
+        for (int yy = 0; yy < a->h; yy++)
+            for (int xx = 0; xx < a->w; xx++) {
+                float fx = (xx + .5f) * src->w / a->w, fy = (yy + .5f) * src->h / a->h;
+                uint32_t p = sample(src, fx, fy), q = a->px[yy * a->w + xx];
+                for (int c = 0; c < 32; c += 8) {
+                    int d = (int)((p >> c) & 255) - (int)((q >> c) & 255);
+                    assert(d >= -3 && d <= 3);
+                }
+            }
+        img_free(src);
+    }
+    for (int i = 0; i < a->w * a->h; i++) a->px[i] = random_word() | 0xff000000u, b->px[i] = random_word() | 0xff000000u;
+    Image *mix = img_new(a->w, a->h);
+    gfx_lerp(mix, a, b, 77);
+    for (int i = 0; i < a->w * a->h; i++) assert(mix->px[i] == lerp_px(a->px[i], b->px[i], 77));
+    img_free(mix);
+    puts("upscale matches bilinear sampling within rounding; lerp matches per pixel");
     img_free(a); img_free(b);
     puts("span blit matches blended blit (300 clipped cases)");
 }

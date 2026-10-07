@@ -32,6 +32,10 @@ void img_find_spans(Image *img);
 void gfx_clear(Image *dst, uint32_t c);
 void gfx_fill_rect(Image *dst, int x, int y, int w, int h, uint32_t c);
 void gfx_fill_rrect(Image *dst, float x, float y, float w, float h, float r, uint32_t c);
+// gfx_fill_rrect leaving the pixels [hx0, hx1) x [hy0, hy1) alone, for a frame around
+// something drawn there.
+void gfx_fill_rrect_around(Image *dst, float x, float y, float w, float h, float r,
+                           int hx0, int hy0, int hx1, int hy1, uint32_t c);
 void gfx_stroke_rrect(Image *dst, float x, float y, float w, float h, float r, float t, uint32_t c);
 void gfx_blit(Image *dst, const Image *src, int x, int y, uint8_t alpha);
 void gfx_blit_scaled(Image *dst, const Image *src, float x, float y, float w, float h, uint8_t alpha);
@@ -39,6 +43,12 @@ void gfx_blit_scaled(Image *dst, const Image *src, float x, float y, float w, fl
 // scaled into (x, y, w, h). For short, fading motion where filtering is invisible.
 void gfx_fade_scaled_nearest(Image *dst, const Image *under, const Image *src,
                              float x, float y, float w, float h, uint8_t alpha);
+// Bilinear resize of src to fill dst, for upscaling smooth images (blurred backdrops).
+void gfx_upscale(Image *dst, const Image *src);
+// Nearest-neighbour scaled blit (alpha 255), for short motion where filtering is invisible.
+void gfx_blit_scaled_nearest(Image *dst, const Image *src, float x, float y, float w, float h);
+// dst = a faded to b by t (0..255); all three opaque and the same size.
+void gfx_lerp(Image *dst, const Image *a, const Image *b, uint8_t t);
 void gfx_mask_a8(Image *dst, const uint8_t *mask, int mw, int mh, int x, int y, uint32_t c);
 // Draw a w x h mask stretched from an mw x mh one: corner x corner blocks stay fixed,
 // edges repeat the middle row/column, and the (empty) interior is skipped.

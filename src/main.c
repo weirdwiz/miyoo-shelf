@@ -235,6 +235,46 @@ static int switcher_main(int overlay, int sim, const char *font_dir, char **argv
         sw_cards_stop();
         return rc;
     }
+    // Render-only benchmark, as for Shelf (SHELF_SWITCHER=1 keeps RetroArch out of it).
+    // Scenes: idle, scroll (left/right every 12 frames), zoom (open, then A, every 36).
+    const char *bench = getenv("SHELF_BENCH");
+    if (bench) {
+        int n = atoi(bench);
+        const char *scene = getenv("SHELF_BENCH_SCENE");
+        if (!scene) scene = "idle";
+        int scroll = !strcmp(scene, "scroll"), zoom = !strcmp(scene, "zoom");
+        if (n < 1 || n > 10000 || (!scroll && !zoom && strcmp(scene, "idle"))) return 1;
+        if (ui_init_switcher(&lib, font_dir, overlay, running)) return 1;
+        fprintf(stderr, "shelf: switcher ready after %.0f ms\n", (platform_now() - t0) * 1000);
+        for (int i = 0; i < 60; i++) { // let the cards load
+            ui_update(1.f / 60);
+            ui_draw(canvas);
+            while (icons_pump(64)) {}
+            usleep(5000);
+        }
+        icons_start_worker();
+        double start = platform_now(), worst = 0;
+        int over = 0;
+        for (int i = 0; i < n; i++) {
+            double begin = platform_now();
+            if (scroll && i % 12 == 0) ui_button((i / 72) % 2 ? BTN_LEFT : BTN_RIGHT);
+            if (zoom && i % 36 == 0) {
+                if ((i / 36) % 2) ui_button(BTN_A);
+                else ui_switch_reopen();
+            }
+            ui_update(1.f / 60);
+            ui_draw(canvas);
+            ui_take_action();
+            double el = platform_now() - begin;
+            if (el > worst) worst = el;
+            if (el > .015) over++;
+        }
+        fprintf(stderr, "shelf: switcher %s benchmark %d frames, %.2f ms/frame, worst %.2f ms, %d over 15 ms\n",
+                scene, n, (platform_now() - start) * 1000 / n, worst * 1000, over);
+        if (running) sw_overlay_resume();
+        sw_cards_stop();
+        return 0;
+    }
     if (ui_init_switcher(&lib, font_dir, overlay, running) || platform_init()) {
         fprintf(stderr, "shelf: switcher couldn't start\n");
         if (running) sw_overlay_resume();

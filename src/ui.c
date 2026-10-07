@@ -1074,9 +1074,14 @@ static struct {
     void (*select)(int);
     unsigned (*revision)(void);
     Image *sprites[MAX_RECENT];
+    Image *small[MAX_RECENT];  // sprites[i] at SW_SMALL, for cards at rest
+    uint8_t *ring;             // selection ring coverage at full card size, 9-sliced
     const Image *sprite_src[MAX_RECENT], *sprite_icon[MAX_RECENT];
     Image *home_bg;           // Shelf's own background: B fades to it, as Shelf starts on it
-    Image *backdrop, *old_backdrop;
+    // Backdrops are kept small (blurred, so nothing is lost) and cross-faded at that size;
+    // only the result is upscaled to the screen.
+    Image *backdrop, *old_backdrop, *mixed;
+    Image *backdrop_full;     // backdrop at screen size, NULL until the fade settles
     int backdrop_for;         // recent the backdrop was made from, -1 none
     const Image *backdrop_src;
     float fade;               // 0..1 cross-fade from old_backdrop
@@ -1084,6 +1089,8 @@ static struct {
     int closing, close_to;    // UI_SW_* being animated to, and the recent
     float home_t;             // B: fade-out progress
     int fired;                // the closing action was handed out; hold the last frame
+    int layer_ok;             // S.layer holds the scene behind a zoom; reused while it's still
+    unsigned layer_rev;       // card + art revisions it was drawn with
     int saving;               // SW_TOAST_*
 } W;
 
@@ -1093,11 +1100,21 @@ void ui_switch_hooks(const Image *(*card)(int), const Image *(*full)(int), void 
     W.card = card; W.full = full; W.select = select; W.revision = revision;
 }
 
-void ui_switch_saving(int state) { W.saving = state; }
+void ui_switch_saving(int state)
+{
+    if (W.saving != state) W.layer_ok = 0;
+    W.saving = state;
+}
 
 int ui_switch_target(void) { return W.close_to; }
 
 static int sw_on(void) { return W.on; }
+
+void ui_switch_reopen(void)
+{
+    W.closing = W.fired = 0;
+    W.zoom.x = 0; W.zoom.v = 0; W.zoom.t = 1;
+}
 
 static void sw_select(int i)
 {
@@ -1130,8 +1147,10 @@ int ui_init_switcher(Library *lib, const char *font_dir, int overlay, int runnin
 
 static void sw_free(void)
 {
-    for (int i = 0; i < MAX_RECENT; i++) img_free(W.sprites[i]);
+    for (int i = 0; i < MAX_RECENT; i++) { img_free(W.sprites[i]); img_free(W.small[i]); }
+    free(W.ring);
     img_free(W.home_bg); img_free(W.backdrop); img_free(W.old_backdrop);
+    img_free(W.mixed); img_free(W.backdrop_full);
     memset(&W, 0, sizeof W);
 }
 
@@ -1208,40 +1227,56 @@ static void box_blur(Image *img, int r)
     free(tmp);
 }
 
-// The selected game's screenshot, blurred and dimmed. Blurring a small copy and scaling
-// it up is both cheaper and smoother than blurring at full size.
-static Image *make_backdrop(const Image *shot)
+// The selected game's screenshot, blurred and dimmed, at SW_BD_W x SW_BD_H; without one,
+// the colour its card shows instead.
+#define SW_BD_W 64
+#define SW_BD_H 48
+static Image *make_backdrop(const Image *shot, uint32_t color)
 {
-    Image *small = img_resize(shot, 64, 48);
+    Image *small = shot ? img_resize(shot, SW_BD_W, SW_BD_H) : img_new(SW_BD_W, SW_BD_H);
     if (!small) return NULL;
-    box_blur(small, 3);
-    for (int i = 0; i < 64 * 48; i++) {
+    if (shot) box_blur(small, 3);
+    else gfx_clear(small, rgb(color));
+    for (int i = 0; i < SW_BD_W * SW_BD_H; i++) {
         uint32_t p = small->px[i];
         int r = (p >> 16 & 255) * 2 / 5 + 10, g = (p >> 8 & 255) * 2 / 5 + 12, b = (p & 255) * 2 / 5 + 20;
         small->px[i] = rgb((uint32_t)(r << 16 | g << 8 | b));
     }
-    Image *big = img_resize(small, SCREEN_W, SCREEN_H);
-    img_free(small);
-    return big;
+    return small;
 }
 
 static void sw_update_backdrop(void)
 {
+    if (!S.lib->nrecent) return;
     const Image *src = W.card ? W.card(S.sel) : NULL;
     if (W.backdrop_for == S.sel && W.backdrop_src == src) return;
-    if (!src && W.backdrop_for >= 0 && !W.backdrop_src) { W.backdrop_for = S.sel; return; }
-    Image *next = src ? make_backdrop(src) : NULL;
-    if (!next) { // no screenshot: Shelf's dark background
-        next = img_new(SCREEN_W, SCREEN_H);
-        if (!next) return;
-        memcpy(next->px, S.bg->px, (size_t)SCREEN_W * SCREEN_H * 4);
-    }
+    const Game *g = &S.lib->games[S.lib->recent[S.sel]];
+    Image *next = make_backdrop(src, S.lib->sys[g->sys].color);
+    if (!next) return;
     img_free(W.old_backdrop);
     W.old_backdrop = W.backdrop;
     W.backdrop = next;
+    img_free(W.backdrop_full);
+    W.backdrop_full = NULL;
     W.fade = W.old_backdrop ? 0 : 1;
     W.backdrop_for = S.sel;
     W.backdrop_src = src;
+}
+
+static void sw_draw_backdrop(Image *c)
+{
+    if (!W.backdrop) { memcpy(c->px, S.bg->px, (size_t)SCREEN_W * SCREEN_H * 4); return; }
+    if (W.fade < 1 && W.old_backdrop) {
+        if (!W.mixed) W.mixed = img_new(SW_BD_W, SW_BD_H);
+        if (W.mixed) {
+            gfx_lerp(W.mixed, W.old_backdrop, W.backdrop, (uint8_t)(W.fade * 255));
+            gfx_upscale(c, W.mixed);
+            return;
+        }
+    }
+    if (!W.backdrop_full && (W.backdrop_full = img_new(SCREEN_W, SCREEN_H))) gfx_upscale(W.backdrop_full, W.backdrop);
+    if (W.backdrop_full) memcpy(c->px, W.backdrop_full->px, (size_t)SCREEN_W * SCREEN_H * 4);
+    else gfx_upscale(c, W.backdrop);
 }
 
 // One card at full size with its frame, shadow and system chip, rebuilt when its
@@ -1253,6 +1288,8 @@ static const Image *sw_sprite(int i)
     const Image *icon = shot ? NULL : icon_get(gi, 1);
     if (W.sprites[i] && W.sprite_src[i] == shot && W.sprite_icon[i] == icon) return W.sprites[i];
     img_free(W.sprites[i]);
+    img_free(W.small[i]);
+    W.small[i] = NULL;
     Image *s = W.sprites[i] = img_new(SW_W + 2 * SW_SPRITE_PAD, SW_H + 2 * SW_SPRITE_PAD);
     W.sprite_src[i] = shot;
     W.sprite_icon[i] = icon;
@@ -1295,6 +1332,39 @@ static const Image *sw_sprite(int i)
     return s;
 }
 
+// A card at rest in the row (SW_SMALL), area-averaged once instead of scaled per frame.
+static const Image *sw_small(int i, const Image *sprite)
+{
+    if (!W.small[i] && (W.small[i] = img_resize(sprite, (int)lroundf(sprite->w * SW_SMALL),
+                                                (int)lroundf(sprite->h * SW_SMALL))))
+        img_find_spans(W.small[i]);
+    return W.small[i];
+}
+
+// The selection ring around a w x h card: stroked once at full card size, then 9-sliced
+// to the size the card is animating through.
+#define SW_RING_OUT 6  // ring's outer edge beyond the card
+#define SW_RING_PAD 2
+#define SW_RING_W (SW_W + 2 * (SW_RING_OUT + SW_RING_PAD))
+#define SW_RING_H (SW_H + 2 * (SW_RING_OUT + SW_RING_PAD))
+#define SW_RING_CORNER (SW_RING_PAD + 19 + 3)
+static void sw_ring(Image *c, float x, float y, float w, float h, uint32_t color)
+{
+    if (!W.ring) {
+        Image *m = img_new(SW_RING_W, SW_RING_H);
+        W.ring = malloc(SW_RING_W * SW_RING_H);
+        if (!m || !W.ring) { img_free(m); free(W.ring); W.ring = NULL; return; }
+        gfx_stroke_rrect(m, SW_RING_PAD, SW_RING_PAD, SW_W + 2 * SW_RING_OUT, SW_H + 2 * SW_RING_OUT, 19, 4,
+                         rgb(0xffffff));
+        for (int i = 0; i < SW_RING_W * SW_RING_H; i++) W.ring[i] = m->px[i] >> 24;
+        img_free(m);
+    }
+    const int edge = SW_RING_OUT + SW_RING_PAD;
+    int x0 = (int)lroundf(x) - edge, y0 = (int)lroundf(y) - edge;
+    int x1 = (int)lroundf(x + w) + edge, y1 = (int)lroundf(y + h) + edge;
+    gfx_mask_a8_9slice(c, W.ring, SW_RING_W, SW_RING_H, SW_RING_CORNER, x0, y0, x1 - x0, y1 - y0, color);
+}
+
 static void sw_card_rect(int i, float *x, float *y, float *w, float *h)
 {
     float k = S.hscale[i].x, cx = S.track.x + i * SW_STEP;
@@ -1305,13 +1375,7 @@ static void sw_card_rect(int i, float *x, float *y, float *w, float *h)
 // The row, titles and chrome, without the selected card when `skip_sel`.
 static void sw_draw_scene(Image *c, int skip_sel)
 {
-    if (W.backdrop) {
-        if (W.fade < 1 && W.old_backdrop) {
-            memcpy(c->px, W.old_backdrop->px, (size_t)SCREEN_W * SCREEN_H * 4);
-            gfx_blit(c, W.backdrop, 0, 0, (uint8_t)(W.fade * 255));
-        } else memcpy(c->px, W.backdrop->px, (size_t)SCREEN_W * SCREEN_H * 4);
-    } else memcpy(c->px, S.bg->px, (size_t)SCREEN_W * SCREEN_H * 4);
-
+    sw_draw_backdrop(c);
     Library *L = S.lib;
     if (!L->nrecent) {
         text_center(c, S.title, "Nothing played yet", SCREEN_W / 2, 200, rgb(C_INK), SCREEN_W - 60);
@@ -1333,11 +1397,13 @@ static void sw_draw_scene(Image *c, int skip_sel)
             const Image *s = sw_sprite(i);
             if (!s) continue;
             float k = w / SW_W, pad = SW_SPRITE_PAD * k;
+            const Image *rest = fabsf(k - SW_SMALL) < .004f ? sw_small(i, s) : NULL;
             if (fabsf(k - 1) < .004f) gfx_blit(c, s, (int)lroundf(x) - SW_SPRITE_PAD, (int)lroundf(y) - SW_SPRITE_PAD, 255);
-            else gfx_blit_scaled(c, s, x - pad, y - pad, s->w * k, s->h * k, 255);
+            else if (rest) gfx_blit(c, rest, (int)lroundf(x + w / 2 - rest->w / 2.f), (int)lroundf(y + h / 2 - rest->h / 2.f), 255);
+            else gfx_blit_scaled_nearest(c, s, x - pad, y - pad, s->w * k, s->h * k); // moving
             if (pass) { // selection ring
                 float p = .5f + .5f * sinf(S.t * 5.7f);
-                gfx_stroke_rrect(c, x - 6, y - 6, w + 12, h + 12, 19, 4, lerp_rgb(C_SEL, C_SEL2, p));
+                sw_ring(c, x, y, w, h, lerp_rgb(C_SEL, C_SEL2, p));
             }
         }
     if (L->nrecent > 1) {
@@ -1367,27 +1433,40 @@ static void sw_draw(Image *c)
     sw_update_backdrop();
     if (W.closing == UI_SW_HOME) {
         sw_draw_scene(S.layer, 0);
+        W.layer_ok = 0;
         float a = W.home_t > 1 ? 1 : W.home_t;
-        memcpy(c->px, S.layer->px, (size_t)SCREEN_W * SCREEN_H * 4);
-        gfx_blit(c, W.home_bg, 0, 0, (uint8_t)(a * 255));
+        gfx_lerp(c, S.layer, W.home_bg, (uint8_t)(a * 255));
         return;
     }
     float z = W.zoom.x;
-    if (z > .996f || !S.lib->nrecent) { sw_draw_scene(c, 0); return; }
-    // Zooming between the selected card and the full screen: the scene without that card,
-    // its white frame growing in, and the screenshot scaled over it.
-    sw_draw_scene(S.layer, 1);
+    if (z > .996f || !S.lib->nrecent) { sw_draw_scene(c, 0); W.layer_ok = 0; return; }
+    // Zooming between the selected card and the full screen: the scene without that card
+    // (kept while nothing in it moves), its white frame, and the screenshot scaled into it.
+    int still = W.fade >= 1 && !spring_moving(&S.track);
+    for (int i = 0; i < S.lib->nrecent && still; i++) still = !spring_moving(&S.hscale[i]);
+    unsigned rev = (W.revision ? W.revision() : 0) * 31u + icons_revision();
+    if (!W.layer_ok || !still || rev != W.layer_rev) {
+        sw_draw_scene(S.layer, 1);
+        W.layer_ok = 1;
+        W.layer_rev = rev;
+    }
     float x, y, w, h;
     sw_card_rect(S.sel, &x, &y, &w, &h);
     if (z < 0) z = 0;
     float rx = x * z, ry = y * z, rw = SCREEN_W + (w - SCREEN_W) * z, rh = SCREEN_H + (h - SCREEN_H) * z;
     float fr = SW_FRAME * (w / SW_W) * z;
-    if (z > .02f) gfx_fill_rrect(S.layer, rx, ry, rw, rh, 14 * z, rgb(0xffffff));
     const Image *src = W.full ? W.full(S.sel) : NULL;
     if (!src && W.card) src = W.card(S.sel);
-    if (src) gfx_fade_scaled_nearest(c, S.layer, src, rx + fr, ry + fr, rw - 2 * fr, rh - 2 * fr, 255);
-    else { // no screenshot: grow the card itself
+    if (src) {
+        float sx = rx + fr, sy = ry + fr, sw = rw - 2 * fr, sh = rh - 2 * fr;
+        gfx_fade_scaled_nearest(c, S.layer, src, sx, sy, sw, sh, 255);
+        // The frame goes around the pixels the screenshot covered.
+        if (z > .02f)
+            gfx_fill_rrect_around(c, rx, ry, rw, rh, 14 * z, (int)floorf(sx), (int)floorf(sy),
+                                  (int)ceilf(sx + sw), (int)ceilf(sy + sh), rgb(0xffffff));
+    } else { // no screenshot: grow the card itself
         memcpy(c->px, S.layer->px, (size_t)SCREEN_W * SCREEN_H * 4);
+        if (z > .02f) gfx_fill_rrect(c, rx, ry, rw, rh, 14 * z, rgb(0xffffff));
         const Image *s = sw_sprite(S.sel);
         float kx = rw / SW_W, ky = rh / SW_H;
         if (s) gfx_blit_scaled(c, s, rx - SW_SPRITE_PAD * kx, ry - SW_SPRITE_PAD * ky, s->w * kx, s->h * ky, 255);
