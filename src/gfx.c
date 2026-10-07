@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#endif
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
@@ -328,30 +331,62 @@ void gfx_blit_scaled(Image *dst, const Image *src, float x, float y, float w, fl
     }
 }
 
-void gfx_blit_scaled_nearest(Image *dst, const Image *src, float x, float y, float w, float h, uint8_t alpha)
+// dst = s * a + d * (255 - a), per channel, rounded like over().
+static void lerp_row(uint32_t *dst, const uint32_t *d, const uint32_t *s, int n, uint32_t a)
 {
-    if (w <= 0 || h <= 0) return;
+    int i = 0;
+#ifdef __ARM_NEON
+    uint8x8_t ka = vdup_n_u8((uint8_t)a), kd = vdup_n_u8((uint8_t)(255 - a));
+    for (; i + 4 <= n; i += 4) {
+        uint8x16_t sp = vld1q_u8((const uint8_t *)(s + i)), dp = vld1q_u8((const uint8_t *)(d + i));
+        uint16x8_t lo = vmlal_u8(vmull_u8(vget_low_u8(sp), ka), vget_low_u8(dp), kd);
+        uint16x8_t hi = vmlal_u8(vmull_u8(vget_high_u8(sp), ka), vget_high_u8(dp), kd);
+        uint8x8_t rlo = vrshrn_n_u16(vrsraq_n_u16(lo, lo, 8), 8);
+        uint8x8_t rhi = vrshrn_n_u16(vrsraq_n_u16(hi, hi, 8), 8);
+        vst1q_u8((uint8_t *)(dst + i), vcombine_u8(rlo, rhi));
+    }
+#endif
+    for (; i < n; i++) {
+        uint32_t p = s[i], q = d[i];
+        uint32_t rb = (p & 0x00ff00ffu) * a + (q & 0x00ff00ffu) * (255 - a) + 0x00800080u;
+        rb = ((rb + ((rb >> 8) & 0x00ff00ffu)) >> 8) & 0x00ff00ffu;
+        uint32_t ag = ((p >> 8) & 0x00ff00ffu) * a + ((q >> 8) & 0x00ff00ffu) * (255 - a) + 0x00800080u;
+        ag = (ag + ((ag >> 8) & 0x00ff00ffu)) & 0xff00ff00u;
+        dst[i] = rb | ag;
+    }
+}
+
+void gfx_fade_scaled_nearest(Image *dst, const Image *under, const Image *src,
+                             float x, float y, float w, float h, uint8_t alpha)
+{
     int x0 = (int)floorf(x), y0 = (int)floorf(y), x1 = (int)ceilf(x + w), y1 = (int)ceilf(y + h);
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     if (x1 > dst->w) x1 = dst->w;
     if (y1 > dst->h) y1 = dst->h;
-    if (x1 <= x0 || y1 <= y0) return;
+    if (w <= 0 || h <= 0 || x1 <= x0 || y1 <= y0) x0 = x1 = y0 = y1 = 0;
     float kx = src->w / w, ky = src->h / h;
-    int columns[x1 - x0];
+    int columns[x1 - x0 + 1];
+    uint32_t samples[x1 - x0 + 1];
     for (int xx = x0; xx < x1; xx++) {
         int sx = (int)((xx + .5f - x) * kx);
         columns[xx - x0] = sx < 0 ? 0 : sx >= src->w ? src->w - 1 : sx;
     }
-    for (int yy = y0; yy < y1; yy++) {
-        int sy = (int)((yy + .5f - y) * ky);
-        if (sy < 0 || sy >= src->h) continue;
-        const uint32_t *s = src->px + sy * src->w;
+    // An opaque source makes over(d, s * a) a plain lerp, so gather each row's samples
+    // and blend them against `under` in one pass.
+    for (int yy = 0; yy < dst->h; yy++) {
+        const uint32_t *u = under->px + yy * under->w;
         uint32_t *row = dst->px + yy * dst->w;
-        for (int xx = x0; xx < x1; xx++) {
-            uint32_t p = s[columns[xx - x0]];
-            row[xx] = over(row[xx], alpha == 255 ? p : scale_px(p, alpha));
+        int sy = (int)((yy + .5f - y) * ky);
+        if (yy < y0 || yy >= y1 || sy < 0 || sy >= src->h) {
+            memcpy(row, u, (size_t)dst->w * sizeof *row);
+            continue;
         }
+        const uint32_t *s = src->px + sy * src->w;
+        for (int i = 0; i < x1 - x0; i++) samples[i] = s[columns[i]];
+        memcpy(row, u, (size_t)x0 * sizeof *row);
+        lerp_row(row + x0, u + x0, samples, x1 - x0, alpha);
+        memcpy(row + x1, u + x1, (size_t)(dst->w - x1) * sizeof *row);
     }
 }
 

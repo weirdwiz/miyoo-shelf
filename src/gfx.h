@@ -35,8 +35,10 @@ void gfx_fill_rrect(Image *dst, float x, float y, float w, float h, float r, uin
 void gfx_stroke_rrect(Image *dst, float x, float y, float w, float h, float r, float t, uint32_t c);
 void gfx_blit(Image *dst, const Image *src, int x, int y, uint8_t alpha);
 void gfx_blit_scaled(Image *dst, const Image *src, float x, float y, float w, float h, uint8_t alpha);
-// Nearest-neighbour variant for short, fading motion where filtering is invisible.
-void gfx_blit_scaled_nearest(Image *dst, const Image *src, float x, float y, float w, float h, uint8_t alpha);
+// Writes all of dst: `under` with the opaque `src` faded in over it, nearest-neighbour
+// scaled into (x, y, w, h). For short, fading motion where filtering is invisible.
+void gfx_fade_scaled_nearest(Image *dst, const Image *under, const Image *src,
+                             float x, float y, float w, float h, uint8_t alpha);
 void gfx_mask_a8(Image *dst, const uint8_t *mask, int mw, int mh, int x, int y, uint32_t c);
 // Draw a w x h mask stretched from an mw x mh one: corner x corner blocks stay fixed,
 // edges repeat the middle row/column, and the (empty) interior is skipped.

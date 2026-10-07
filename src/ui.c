@@ -733,10 +733,9 @@ void ui_draw(Image *c)
         gfx_blit(composed, S.caption, 0, CAPTION_Y, 255);
     }
     if (e <= .995f) {
-        memcpy(c->px, S.bg->px, (size_t)SCREEN_W * SCREEN_H * sizeof *c->px);
         float k = .92f + .08f * e, w = SCREEN_W * k, h = SCREEN_H * k;
         float a = e < 0 ? 0 : (e > 1 ? 1 : e);
-        gfx_blit_scaled_nearest(c, S.layer, (SCREEN_W - w) / 2, (SCREEN_H - h) / 2, w, h, (uint8_t)(a * 255));
+        gfx_fade_scaled_nearest(c, S.bg, S.layer, (SCREEN_W - w) / 2, (SCREEN_H - h) / 2, w, h, (uint8_t)(a * 255));
     }
     draw_status(c);
     if (S.launching >= 0) draw_launch(c);

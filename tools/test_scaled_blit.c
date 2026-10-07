@@ -26,6 +26,33 @@ static void reference_blit(Image *dst, const Image *src, float x, float y, float
     }
 }
 
+// The pre-fusion transition: copy `under`, then blend the faded source over it.
+static void reference_fade(Image *dst, const Image *under, const Image *src,
+                           float x, float y, float w, float h, uint8_t alpha)
+{
+    memcpy(dst->px, under->px, (size_t)dst->w * dst->h * 4);
+    if (w <= 0 || h <= 0) return;
+    float kx = src->w / w, ky = src->h / h;
+    for (int yy = 0; yy < dst->h; yy++)
+        for (int xx = 0; xx < dst->w; xx++) {
+            if (xx < floorf(x) || xx >= ceilf(x + w) || yy < floorf(y) || yy >= ceilf(y + h)) continue;
+            int sx = (int)((xx + .5f - x) * kx), sy = (int)((yy + .5f - y) * ky);
+            if (sy < 0 || sy >= src->h) continue;
+            sx = sx < 0 ? 0 : sx >= src->w ? src->w - 1 : sx;
+            uint32_t *d = &dst->px[yy * dst->w + xx];
+            *d = over(*d, scale_px(src->px[sy * src->w + sx], alpha));
+        }
+}
+
+static int channels_close(uint32_t p, uint32_t q)
+{
+    for (int c = 0; c < 32; c += 8) {
+        int d = (int)((p >> c) & 255) - (int)((q >> c) & 255);
+        if (d < -1 || d > 1) return 0;
+    }
+    return 1;
+}
+
 static uint32_t seed = 12345;
 static uint32_t random_word(void) { seed = seed * 1664525u + 1013904223u; return seed; }
 
@@ -63,6 +90,20 @@ int main(void)
         assert(!memcmp(a->px, b->px, (size_t)a->w * a->h * 4));
         img_free(src);
     }
+    // Fused fade: same pixels as copy-then-blend, within one level of rounding.
+    for (int n = 0; n < 300; n++) {
+        Image *under = img_new(a->w, a->h), *src = img_new(1 + random_word() % 90, 1 + random_word() % 70);
+        for (int i = 0; i < under->w * under->h; i++) under->px[i] = random_word() | 0xff000000u;
+        for (int i = 0; i < src->w * src->h; i++) src->px[i] = random_word() | 0xff000000u;
+        float x = (int)(random_word() % 60) - 20 + .37f, y = (int)(random_word() % 50) - 15 + .71f;
+        float w = .1f + random_word() % 100, h = .1f + random_word() % 80;
+        uint8_t alpha = n % 4 == 0 ? 255 : n % 4 == 1 ? 0 : random_word();
+        reference_fade(a, under, src, x, y, w, h, alpha);
+        gfx_fade_scaled_nearest(b, under, src, x, y, w, h, alpha);
+        for (int i = 0; i < a->w * a->h; i++) assert(channels_close(a->px[i], b->px[i]));
+        img_free(under); img_free(src);
+    }
+    puts("fused fade matches copy-then-blend within rounding (300 clipped cases)");
     img_free(a); img_free(b);
     puts("span blit matches blended blit (300 clipped cases)");
 }
