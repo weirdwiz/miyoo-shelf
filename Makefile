@@ -60,14 +60,15 @@ run: sim fixture/SDCARD/Emu
 clean:
 	rm -rf $(BUILD)
 
-# Headless screenshots into docs/screenshots (keys: U D L R A B Y l r).
+# Headless screenshots into docs/screenshots (keys: U D L R A B Y l r s; names ending -dark use the dark theme).
 .PHONY: shots
 shots: sim fixture/SDCARD/Emu
 	@mkdir -p docs/screenshots $(BUILD)/shots
 	@cp fixture/SDCARD/Roms/recentlist.json $(BUILD)/shots/recent.bak
-	@for spec in "1-home:" "2-library:RRRRRR" "3-folder:RRRRRRRAD" "4-after-launch:RRRRRRRRARA"; do \
+	@for spec in "1-home:" "2-library:RRRRRR" "3-folder:RRRRRRRAD" "4-after-launch:RRRRRRRRARA" "5-dark:RRRRRR" "6-options-dark:sD"; do \
 		name=$${spec%%:*}; keys=$${spec#*:}; \
-		SHELF_ROOT=$(CURDIR)/fixture/SDCARD SHELF_FONTS=$(CURDIR)/assets/fonts SHELF_CMD=$(BUILD)/shots/cmd.sh \
+		theme=light; case $$name in *-dark) theme=dark;; esac; \
+		SHELF_THEME=$$theme SHELF_ROOT=$(CURDIR)/fixture/SDCARD SHELF_FONTS=$(CURDIR)/assets/fonts SHELF_CMD=$(BUILD)/shots/cmd.sh \
 		SHELF_SHOT=$(BUILD)/shots/$$name.ppm SHELF_KEYS="$$keys" $(BUILD)/shelf-sim 2>/dev/null; \
 		sips -s format png $(BUILD)/shots/$$name.ppm --out docs/screenshots/$$name.png >/dev/null; \
 	done

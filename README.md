@@ -7,11 +7,17 @@ A DSi/3DS-style home screen for the Miyoo Mini and Mini Plus that runs on top of
 |---|---|---|
 | ![](docs/screenshots/1-home.png) | ![](docs/screenshots/2-library.png) | ![](docs/screenshots/3-folder.png) |
 
+| Dark mode | Options (START) |
+|---|---|
+| ![](docs/screenshots/5-dark.png) | ![](docs/screenshots/6-options-dark.png) |
+
 - **Home row:** recent games first, then library folders (All games, Favorites, one per
   console) at the end of the same row, with springy DS-style scrolling.
 - **Folders:** a 3-row grid that scrolls sideways. Y cycles the sort (A–Z, Recent, Favorites).
 - **Icons:** your existing box art in padded square frames, cached on the SD card.
 - **Sound:** navigation clicks use the active Onion theme's `change.wav`.
+- **Options (START):** dark mode, switching the home screen between Shelf and Onion's menu,
+  and opening Onion's menu once. Saved in `App/Shelf/settings.json`.
 
 **Status:** early. Shelf runs as an Onion app, or can replace Onion's menu so the device
 boots into it and every game returns to it (see [Boot into Shelf](#boot-into-shelf)).
@@ -25,6 +31,7 @@ boots into it and every game returns to it (see [Boot into Shelf](#boot-into-she
 | B | | back |
 | Y | | change sort |
 | L1 / R1 | jump to Recent / Library | first / last game |
+| START | Options | Options |
 | MENU | Onion's menu | Onion's menu |
 
 ## Install
@@ -52,12 +59,14 @@ boots into it and every game returns to it (see [Boot into Shelf](#boot-into-she
 
 ### Boot into Shelf
 
-`MM_HOST=<device-ip> make boot-on` (or `sh /mnt/SDCARD/App/Shelf/boot.sh enable` on the
-device) makes Shelf the menu Onion starts at boot and returns to after every game.
+On the device, open **Apps → Shelf**, press START and pick **Make Shelf the home screen**,
+or over SSH run `MM_HOST=<device-ip> make boot-on` (`boot.sh enable`). Either makes Shelf
+the menu Onion starts at boot and returns to after every game.
 MENU in Shelf opens Onion's own menu; whatever you start from there also comes back to Shelf.
 
 - **Skip once:** hold SELECT while powering on to get stock Onion for that boot.
-- **Undo:** `make boot-off` (`boot.sh disable`), or delete
+- **Undo:** START → **Use Onion's menu instead** in Shelf (Onion's menu opens straight away;
+  Apps → Shelf → START switches back), `make boot-off` (`boot.sh disable`), or delete
   `.tmp_update/startup/shelf.sh` (or the whole `App/Shelf`) from the SD card on a computer.
 
 No Onion file is modified. At boot, `startup/shelf.sh` bind-mounts a small stub over
@@ -108,7 +117,7 @@ make shots    # headless screenshots into docs/screenshots
 ```
 
 Simulator keys: arrows · `Z`/`Space`/`Enter` = A · `X`/`Backspace` = B · `S`/`Y` = Y ·
-`Q`/`W` = L1/R1 · `M` = MENU · `Esc` quits. `SHELF_SCALE=3 make run` enlarges the window.
+`Q`/`W` = L1/R1 · `O` = START · `M` = MENU · `Esc` quits. `SHELF_SCALE=3 make run` enlarges the window.
 Point it at a copy of a real card with
 `SHELF_ROOT=/Volumes/SDCARD SHELF_FONTS=$PWD/assets/fonts SHELF_CMD=/tmp/cmd.sh build/shelf-sim`.
 

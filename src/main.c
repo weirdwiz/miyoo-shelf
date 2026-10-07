@@ -4,18 +4,53 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
+#include "../third_party/cJSON.h"
 #include "icons.h"
 #include "library.h"
 #include "platform.h"
 #include "ui.h"
 
+// Exit codes that ask mainui.sh / launch.sh to run boot.sh after Shelf quits.
+#define EXIT_BOOT_ONION 10 // boot.sh disable
+#define EXIT_BOOT_SHELF 11 // boot.sh enable
+
+// Settings live beside the app: {"dark": true}.
+static void settings_path(char *out, int n) { host_path(SD_PREFIX "/App/Shelf/settings.json", out, n); }
+
+static void settings_load(void)
+{
+    char path[PATH_LEN], buf[256];
+    settings_path(path, sizeof path);
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    size_t len = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[len] = 0;
+    cJSON *j = cJSON_Parse(buf);
+    ui_set_dark(cJSON_IsTrue(cJSON_GetObjectItem(j, "dark")));
+    cJSON_Delete(j);
+}
+
+static void settings_save(void)
+{
+    char path[PATH_LEN], tmp[PATH_LEN + 4];
+    settings_path(path, sizeof path);
+    snprintf(tmp, sizeof tmp, "%s.new", path);
+    FILE *f = fopen(tmp, "wb");
+    if (!f) { fprintf(stderr, "shelf: can't save %s\n", path); return; }
+    fprintf(f, "{\"dark\": %s}\n", ui_dark() ? "true" : "false");
+    if (fclose(f) == 0) rename(tmp, path);
+}
+
 // SHELF_SHOT=out.ppm SHELF_KEYS="RRA..." renders without a window: each key is pressed
-// and given 0.6s of animation, then the final frame is written. Keys: U D L R A B Y l r.
+// and given 0.6s of animation, then the final frame is written. Keys: U D L R A B Y l r s
+// (s = START).
 static int headless(Library *lib, const char *cmd_path, Image *canvas, const char *keys, const char *out)
 {
-    static const char MAP[] = "UDLRABYlr";
-    static const Button BTN[] = {BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_A, BTN_B, BTN_Y, BTN_L, BTN_R};
+    static const char MAP[] = "UDLRABYlrs";
+    static const Button BTN[] = {BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_A, BTN_B, BTN_Y, BTN_L, BTN_R, BTN_START};
     for (const char *k = keys ? keys : ""; ; k++) {
         const char *m = *k ? strchr(MAP, *k) : NULL;
         if (m) ui_button(BTN[m - MAP]);
@@ -25,6 +60,7 @@ static int headless(Library *lib, const char *cmd_path, Image *canvas, const cha
             ui_update(1.f / 60);
             int g = ui_take_launch();
             if (g >= 0) { lib_launch(lib, g, cmd_path); ui_reset_home(); }
+            ui_take_action(); // a screenshot never saves settings or quits
         }
         if (!*k) break;
     }
@@ -58,6 +94,14 @@ int main(int argc, char **argv)
     Library lib;
     if (lib_load(&lib)) return 1;
     fprintf(stderr, "shelf: %d systems, %d games, %d recent\n", lib.nsys, lib.ngames, lib.nrecent);
+
+    // SHELF_THEME=light|dark overrides the saved setting (screenshots).
+    const char *theme = getenv("SHELF_THEME");
+    if (theme) ui_set_dark(!strcmp(theme, "dark"));
+    else settings_load();
+    char hook[PATH_LEN];
+    host_path(SD_PREFIX "/.tmp_update/startup/shelf.sh", hook, sizeof hook);
+    ui_set_boot(access(hook, F_OK) == 0);
 
     icons_init(&lib);
     if (ui_init(&lib, font_dir)) { fprintf(stderr, "shelf: fonts missing in %s\n", font_dir); return 1; }
@@ -116,7 +160,7 @@ int main(int argc, char **argv)
     if (icons_start_worker()) fprintf(stderr, "shelf: icon worker unavailable; loading art per frame\n");
     const double frame = 1.0 / 60;
     double next = platform_now(), last_update = next;
-    int running = 1;
+    int running = 1, status = 0;
     int stats = getenv("SHELF_STATS") != NULL;
     int paced = platform_vsync_paced();
     double stat_t0 = platform_now(), work = 0, worst = 0;
@@ -125,7 +169,7 @@ int main(int argc, char **argv)
     while (running) {
         Button b;
         while ((b = platform_poll()) != BTN_NONE) {
-            if (b == BTN_QUIT || b == BTN_MENU) running = 0; // MENU returns to Onion
+            if (b == BTN_QUIT) running = 0;
             else {
                 ui_button(b);
                 if (ui_take_sound()) platform_click();
@@ -157,6 +201,17 @@ int main(int argc, char **argv)
             }
         }
 
+        switch (ui_take_action()) {
+        case UI_EXIT: running = 0; break; // to Onion's menu
+        case UI_THEME: settings_save(); break;
+        case UI_BOOT_ONION: status = EXIT_BOOT_ONION; running = 0; break;
+        case UI_BOOT_SHELF: status = EXIT_BOOT_SHELF; running = 0; break;
+        }
+        if (status && sim) {
+            fprintf(stderr, "shelf: would run boot.sh %s\n", status == EXIT_BOOT_ONION ? "disable" : "enable");
+            status = 0;
+        }
+
         int g = ui_take_launch();
         if (g >= 0) {
             int launched = lib_launch(&lib, g, cmd_path) == 0;
@@ -182,5 +237,5 @@ int main(int argc, char **argv)
     icons_free();
     lib_free(&lib);
     platform_quit();
-    return 0;
+    return status;
 }

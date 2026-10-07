@@ -18,4 +18,12 @@ int ui_take_sound(void);
 // Call after the library's recents changed: rebuilds the home row with the first item selected.
 void ui_reset_home(void);
 
+// Requests from the Options panel (START) and MENU, taken once each.
+enum { UI_NONE, UI_EXIT, UI_THEME, UI_BOOT_ONION, UI_BOOT_SHELF };
+int ui_take_action(void);
+void ui_set_dark(int dark);   // may be called before ui_init
+int ui_dark(void);
+// Whether Shelf is Onion's home screen; picks the Options row that switches it.
+void ui_set_boot(int on);
+
 #endif

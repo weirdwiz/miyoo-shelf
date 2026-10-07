@@ -65,7 +65,26 @@ int main(int argc, char **argv)
     ui_update(1.f / 60); ui_draw(canvas);
     assert(S.scene_builds == builds);
 
+    // Options: dark mode repaints with the dark palette and asks to be saved; the
+    // panel stays retained while open; MENU and the boot row hand actions to main.
+    uint32_t light_bg = S.scene->px[SCREEN_W * 2 + 2];
+    ui_button(BTN_START); ui_draw(canvas);
+    assert(S.options && ui_take_action() == UI_NONE);
+    ui_button(BTN_A); ui_draw(canvas);
+    assert(ui_dark() && ui_take_action() == UI_THEME);
+    for (int i = 0; i < 5; i++) { ui_update(1.f / 60); ui_draw(canvas); }
+    assert(S.scene->px[SCREEN_W * 2 + 2] != light_bg);
+    builds = S.scene_builds;
+    ui_update(1.f / 60); ui_draw(canvas);
+    assert(S.scene_builds == builds);
+    ui_set_boot(1);
+    ui_button(BTN_DOWN); ui_button(BTN_A);
+    assert(!S.options && ui_take_action() == UI_BOOT_ONION);
+    ui_button(BTN_MENU);
+    assert(ui_take_action() == UI_EXIT);
+    ui_set_dark(0);
+
     ui_free(); img_free(canvas); icons_free(); lib_free(&lib);
-    puts("UI cache: art invalidation, retained scene, cursor animation and navigation passed");
+    puts("UI cache: art invalidation, retained scene, cursor animation, navigation and options passed");
     return 0;
 }

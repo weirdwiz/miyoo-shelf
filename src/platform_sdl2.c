@@ -55,6 +55,7 @@ static Button map_key(SDL_Keycode k)
     case SDLK_q: return BTN_L;
     case SDLK_w: return BTN_R;
     case SDLK_TAB: return BTN_SELECT;
+    case SDLK_o: return BTN_START;
     case SDLK_m: return BTN_MENU;
     case SDLK_ESCAPE: return BTN_QUIT;
     default: return BTN_NONE;

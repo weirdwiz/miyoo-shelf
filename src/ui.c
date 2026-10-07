@@ -9,11 +9,20 @@
 #include "icons.h"
 #include "text.h"
 
-// Palette of the handheld UI (matches the mockups).
-#define C_BG 0xeceff4
-#define C_DOT 0xd3d8e2
-#define C_INK 0x262a35
-#define C_SUB 0x6b7184
+// Palettes of the handheld UI; light matches the mockups.
+typedef struct {
+    uint32_t bg, dot, ink, sub, on_ink, line, dim_dot, key, chip, footer, panel;
+    uint8_t footer_a, shadow_a;
+} Palette;
+static const Palette PALETTES[2] = {
+    {0xeceff4, 0xd3d8e2, 0x262a35, 0x6b7184, 0xffffff, 0xd5dae4, 0xc9cfda, 0x3a3f4d, 0xffffff, 0xffffff, 0xffffff, 190, 38},
+    {0x14171f, 0x222734, 0xe6e9f0, 0x8d94a7, 0x14171f, 0x2f3544, 0x3a4152, 0x4a5163, 0x262b38, 0x1c2029, 0x20242f, 215, 90},
+};
+static const Palette *P = &PALETTES[0];
+#define C_BG (P->bg)
+#define C_DOT (P->dot)
+#define C_INK (P->ink)
+#define C_SUB (P->sub)
 #define C_SEL 0x19a4f0
 #define C_SEL2 0x7fd3ff
 
@@ -93,7 +102,15 @@ static struct {
     Spring launch_scale;
     int launch_ready;
     int sound;               // pending UI click
+
+    int dark;                // palette index
+    int options, osel;       // Options panel open, its selected row
+    int boot;                // Shelf is Onion's home screen (boot hook installed)
+    int action;              // pending UiAction
 } S;
+
+// Options rows, top to bottom.
+enum { O_DARK, O_BOOT, O_ONION, O_COUNT };
 
 static void tiles_free(void);
 
@@ -148,6 +165,7 @@ int ui_init(Library *lib, const char *font_dir)
     for (int i = 0; i < lib->nsys; i++) add_folder(F_SYS, i, lib->sys[i].label, lib->sys[i].color);
 
     S.launching = -1;
+    S.dark = P == &PALETTES[1];
     S.enter.x = S.enter.t = 1;
     for (int i = 0; i < home_count(); i++) S.hscale[i].x = S.hscale[i].t = 1;
     S.track.x = S.track.t = CENTER_X;
@@ -235,8 +253,10 @@ void ui_button(Button b)
 {
     if (S.launching >= 0) return;
     int view = S.view, sel = S.sel, fsel = S.fsel, sort = S.sort;
+    int options = S.options, osel = S.osel, dark = S.dark;
     ui_button_inner(b);
-    if (S.view != view || S.sel != sel || S.fsel != fsel || S.sort != sort || S.launching >= 0)
+    if (S.view != view || S.sel != sel || S.fsel != fsel || S.sort != sort || S.launching >= 0 ||
+        S.options != options || S.osel != osel || S.dark != dark)
         S.sound = 1;
 }
 
@@ -247,9 +267,50 @@ int ui_take_sound(void)
     return s;
 }
 
+int ui_take_action(void)
+{
+    int a = S.action;
+    S.action = UI_NONE;
+    return a;
+}
+
+void ui_set_dark(int dark)
+{
+    P = &PALETTES[dark ? 1 : 0];
+    S.dark = dark ? 1 : 0;
+    if (!S.bg) return; // before ui_init: build_bg picks the palette up
+    img_free(S.bg);
+    build_bg();
+    tiles_free(); // sprites carry the palette's shadow; the footer strip its background
+    S.scene_dirty = 1;
+}
+
+int ui_dark(void) { return S.dark; }
+
+void ui_set_boot(int on) { S.boot = on; }
+
+static void options_button(Button b)
+{
+    if (b == BTN_UP && S.osel > 0) S.osel--;
+    if (b == BTN_DOWN && S.osel < O_COUNT - 1) S.osel++;
+    if (b == BTN_B || b == BTN_START) S.options = 0;
+    int toggle = b == BTN_A || ((b == BTN_LEFT || b == BTN_RIGHT) && S.osel == O_DARK);
+    if (!toggle) return;
+    if (S.osel == O_DARK) {
+        ui_set_dark(!S.dark);
+        S.action = UI_THEME;
+    } else {
+        S.options = 0;
+        S.action = S.osel == O_ONION ? UI_EXIT : S.boot ? UI_BOOT_ONION : UI_BOOT_SHELF;
+    }
+}
+
 static void ui_button_inner(Button b)
 {
     S.scene_dirty = 1;
+    if (S.options) { options_button(b); return; }
+    if (b == BTN_MENU) { S.action = UI_EXIT; return; }
+    if (b == BTN_START) { S.options = 1; S.osel = 0; return; }
     if (S.view == V_HOME) {
         int n = home_count();
         if (b == BTN_LEFT && S.sel > 0) home_select(S.sel - 1);
@@ -381,7 +442,7 @@ static void draw_placeholder(Image *c, const Game *g, float x, float y, float w)
 static void draw_game_raw(Image *c, int gi, float cx, float cy, float w, int big)
 {
     float x = cx - w / 2, y = cy - w / 2;
-    gfx_fill_rrect(c, x + 1, y + 4, w - 2, w - 1, w * .085f, argb(38, 20, 30, 60));
+    gfx_fill_rrect(c, x + 1, y + 4, w - 2, w - 1, w * .085f, argb(P->shadow_a, 20, 30, 60));
     const Image *ic = icon_get(gi, big);
     if (ic) gfx_blit_scaled(c, ic, x, y, w, w, 255);
     else draw_placeholder(c, &S.lib->games[gi], x, y, w);
@@ -390,7 +451,7 @@ static void draw_game_raw(Image *c, int gi, float cx, float cy, float w, int big
 static void draw_folder_raw(Image *c, const Folder *f, float cx, float cy, float w)
 {
     float x = cx - w / 2, y = cy - w / 2, pad = w * .085f, gap = w * .036f, foot = w * .21f;
-    gfx_fill_rrect(c, x + 1, y + 4, w - 2, w - 1, w * .085f, argb(38, 20, 30, 60));
+    gfx_fill_rrect(c, x + 1, y + 4, w - 2, w - 1, w * .085f, argb(P->shadow_a, 20, 30, 60));
     gfx_fill_rrect(c, x, y, w, w, w * .085f, rgb(f->color));
     float cell = (w - 2 * pad - gap) / 2, cellh = (w - pad - foot - gap) / 2;
     if (cellh < cell) cell = cellh;
@@ -515,8 +576,8 @@ static void draw_folder_badge(Image *c, const Folder *f, float cx, float cy, flo
     char n[16];
     snprintf(n, sizeof n, "%d", f->ngames);
     int tw = text_width(S.small, n), bw = tw + 16, bh = font_height(S.small) + 4;
-    gfx_fill_rrect(c, x + w - bw + 10, y - 10, bw, bh, bh / 2.f, rgb(0xffffff));
-    gfx_stroke_rrect(c, x + w - bw + 10, y - 10, bw, bh, bh / 2.f, 1, rgb(0xd5dae4));
+    gfx_fill_rrect(c, x + w - bw + 10, y - 10, bw, bh, bh / 2.f, rgb(P->chip));
+    gfx_stroke_rrect(c, x + w - bw + 10, y - 10, bw, bh, bh / 2.f, 1, rgb(P->line));
     text_draw(c, S.small, n, (int)(x + w - bw + 18), (int)(y - 8), rgb(C_INK));
 }
 
@@ -568,13 +629,13 @@ static void draw_status(Image *c)
 // Face buttons are circles; shoulder and system buttons are pills.
 static void draw_footer_raw(Image *c, int top, const char *const *hints, int n)
 {
-    gfx_fill_rect(c, 0, top, SCREEN_W, FOOTER_H, argb(190, 255, 255, 255));
-    gfx_fill_rect(c, 0, top, SCREEN_W, 1, rgb(0xdde1ea));
+    gfx_fill_rect(c, 0, top, SCREEN_W, FOOTER_H, argb(P->footer_a, P->footer >> 16, P->footer >> 8 & 255, P->footer & 255));
+    gfx_fill_rect(c, 0, top, SCREEN_W, 1, rgb(P->line));
     int th = font_height(S.small), bh = th + 4;
     int x = 14, y = top + (FOOTER_H - bh) / 2;
     for (int i = 0; i < n; i += 2) {
         int bw = hints[i][1] ? text_width(S.small, hints[i]) + 14 : bh;
-        gfx_fill_rrect(c, x, y, bw, bh, bh / 2.f, rgb(0x3a3f4d));
+        gfx_fill_rrect(c, x, y, bw, bh, bh / 2.f, rgb(P->key));
         text_center(c, S.small, hints[i], x + bw / 2, y + 2, rgb(0xffffff), bw);
         x += bw + 7;
         x += text_draw(c, S.small, hints[i + 1], x, y + 2, rgb(C_SUB)) + 18;
@@ -622,7 +683,7 @@ static void draw_home(Image *c)
     float tx = S.track.x, cy = ROW_Y + TILE / 2.f;
     if (L->nrecent) {
         float dx = tx + item_x(L->nrecent - 1) + TILE + (STEP - TILE + DIVIDER_GAP) / 2.f - 2;
-        if (dx > -10 && dx < SCREEN_W + 10) gfx_fill_rrect(c, dx, cy - 60, 4, 120, 2, rgb(0xcfd5df));
+        if (dx > -10 && dx < SCREEN_W + 10) gfx_fill_rrect(c, dx, cy - 60, 4, 120, 2, rgb(P->line));
     }
     for (int pass = 0; pass < 2; pass++) // selected tile last so it sits on top
         for (int i = 0; i < n; i++) {
@@ -638,9 +699,9 @@ static void draw_home(Image *c)
     float dw = 15, x0 = SCREEN_W / 2.f - (n - 1) * dw / 2;
     for (int i = 0; i < n; i++) {
         float s = i == S.sel ? 12 : 8, x = x0 + i * dw - s / 2, y = 362 - s / 2;
-        gfx_fill_rrect(c, x, y, s, s, i < L->nrecent ? s / 2 : 2.5f, rgb(i == S.sel ? C_SEL : 0xc9cfda));
+        gfx_fill_rrect(c, x, y, s, s, i < L->nrecent ? s / 2 : 2.5f, rgb(i == S.sel ? C_SEL : P->dim_dot));
     }
-    const char *const H[] = {"A", inlib ? "Open" : "Play", "L1", "Recent", "R1", "Library", "MENU", "Exit"};
+    const char *const H[] = {"A", inlib ? "Open" : "Play", "L1", "Recent", "R1", "Library", "START", "Options"};
     draw_footer(c, H, 8);
 }
 
@@ -665,12 +726,12 @@ static void draw_folder_view(Image *c)
     for (int i = 2; i >= 0; i--) {
         int w = text_width(S.small, SORTS[i]) + 20;
         x -= w;
-        gfx_fill_rrect(c, x, 46, w, ch, ch / 2.f, rgb(i == S.sort ? C_INK : 0xffffff));
-        text_draw(c, S.small, SORTS[i], x + 10, 50, rgb(i == S.sort ? 0xffffff : C_SUB));
+        gfx_fill_rrect(c, x, 46, w, ch, ch / 2.f, rgb(i == S.sort ? C_INK : P->chip));
+        text_draw(c, S.small, SORTS[i], x + 10, 50, rgb(i == S.sort ? P->on_ink : C_SUB));
         x -= 6;
     }
     int yb = ch - 4;
-    gfx_fill_rrect(c, x - yb, 48, yb, yb, yb / 2.f, rgb(0x3a3f4d));
+    gfx_fill_rrect(c, x - yb, 48, yb, yb, yb / 2.f, rgb(P->key));
     text_center(c, S.small, "Y", x - yb / 2, 50, rgb(0xffffff), yb);
     for (int pass = 0; pass < 2; pass++)
         for (int k = 0; k < S.nfg; k++) {
@@ -683,6 +744,37 @@ static void draw_folder_view(Image *c)
     if (!S.nfg) text_center(c, S.body, "Nothing here yet", SCREEN_W / 2, 220, rgb(C_SUB), SCREEN_W);
     static const char *const H[] = {"A", "Play", "B", "Back", "Y", "Sort", "L1", "First", "R1", "Last"};
     draw_footer(c, H, 10);
+}
+
+// Options sheet over the dimmed view; drawn into the retained scene since it's static.
+static void draw_options(Image *c)
+{
+    gfx_fill_rect(c, 0, 0, SCREEN_W, SCREEN_H - FOOTER_H, argb(S.dark ? 150 : 110, 10, 12, 18));
+    const int w = 452, row = 66, h = 62 + O_COUNT * row + 12;
+    int x = (SCREEN_W - w) / 2, y = (SCREEN_H - FOOTER_H - h) / 2;
+    gfx_fill_rrect(c, x + 2, y + 6, w - 4, h - 2, 18, argb(60, 0, 0, 0));
+    gfx_fill_rrect(c, x, y, w, h, 18, rgb(P->panel));
+    text_draw(c, S.label, "Options", x + 24, y + 20, rgb(C_INK));
+    static const char *const TITLE[O_COUNT] = {"Dark mode", NULL, "Open Onion's menu"};
+    const char *sub[O_COUNT] = {
+        "Easier on the eyes at night",
+        S.boot ? "Shelf comes back from Apps › Shelf" : "Start in Shelf and return to it after games",
+        "Just this once; games still come back here",
+    };
+    for (int i = 0; i < O_COUNT; i++) {
+        int ry = y + 60 + i * row, sel = i == S.osel;
+        if (sel) gfx_fill_rrect(c, x + 10, ry, w - 20, row - 6, 12, rgb(C_SEL));
+        uint32_t ink = sel ? rgb(0xffffff) : rgb(C_INK), sub_ink = sel ? argb(220, 255, 255, 255) : rgb(C_SUB);
+        const char *title = TITLE[i] ? TITLE[i] : S.boot ? "Use Onion's menu instead" : "Make Shelf the home screen";
+        text_draw(c, S.body, title, x + 24, ry + 7, ink);
+        text_draw(c, S.small, sub[i], x + 24, ry + 32, sub_ink);
+        if (i == O_DARK) { // switch
+            float sw = 52, sh = 30, sx = x + w - 24 - sw, sy = ry + (row - 6 - sh) / 2;
+            uint32_t track = S.dark ? (sel ? argb(90, 255, 255, 255) : rgb(C_SEL)) : (sel ? argb(60, 0, 0, 0) : rgb(P->line));
+            gfx_fill_rrect(c, sx, sy, sw, sh, sh / 2, track);
+            gfx_fill_rrect(c, sx + (S.dark ? sw - sh : 0) + 3, sy + 3, sh - 6, sh - 6, (sh - 6) / 2, rgb(0xffffff));
+        }
+    }
 }
 
 static void draw_launch(Image *c)
@@ -711,6 +803,11 @@ void ui_draw(Image *c)
         Image *target = retain ? S.scene : composed;
         memcpy(target->px, S.bg->px, (size_t)SCREEN_W * SCREEN_H * sizeof *c->px);
         if (S.view == V_HOME) draw_home(target); else draw_folder_view(target);
+        if (S.options) {
+            draw_options(target);
+            static const char *const H[] = {"A", "Select", "B", "Close"};
+            draw_footer(target, H, 4);
+        }
         gfx_clear(S.caption, 0);
         if (S.view == V_FOLDER && S.nfg) draw_folder_caption(S.caption, 0);
         S.scene_dirty = !retain;
@@ -720,7 +817,9 @@ void ui_draw(Image *c)
     } else {
         memcpy(composed->px, S.scene->px, (size_t)SCREEN_W * SCREEN_H * sizeof *c->px);
     }
-    if (S.view == V_HOME) {
+    if (S.options) {
+        // The sheet covers the cursor; nothing animates under it.
+    } else if (S.view == V_HOME) {
         float cx = S.track.x + item_x(S.sel) + TILE / 2.f;
         float w = TILE * S.hscale[S.sel].x;
         draw_cursor(composed, cx, ROW_Y + TILE / 2.f, w);
