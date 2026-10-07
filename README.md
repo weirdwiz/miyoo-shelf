@@ -124,3 +124,8 @@ tools/               fixture builder, tests, device helper, artwork and font scr
 - M PLUS Rounded 1c, © 2016 The Rounded M+ Project Authors, SIL Open Font License 1.1
   (`assets/fonts/OFL.txt`)
 - Sample box art in the screenshots from [libretro-thumbnails](https://github.com/libretro-thumbnails)
+
+## License
+
+Shelf is MIT licensed (see `LICENSE`). Bundled third-party code and fonts keep their own
+licenses, listed under Credits.
