@@ -18,6 +18,9 @@ void platform_quit(void);
 // Returns the next button press (including d-pad auto-repeat), BTN_NONE when drained.
 Button platform_poll(void);
 void platform_present(const Image *frame);
+// Nonzero when present waits on vblank (for the previous frame's flip), so the frame
+// loop needn't sleep to pace.
+int platform_vsync_paced(void);
 // Short UI navigation click; a no-op when no sound is available.
 void platform_click(void);
 double platform_now(void); // seconds, monotonic

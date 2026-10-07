@@ -88,6 +88,7 @@ int main(int argc, char **argv)
         }
         icons_start_worker(); // as in the interactive loop: art decodes off the frame
         double t0 = platform_now(), worst_frame = 0;
+        int over = 0;
         for (int i = 0; i < n; i++) {
             double begin = platform_now();
             if (scroll && i % 12 == 0)
@@ -103,9 +104,10 @@ int main(int argc, char **argv)
             ui_draw(canvas);
             double elapsed = platform_now() - begin;
             if (elapsed > worst_frame) worst_frame = elapsed;
+            if (elapsed > .015) over++; // 16.7 ms vblank less ~1.6 ms rotate into fb
         }
-        fprintf(stderr, "shelf: %s benchmark %d frames, %.2f ms/frame, worst %.2f ms\n",
-                scene, n, (platform_now() - t0) * 1000 / n, worst_frame * 1000);
+        fprintf(stderr, "shelf: %s benchmark %d frames, %.2f ms/frame, worst %.2f ms, %d over 15 ms\n",
+                scene, n, (platform_now() - t0) * 1000 / n, worst_frame * 1000, over);
         img_free(canvas); ui_free(); icons_free(); lib_free(&lib);
         return 0;
     }
@@ -116,6 +118,7 @@ int main(int argc, char **argv)
     double next = platform_now(), last_update = next;
     int running = 1;
     int stats = getenv("SHELF_STATS") != NULL;
+    int paced = platform_vsync_paced();
     double stat_t0 = platform_now(), work = 0, worst = 0;
     double draw_work = 0, present_work = 0;
     int frames = 0;
@@ -165,6 +168,9 @@ int main(int argc, char **argv)
                 fprintf(stderr, "shelf: launch failed; staying in Shelf\n");
             }
         }
+        // Present already waits on vblank; sleeping as well would push most frames
+        // past the next one.
+        if (paced) continue;
         next += frame;
         double now = platform_now();
         if (next < now - 0.1) next = now; // fell behind; don't spiral

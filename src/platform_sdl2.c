@@ -31,6 +31,7 @@ int platform_init(void)
 }
 
 void platform_click(void) {} // the simulator stays silent
+int platform_vsync_paced(void) { return 0; } // desktop panels may refresh faster than 60 Hz
 
 void platform_quit(void)
 {

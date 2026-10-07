@@ -3,6 +3,7 @@
 #include <SDL/SDL.h>
 #include <fcntl.h>
 #include <linux/fb.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,11 +20,43 @@ static SDL_Surface *video;
 // Page flipping straight on /dev/fb0, whose virtual height holds two screens. SDL 1.2
 // here only offers the visible page, so drawing there tore mid-scanout; instead each
 // frame goes to the hidden page and FBIOPAN_DISPLAY shows it. SDL still owns input.
+// The pan blocks until vblank, so a flipper thread issues it: the main thread renders
+// the next frame meanwhile and waits only before writing into the page being replaced.
 static int fb = -1;
 static struct fb_var_screeninfo fb_var;
 static unsigned char *fb_mem;
 static size_t fb_len;
 static int fb_pitch, fb_back;
+static pthread_t flipper;
+static pthread_mutex_t flip_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t flip_cond = PTHREAD_COND_INITIALIZER;
+static int flip_pending, flip_quit;
+
+static void *flip_main(void *ud)
+{
+    (void)ud;
+    pthread_mutex_lock(&flip_lock);
+    for (;;) {
+        while (!flip_pending && !flip_quit) pthread_cond_wait(&flip_cond, &flip_lock);
+        if (!flip_pending) break;
+        struct fb_var_screeninfo var = fb_var;
+        pthread_mutex_unlock(&flip_lock);
+        ioctl(fb, FBIOPAN_DISPLAY, &var);
+        pthread_mutex_lock(&flip_lock);
+        flip_pending = 0;
+        pthread_cond_broadcast(&flip_cond);
+    }
+    pthread_mutex_unlock(&flip_lock);
+    return NULL;
+}
+
+// Once this returns the previous flip is on screen and the back page is free.
+static void flip_wait(void)
+{
+    pthread_mutex_lock(&flip_lock);
+    while (flip_pending) pthread_cond_wait(&flip_cond, &flip_lock);
+    pthread_mutex_unlock(&flip_lock);
+}
 
 static void fb_init(void)
 {
@@ -38,7 +71,8 @@ static void fb_init(void)
     fb_mem = mmap(NULL, fb_len, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
     if (fb_mem == MAP_FAILED) { fb_mem = NULL; goto fail; }
     fb_back = fb_var.yoffset >= SCREEN_H ? 0 : 1;
-    return;
+    if (!pthread_create(&flipper, NULL, flip_main, NULL)) return;
+    munmap(fb_mem, fb_len);
 fail:
     fprintf(stderr, "shelf: no fb page flip; drawing to the visible page\n");
     close(fb);
@@ -48,6 +82,11 @@ fail:
 static void fb_quit(void)
 {
     if (fb < 0) return;
+    pthread_mutex_lock(&flip_lock);
+    flip_quit = 1;
+    pthread_cond_broadcast(&flip_cond);
+    pthread_mutex_unlock(&flip_lock);
+    pthread_join(flipper, NULL); // finishes a pending flip first
     // Leave page 0 showing what was last presented: the next app draws there.
     int shown = !fb_back;
     if (shown) memcpy(fb_mem, fb_mem + (size_t)fb_pitch * SCREEN_H, (size_t)fb_pitch * SCREEN_H);
@@ -212,9 +251,13 @@ static void rotate_into(unsigned char *pixels, int pitch, const Image *frame)
 void platform_present(const Image *frame)
 {
     if (fb >= 0) {
+        flip_wait();
         rotate_into(fb_mem + (size_t)fb_pitch * SCREEN_H * fb_back, fb_pitch, frame);
+        pthread_mutex_lock(&flip_lock);
         fb_var.yoffset = SCREEN_H * fb_back;
-        ioctl(fb, FBIOPAN_DISPLAY, &fb_var);
+        flip_pending = 1;
+        pthread_cond_signal(&flip_cond);
+        pthread_mutex_unlock(&flip_lock);
         fb_back = !fb_back;
         return;
     }
@@ -223,6 +266,8 @@ void platform_present(const Image *frame)
     if (SDL_MUSTLOCK(video)) SDL_UnlockSurface(video);
     SDL_Flip(video);
 }
+
+int platform_vsync_paced(void) { return fb >= 0; }
 
 double platform_now(void)
 {
