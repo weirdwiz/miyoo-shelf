@@ -1,15 +1,62 @@
 // Miyoo Mini / Mini Plus: SDL 1.2 with explicit 180-degree panel rotation.
 // Buttons arrive as SDL key events using the stock Miyoo mapping (see Onion's keymap_sw.h).
 #include <SDL/SDL.h>
+#include <fcntl.h>
+#include <linux/fb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "../third_party/cJSON.h"
 #include "platform.h"
 
 static SDL_Surface *video;
+
+// Page flipping straight on /dev/fb0, whose virtual height holds two screens. SDL 1.2
+// here only offers the visible page, so drawing there tore mid-scanout; instead each
+// frame goes to the hidden page and FBIOPAN_DISPLAY shows it. SDL still owns input.
+static int fb = -1;
+static struct fb_var_screeninfo fb_var;
+static unsigned char *fb_mem;
+static size_t fb_len;
+static int fb_pitch, fb_back;
+
+static void fb_init(void)
+{
+    struct fb_fix_screeninfo fix;
+    if (getenv("SHELF_NO_FLIP")) return;
+    if ((fb = open("/dev/fb0", O_RDWR)) < 0) return;
+    if (ioctl(fb, FBIOGET_VSCREENINFO, &fb_var) || ioctl(fb, FBIOGET_FSCREENINFO, &fix) ||
+        fb_var.xres != SCREEN_W || fb_var.yres != SCREEN_H || fb_var.bits_per_pixel != 32 ||
+        fb_var.yres_virtual < 2 * SCREEN_H) goto fail;
+    fb_pitch = fix.line_length;
+    fb_len = (size_t)fb_pitch * 2 * SCREEN_H;
+    fb_mem = mmap(NULL, fb_len, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
+    if (fb_mem == MAP_FAILED) { fb_mem = NULL; goto fail; }
+    fb_back = fb_var.yoffset >= SCREEN_H ? 0 : 1;
+    return;
+fail:
+    fprintf(stderr, "shelf: no fb page flip; drawing to the visible page\n");
+    close(fb);
+    fb = -1;
+}
+
+static void fb_quit(void)
+{
+    if (fb < 0) return;
+    // Leave page 0 showing what was last presented: the next app draws there.
+    int shown = !fb_back;
+    if (shown) memcpy(fb_mem, fb_mem + (size_t)fb_pitch * SCREEN_H, (size_t)fb_pitch * SCREEN_H);
+    fb_var.yoffset = 0;
+    ioctl(fb, FBIOPAN_DISPLAY, &fb_var);
+    munmap(fb_mem, fb_len);
+    close(fb);
+    fb = -1;
+}
 
 static Button held = BTN_NONE;
 static double held_next;
@@ -96,6 +143,7 @@ int platform_init(void)
     SDL_ShowCursor(SDL_DISABLE);
     video = SDL_SetVideoMode(SCREEN_W, SCREEN_H, 32, SDL_HWSURFACE);
     if (!video) { fprintf(stderr, "SDL_SetVideoMode: %s\n", SDL_GetError()); return -1; }
+    fb_init();
     audio_init();
     return 0;
 }
@@ -104,6 +152,7 @@ void platform_quit(void)
 {
     if (audio_ok) SDL_CloseAudio();
     free(click);
+    fb_quit();
     SDL_Quit();
 }
 
@@ -148,17 +197,29 @@ Button platform_poll(void)
     return BTN_NONE;
 }
 
-void platform_present(const Image *frame)
+// The Miyoo panel is mounted upside down. Rotate only presentation, not input
+// or the shared canvas. Respect the row pitch rather than assuming packed rows.
+static void rotate_into(unsigned char *pixels, int pitch, const Image *frame)
 {
-    // The Miyoo panel is mounted upside down. Rotate only presentation, not input
-    // or the shared canvas. Respect SDL's row pitch rather than assuming packed rows.
-    if (SDL_MUSTLOCK(video) && SDL_LockSurface(video) < 0) return;
     for (int y = 0; y < frame->h; y++) {
-        uint32_t *dst = (uint32_t *)((unsigned char *)video->pixels + y * video->pitch);
+        uint32_t *dst = (uint32_t *)(pixels + y * pitch);
         const uint32_t *src = frame->px + (frame->h - 1 - y) * frame->w;
         for (int x = 0; x < frame->w; x++)
             dst[x] = src[frame->w - 1 - x];
     }
+}
+
+void platform_present(const Image *frame)
+{
+    if (fb >= 0) {
+        rotate_into(fb_mem + (size_t)fb_pitch * SCREEN_H * fb_back, fb_pitch, frame);
+        fb_var.yoffset = SCREEN_H * fb_back;
+        ioctl(fb, FBIOPAN_DISPLAY, &fb_var);
+        fb_back = !fb_back;
+        return;
+    }
+    if (SDL_MUSTLOCK(video) && SDL_LockSurface(video) < 0) return;
+    rotate_into(video->pixels, video->pitch, frame);
     if (SDL_MUSTLOCK(video)) SDL_UnlockSurface(video);
     SDL_Flip(video);
 }
