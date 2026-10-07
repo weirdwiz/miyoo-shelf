@@ -1,4 +1,4 @@
-// Square icons framing Onion's Imgs/ art (aspect preserved), cached on the SD card.
+// Square blur-fill icons from Onion's Imgs/ art (whole box, aspect kept), cached on the SD card.
 #ifndef SHELF_ICONS_H
 #define SHELF_ICONS_H
 

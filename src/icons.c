@@ -6,7 +6,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#define CACHE_VERSION 2
+#define CACHE_VERSION 3
 
 typedef struct {
     Image *img[2];   // [0] small, [1] big
@@ -79,21 +79,87 @@ const Image *icon_get(int game, int big)
     return img;
 }
 
-// A square tile is a frame, not a square crop of a portrait poster.
+// Centre crop of src at w:h, zoomed in by `zoom`, resized to w x h.
+static Image *cover(const Image *src, int w, int h, float zoom)
+{
+    float k = ((float)w / src->w > (float)h / src->h ? (float)w / src->w : (float)h / src->h) * zoom;
+    int cw = (int)(w / k), ch = (int)(h / k);
+    if (cw < 1) cw = 1;
+    if (ch < 1) ch = 1;
+    int ox = (src->w - cw) / 2, oy = (src->h - ch) / 2;
+    Image crop = {cw, ch, malloc((size_t)cw * ch * 4)};
+    if (!crop.px) return NULL;
+    for (int y = 0; y < ch; y++) memcpy(crop.px + y * cw, src->px + (oy + y) * src->w + ox, (size_t)cw * 4);
+    Image *out = img_resize(&crop, w, h);
+    free(crop.px);
+    return out;
+}
+
+// One box-blur pass along a row or column (edges clamped). Opaque pixels only.
+static void blur_line(uint32_t *buf, uint32_t *tmp, int n, int stride, int r)
+{
+    for (int i = 0; i < n; i++) tmp[i] = buf[i * stride];
+    int win = 2 * r + 1, sum[3] = {0};
+    for (int i = -r; i <= r; i++) {
+        uint32_t p = tmp[i < 0 ? 0 : (i >= n ? n - 1 : i)];
+        for (int c = 0; c < 3; c++) sum[c] += (p >> (c * 8)) & 255;
+    }
+    for (int i = 0; i < n; i++) {
+        buf[i * stride] = 0xff000000u | (sum[0] / win) | ((sum[1] / win) << 8) | ((sum[2] / win) << 16);
+        int out = i - r, in = i + r + 1;
+        uint32_t po = tmp[out < 0 ? 0 : out], pi = tmp[in >= n ? n - 1 : in];
+        for (int c = 0; c < 3; c++) sum[c] += (int)((pi >> (c * 8)) & 255) - (int)((po >> (c * 8)) & 255);
+    }
+}
+
+// Three box passes approximate a gaussian; then push saturation like the mock's saturate(1.3).
+static void blur_saturate(Image *img, int r)
+{
+    int n = img->w > img->h ? img->w : img->h;
+    uint32_t *tmp = malloc((size_t)n * 4);
+    if (!tmp) return;
+    for (int p = 0; p < 3; p++) {
+        for (int y = 0; y < img->h; y++) blur_line(img->px + y * img->w, tmp, img->w, 1, r);
+        for (int x = 0; x < img->w; x++) blur_line(img->px + x, tmp, img->h, img->w, r);
+    }
+    free(tmp);
+    for (int i = 0; i < img->w * img->h; i++) {
+        uint32_t p = img->px[i];
+        int r8 = (p >> 16) & 255, g8 = (p >> 8) & 255, b8 = p & 255;
+        int l = (r8 * 77 + g8 * 150 + b8 * 29) >> 8, c[3] = {r8, g8, b8};
+        for (int k = 0; k < 3; k++) {
+            int v = l + (c[k] - l) * 13 / 10;
+            c[k] = v < 0 ? 0 : v > 255 ? 255 : v;
+        }
+        img->px[i] = rgb((uint32_t)(c[0] << 16 | c[1] << 8 | c[2]));
+    }
+}
+
+// The mockup's blur fill: the whole box, edge to edge, over a blurred copy of itself, so
+// wide and tall boxes still make a full square and no logo is cut off.
 static Image *art_tile(const Image *src, int size)
 {
-    int inset = (int)(size * .07f + .5f);
-    int available = size - 2 * inset;
-    float k = (float)available / src->w < (float)available / src->h
-            ? (float)available / src->w : (float)available / src->h;
+    // Backdrop at quarter resolution: a cheap, heavy blur (~11% of the tile, as in the mock).
+    int small = size / 4;
+    Image *crop = cover(src, small, small, 1.25f);
+    if (!crop) return NULL;
+    Image *bg = img_new(small, small);
+    if (!bg) { img_free(crop); return NULL; }
+    gfx_clear(bg, rgb(0xcfd4de)); // under transparent art
+    gfx_blit(bg, crop, 0, 0, 255);
+    img_free(crop);
+    blur_saturate(bg, (small + 5) / 10);
+    Image *out = img_resize(bg, size, size);
+    img_free(bg);
+    if (!out) return NULL;
+
+    float k = (float)size / src->w < (float)size / src->h ? (float)size / src->w : (float)size / src->h;
     int fw = (int)(src->w * k + .5f), fh = (int)(src->h * k + .5f);
     Image *fg = img_resize(src, fw, fh);
-    if (!fg) return NULL;
-    Image *out = img_new(size, size);
-    if (!out) { img_free(fg); return NULL; }
-    gfx_clear(out, rgb(0xf8f9fc));
-    gfx_blit(out, fg, (size - fw) / 2, (size - fh) / 2, 255);
-    img_free(fg);
+    if (fg) {
+        gfx_blit(out, fg, (size - fw) / 2, (size - fh) / 2, 255);
+        img_free(fg);
+    }
     img_round(out, size * .085f);
     return out;
 }
