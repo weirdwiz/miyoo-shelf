@@ -13,8 +13,8 @@ A DSi/3DS-style home screen for the Miyoo Mini and Mini Plus that runs on top of
 - **Icons:** your existing box art in padded square frames, cached on the SD card.
 - **Sound:** navigation clicks use the active Onion theme's `change.wav`.
 
-**Status:** early. Shelf runs as an Onion app: picking a game hands it to Onion, which runs
-it and then returns to Onion's own menu. Replacing Onion's menu is planned but not built.
+**Status:** early. Shelf runs as an Onion app, or can replace Onion's menu so the device
+boots into it and every game returns to it (see [Boot into Shelf](#boot-into-shelf)).
 
 ## Controls
 
@@ -25,7 +25,7 @@ it and then returns to Onion's own menu. Replacing Onion's menu is planned but n
 | B | | back |
 | Y | | change sort |
 | L1 / R1 | jump to Recent / Library | first / last game |
-| MENU | exit to Onion | exit to Onion |
+| MENU | Onion's menu | Onion's menu |
 
 ## Install
 
@@ -42,11 +42,29 @@ it and then returns to Onion's own menu. Replacing Onion's menu is planned but n
    App/Shelf/launch.sh      assets/app/launch.sh
    App/Shelf/config.json    assets/app/config.json
    App/Shelf/fonts/         assets/fonts/*.ttf
+   App/Shelf/boot.sh        assets/app/boot.sh
+   App/Shelf/mainui.sh      assets/app/mainui.sh
    ```
 
    Or over Wi-Fi with Onion's SSH enabled: `MM_HOST=<device-ip> make push`.
 
 3. On the device open **Apps → Shelf**. `MM_HOST=<device-ip> make log` shows the last log.
+
+### Boot into Shelf
+
+`MM_HOST=<device-ip> make boot-on` (or `sh /mnt/SDCARD/App/Shelf/boot.sh enable` on the
+device) makes Shelf the menu Onion starts at boot and returns to after every game.
+MENU in Shelf opens Onion's own menu; whatever you start from there also comes back to Shelf.
+
+- **Skip once:** hold SELECT while powering on to get stock Onion for that boot.
+- **Undo:** `make boot-off` (`boot.sh disable`), or delete
+  `.tmp_update/startup/shelf.sh` (or the whole `App/Shelf`) from the SD card on a computer.
+
+No Onion file is modified. At boot, `startup/shelf.sh` bind-mounts a small stub over
+`miyoo/app/MainUI`, named like the `MainUI-<model>-<mode>` binary Onion would mount there, so
+Onion's runtime keeps it. The stub starts `mainui.sh`, which runs Shelf and falls back to
+Onion's menu if Shelf exits without a game or fails. The mount doesn't survive a reboot. If you
+switch Onion's expert/clean mode, Onion mounts its own menu again until the next boot.
 
 ## How it fits into Onion
 
@@ -58,6 +76,7 @@ Shelf is a separate app, not a fork. It only uses Onion's files:
 | `Roms/<SYS>/Imgs/<rom>.png` | box art (Onion's scraper output); Shelf never downloads art |
 | `Roms/recentlist.json`, `recentlist-hidden.json`, `favourite.json` | recents and favorites, written in MainUI's format |
 | `.tmp_update/cmd_to_run.sh` | the game command, in MainUI's exact layout |
+| `.tmp_update/startup/` | optional boot hook that puts Shelf in MainUI's place |
 
 When you pick a game, Shelf writes the command and exits. `launch.sh` swaps it in as
 Onion's next command (by rename, since Onion's shell is still reading the old one) and
@@ -112,7 +131,7 @@ src/icons.c          art tiles, SD cache, background loader
 src/gfx.c, text.c    software canvas, stb_truetype text
 src/platform_mm.c    Miyoo: SDL 1.2 display (180° panel), buttons, click sound
 src/platform_sdl2.c  simulator window and keyboard
-assets/app/          Onion app files (launch.sh, config.json)
+assets/app/          Onion app files (launch.sh, config.json) and the boot hook (boot.sh, mainui.sh)
 tools/               fixture builder, tests, device helper, artwork and font scripts
 ```
 

@@ -5,6 +5,7 @@
 #   make mm        cross-compile for the Miyoo in Onion's toolchain (podman or docker)
 #   make push      copy the build to the device over SSH: MM_HOST=<device-ip> make push
 #   make log       show the device log from the last run
+#   make boot-on   boot the device into Shelf instead of Onion's menu (boot-off undoes it)
 #   make clean
 
 CC ?= cc
@@ -17,7 +18,7 @@ SIM_SRC := $(CORE_SRC) src/platform_sdl2.c
 SDL_CFLAGS = $(shell sdl2-config --cflags)
 SDL_LIBS = $(shell sdl2-config --libs)
 
-.PHONY: sim run fixture clean mm mm-inner push log test
+.PHONY: sim run fixture clean mm mm-inner push log test boot-on boot-off
 
 test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUILD)/test-ui-cache fixture/SDCARD/Emu
 	$(BUILD)/test-library
@@ -99,8 +100,15 @@ push: $(MM_BUILD)/shelf
 	@for f in assets/fonts/*.ttf; do \
 		tools/mm.sh "[ -f $(APP_DIR)/fonts/$$(basename $$f) ] || cat > $(APP_DIR)/fonts/$$(basename $$f)" < $$f; done
 	tools/mm.sh 'cat > $(APP_DIR)/config.json' < assets/app/config.json
-	tools/mm.sh 'cat > $(APP_DIR)/launch.sh && chmod +x $(APP_DIR)/launch.sh' < assets/app/launch.sh
+	@for f in launch.sh boot.sh mainui.sh; do \
+		tools/mm.sh "cat > $(APP_DIR)/$$f && chmod +x $(APP_DIR)/$$f" < assets/app/$$f; done
 	@echo "pushed: open Apps > Shelf on the device. Log: make log"
+
+boot-on:
+	tools/mm.sh 'sh $(APP_DIR)/boot.sh enable'
+
+boot-off:
+	tools/mm.sh 'sh $(APP_DIR)/boot.sh disable'
 
 log:
 	tools/mm.sh 'cat /tmp/shelf.log; [ -f /tmp/shelf_cmd.sh ] && echo "--- last command:" && cat /tmp/shelf_cmd.sh'
