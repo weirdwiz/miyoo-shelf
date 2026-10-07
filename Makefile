@@ -13,19 +13,24 @@ CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers
 BUILD := build
 
-CORE_SRC := src/main.c src/gfx.c src/text.c src/library.c src/icons.c src/ui.c src/activity.c src/switcher.c third_party/cJSON.c
+CORE_SRC := src/main.c src/loop.c src/gfx.c src/text.c src/library.c src/icons.c src/ui.c src/activity.c src/switcher.c third_party/cJSON.c
 SIM_SRC := $(CORE_SRC) src/platform_sdl2.c
 SDL_CFLAGS = $(shell sdl2-config --cflags)
 SDL_LIBS = $(shell sdl2-config --libs)
 
 .PHONY: sim run fixture clean mm mm-inner push log test boot-on boot-off
 
-test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUILD)/test-ui-cache $(BUILD)/test-switcher fixture/SDCARD/Emu
+test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUILD)/test-ui-cache $(BUILD)/test-switcher $(BUILD)/test-loop fixture/SDCARD/Emu
 	$(BUILD)/test-library
 	$(BUILD)/test-switcher "$(CURDIR)/fixture/SDCARD"
 	$(BUILD)/test-rrect
 	$(BUILD)/test-scaled-blit
 	$(BUILD)/test-ui-cache "$(CURDIR)/fixture/SDCARD" "$(CURDIR)/assets/fonts"
+	$(BUILD)/test-loop "$(CURDIR)/fixture/SDCARD" "$(CURDIR)/assets/fonts"
+
+$(BUILD)/test-loop: tools/test_loop.c src/loop.c src/ui.c src/icons.c src/library.c src/text.c src/gfx.c $(wildcard src/*.h)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tools/test_loop.c src/loop.c src/ui.c src/icons.c src/library.c src/text.c src/gfx.c third_party/cJSON.c -lm -lpthread
 
 $(BUILD)/test-library: tools/test_library.c src/library.c src/library.h third_party/cJSON.c third_party/cJSON.h
 	@mkdir -p $(BUILD)

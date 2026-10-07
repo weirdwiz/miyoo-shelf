@@ -16,6 +16,10 @@ uint32_t sw_hash(const char *s);
 // Host path of the screenshot Onion keeps for a rompath (may not exist).
 void sw_screen_path(const char *rompath, char *out, int n);
 
+// Called from background threads when a save finishes or a screenshot loads (wakes an
+// idle frame loop).
+void sw_set_notify(void (*fn)(void));
+
 // Overlay start: stop play-time tracking, pause RetroArch and check that it's running the
 // first recent. If so, save `frame` as that game's screenshot and autosave its state on a
 // background thread. Returns 1 when the game is running (and so can be resumed).

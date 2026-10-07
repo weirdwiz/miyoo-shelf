@@ -13,6 +13,7 @@
 #include "activity.h"
 #include "icons.h"
 #include "library.h"
+#include "loop.h"
 #include "platform.h"
 #include "switcher.h"
 #include "ui.h"
@@ -180,6 +181,41 @@ static void exec_onion_switcher(char **argv)
     execv(ONION, argv);
 }
 
+/* ---------- frame loop screens (see loop.h) ---------- */
+
+static void screen_button(void *ud, Button b)
+{
+    ui_button(b);
+    if (ui_take_sound()) platform_click();
+}
+static LoopIO loop_platform(void)
+{
+    return (LoopIO){platform_now, platform_poll, platform_wait, platform_present, platform_vsync_paced()};
+}
+
+static void screen_update(void *ud, float dt) { ui_update(dt); }
+static double screen_idle(void *ud) { return ui_idle(); }
+static void screen_draw(void *ud, Image *canvas) { ui_draw(canvas); }
+
+typedef struct {
+    int sim, running, toast;
+    double next_status;
+} SwitcherLoop;
+
+static double switcher_tick(void *ud, double now)
+{
+    SwitcherLoop *l = ud;
+    if (now >= l->next_status) { status_poll(l->sim); l->next_status = now + 5; }
+    icons_trim();
+    int save = l->running ? sw_save_state() : SW_SAVE_NONE;
+    int t = save == SW_SAVE_BUSY ? SW_TOAST_SAVING : save == SW_SAVE_DONE ? SW_TOAST_SAVED
+          : save == SW_SAVE_FAILED ? SW_TOAST_FAILED : SW_TOAST_NONE;
+    if (t != l->toast) ui_switch_saving(l->toast = t);
+    return l->next_status;
+}
+
+static int switcher_after(void *ud) { return ui_take_action(); }
+
 static int switcher_main(int overlay, int sim, const char *font_dir, char **argv)
 {
     static Recent rec[MAX_RECENT];
@@ -286,28 +322,14 @@ static int switcher_main(int overlay, int sim, const char *font_dir, char **argv
     fprintf(stderr, "shelf: switcher up in %.0f ms (%d recents, %s)\n", (platform_now() - t0) * 1000,
             lib.ngames, running ? "game paused" : overlay ? "no game running" : "menu");
 
-    double last = platform_now(), next_status = last + 5;
-    int action = UI_NONE, toast = SW_TOAST_NONE;
-    while (action == UI_NONE) {
-        Button b;
-        while ((b = platform_poll()) != BTN_NONE) {
-            ui_button(b);
-            if (ui_take_sound()) platform_click();
-        }
-        if (platform_now() >= next_status) { status_poll(sim); next_status = platform_now() + 5; }
-        int save = running ? sw_save_state() : SW_SAVE_NONE;
-        int t = save == SW_SAVE_BUSY ? SW_TOAST_SAVING : save == SW_SAVE_DONE ? SW_TOAST_SAVED
-              : save == SW_SAVE_FAILED ? SW_TOAST_FAILED : SW_TOAST_NONE;
-        if (t != toast) ui_switch_saving(toast = t);
-        double now = platform_now();
-        float dt = (float)(now - last);
-        last = now;
-        ui_update(dt > .1f ? .1f : dt);
-        ui_draw(canvas);
-        platform_present(canvas);
-        action = ui_take_action();
-        if (!platform_vsync_paced()) platform_sleep_until(now + 1.0 / 60);
-    }
+    SwitcherLoop sl = {sim, running, SW_TOAST_NONE, platform_now() + 5};
+    LoopScreen screen = {&sl, screen_button, switcher_tick, screen_update, screen_idle, screen_draw, switcher_after};
+    LoopIO io = loop_platform();
+    sw_set_notify(platform_wake);
+    icons_set_notify(platform_wake);
+    int action = loop_run(&io, &screen, canvas, NULL);
+    sw_set_notify(NULL);
+    icons_set_notify(NULL);
 
     int target = ui_switch_target();
     fprintf(stderr, "shelf: switcher %s %s\n", action == UI_SW_RESUME ? "resume" : action == UI_SW_PLAY ? "play" : "home",
@@ -343,6 +365,90 @@ static int switcher_main(int overlay, int sim, const char *font_dir, char **argv
     img_free(frame);
     lib_free(&lib);
     return 0;
+}
+
+typedef struct {
+    Library *lib;
+    const char *cmd_path;
+    int sim, status;
+    double next_status;
+} HomeLoop;
+
+static void home_button(void *ud, Button b)
+{
+    if (b == BTN_QUIT) ((HomeLoop *)ud)->status = -1;
+    else screen_button(ud, b);
+}
+
+static double home_tick(void *ud, double now)
+{
+    HomeLoop *l = ud;
+    if (now >= l->next_status) { status_poll(l->sim); l->next_status = now + 5; }
+    icons_pump(2); // only without the worker; new art makes ui_idle draw
+    icons_trim();
+    return l->next_status;
+}
+
+// Returns nonzero to leave Shelf, with l->status as the exit code.
+static int home_after(void *ud)
+{
+    HomeLoop *l = ud;
+    if (l->status < 0) { l->status = 0; return 1; } // window closed
+    switch (ui_take_action()) {
+    case UI_EXIT: return 1; // to Onion's menu
+    case UI_THEME: settings_save(); break;
+    case UI_BOOT_ONION: l->status = EXIT_BOOT_ONION; break;
+    case UI_BOOT_SHELF: l->status = EXIT_BOOT_SHELF; break;
+    }
+    if (l->status && l->sim) {
+        fprintf(stderr, "shelf: would run boot.sh %s\n", l->status == EXIT_BOOT_ONION ? "disable" : "enable");
+        l->status = 0;
+    }
+    if (l->status) return 1;
+    int g = ui_take_launch();
+    if (g >= 0) {
+        int launched = lib_launch(l->lib, g, l->cmd_path) == 0;
+        ui_reset_home();
+        if (launched) {
+            fprintf(stderr, "shelf: launch -> %s\n", l->cmd_path);
+            if (!l->sim) return 1; // on the device Onion takes over from here
+        } else {
+            fprintf(stderr, "shelf: launch failed; staying in Shelf\n");
+        }
+    }
+    return 0;
+}
+
+// SHELF_STATS: draw and present times, frames and idle waits, every 120 frames.
+static struct {
+    double t0, draw, present, worst;
+    int frames;
+    LoopStats loop;
+} stats;
+
+static void stats_draw(void *ud, Image *canvas)
+{
+    double t = platform_now();
+    ui_draw(canvas);
+    double d = platform_now() - t;
+    stats.draw += d;
+    if (d > stats.worst) stats.worst = d;
+}
+
+static void stats_present(const Image *frame)
+{
+    double t = platform_now();
+    platform_present(frame);
+    stats.present += platform_now() - t;
+    if (++stats.frames < 120) return;
+    double el = t - stats.t0;
+    fprintf(stderr, "shelf: %d frames in %.1f s, %u idle waits; render %.2f ms (worst %.1f), present %.2f ms\n",
+            stats.frames, el, stats.loop.waits, stats.draw * 1000 / stats.frames, stats.worst * 1000,
+            stats.present * 1000 / stats.frames);
+    stats.frames = 0;
+    stats.loop.waits = 0;
+    stats.draw = stats.present = stats.worst = 0;
+    stats.t0 = platform_now();
 }
 
 int main(int argc, char **argv)
@@ -435,81 +541,18 @@ int main(int argc, char **argv)
 
     if (platform_init()) return 1;
     if (icons_start_worker()) fprintf(stderr, "shelf: icon worker unavailable; loading art per frame\n");
-    const double frame = 1.0 / 60;
-    double next = platform_now(), last_update = next;
-    int running = 1, status = 0;
-    int stats = getenv("SHELF_STATS") != NULL;
-    int paced = platform_vsync_paced();
-    double stat_t0 = platform_now(), work = 0, worst = 0;
-    double draw_work = 0, present_work = 0;
-    int frames = 0;
-    double next_status = platform_now() + 5;
-    while (running) {
-        if (platform_now() >= next_status) { status_poll(sim); next_status = platform_now() + 5; }
-        Button b;
-        while ((b = platform_poll()) != BTN_NONE) {
-            if (b == BTN_QUIT) running = 0;
-            else {
-                ui_button(b);
-                if (ui_take_sound()) platform_click();
-            }
-        }
-        double t0 = platform_now();
-        icons_pump(2);
-        double update_now = platform_now();
-        float dt = (float)(update_now - last_update);
-        last_update = update_now;
-        if (dt > .1f) dt = .1f; // bound catch-up after a long stall
-        ui_update(dt);
-        ui_draw(canvas);
-        double drawn = platform_now();
-        platform_present(canvas);
-        if (stats) {
-            draw_work += drawn - t0;
-            present_work += platform_now() - drawn;
-            double w = platform_now() - t0;
-            work += w;
-            if (w > worst) worst = w;
-            if (++frames == 120) {
-                double el = platform_now() - stat_t0;
-                fprintf(stderr, "shelf: %.1f fps, frame work avg %.1f ms, worst %.1f ms\n",
-                        frames / el, work / frames * 1000, worst * 1000);
-                fprintf(stderr, "shelf: render %.2f ms, present %.2f ms\n",
-                        draw_work * 1000 / frames, present_work * 1000 / frames);
-                frames = 0; work = worst = draw_work = present_work = 0; stat_t0 = platform_now();
-            }
-        }
-
-        switch (ui_take_action()) {
-        case UI_EXIT: running = 0; break; // to Onion's menu
-        case UI_THEME: settings_save(); break;
-        case UI_BOOT_ONION: status = EXIT_BOOT_ONION; running = 0; break;
-        case UI_BOOT_SHELF: status = EXIT_BOOT_SHELF; running = 0; break;
-        }
-        if (status && sim) {
-            fprintf(stderr, "shelf: would run boot.sh %s\n", status == EXIT_BOOT_ONION ? "disable" : "enable");
-            status = 0;
-        }
-
-        int g = ui_take_launch();
-        if (g >= 0) {
-            int launched = lib_launch(&lib, g, cmd_path) == 0;
-            ui_reset_home();
-            if (launched) {
-                fprintf(stderr, "shelf: launch -> %s\n", cmd_path);
-                if (!sim) running = 0; // on the device Onion takes over from here
-            } else {
-                fprintf(stderr, "shelf: launch failed; staying in Shelf\n");
-            }
-        }
-        // Present already waits on vblank; sleeping as well would push most frames
-        // past the next one.
-        if (paced) continue;
-        next += frame;
-        double now = platform_now();
-        if (next < now - 0.1) next = now; // fell behind; don't spiral
-        platform_sleep_until(next);
+    HomeLoop hl = {&lib, cmd_path, sim, 0, platform_now() + 5};
+    LoopScreen screen = {&hl, home_button, home_tick, screen_update, screen_idle, screen_draw, home_after};
+    LoopIO io = loop_platform();
+    if (getenv("SHELF_STATS")) {
+        stats.t0 = platform_now();
+        screen.draw = stats_draw;
+        io.present = stats_present;
     }
+    icons_set_notify(platform_wake);
+    loop_run(&io, &screen, canvas, &stats.loop);
+    icons_set_notify(NULL);
+    int status = hl.status;
 
     img_free(canvas);
     ui_free();

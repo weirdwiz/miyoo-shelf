@@ -84,7 +84,30 @@ int main(int argc, char **argv)
     assert(ui_take_action() == UI_EXIT);
     ui_set_dark(0);
 
+    // Decoded icons stay within budget across a long browse: everything in "All games",
+    // trimmed between frames as the loop does, without dangling sprites or lost art.
+    size_t budget = (size_t)ICON_BIG * ICON_BIG * 4 * 2;
+    icons_set_budget(budget);
+    ui_button(BTN_START); ui_button(BTN_B); // close any sheet
+    ui_reset_home();
+    ui_button(BTN_R); ui_button(BTN_A);
+    assert(S.view == V_FOLDER && S.nfg == lib.ngames);
+    for (int step = 0; step < 3 * lib.ngames; step++) {
+        ui_button(step < lib.ngames ? BTN_DOWN : BTN_UP);
+        if (step % 3 == 2) ui_button(step < lib.ngames ? BTN_RIGHT : BTN_LEFT);
+        for (int f = 0; f < 4; f++) {
+            icons_trim();
+            ui_update(1.f / 60); ui_draw(canvas);
+            while (icons_pump(64)) {}
+        }
+        // Over budget only by what the last frame drew: a grid of small tiles and the panel.
+        assert(icons_bytes() <= budget + (size_t)ICON_SMALL * ICON_SMALL * 4 * 16 + (size_t)ICON_BIG * ICON_BIG * 4);
+    }
+    for (int f = 0; f < 4; f++) { icons_trim(); ui_update(1.f / 60); ui_draw(canvas); while (icons_pump(64)) {} }
+    assert(icon_get(S.fgames[S.fsel], 1)); // the panel's art came back after eviction
+    icons_set_budget(0);
+
     ui_free(); img_free(canvas); icons_free(); lib_free(&lib);
-    puts("UI cache: art invalidation, retained scene, cursor animation, navigation and options passed");
+    puts("UI cache: art invalidation, retained scene, cursor animation, navigation, options and icon budget passed");
     return 0;
 }

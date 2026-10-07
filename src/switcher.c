@@ -81,6 +81,10 @@ static int ra_command(const char *cmd, char *reply, int n, int timeout_ms)
 
 /* ---------- overlay: save, resume, quit ---------- */
 
+static void (*notify)(void);
+
+void sw_set_notify(void (*fn)(void)) { notify = fn; }
+
 static pthread_t saver;
 static pthread_mutex_t save_lock = PTHREAD_MUTEX_INITIALIZER;
 static int save_state, saver_started;
@@ -116,6 +120,7 @@ static void *save_main(void *ud)
     pthread_mutex_lock(&save_lock);
     save_state = ok ? SW_SAVE_DONE : SW_SAVE_FAILED;
     pthread_mutex_unlock(&save_lock);
+    if (notify) notify();
     return NULL;
 }
 
@@ -227,10 +232,14 @@ static Image *card_from(const Image *full)
     return out;
 }
 
+// Cards this far either side of the selection are loaded: the row shows one each side,
+// so the next two are ready before they scroll in. The rest load as the selection nears.
+#define CARD_REACH 3
+
 // Next job: the selection first (card and full size), then cards outward from it.
 static int next_job(int *want_full)
 {
-    for (int d = 0; d < C.n; d++)
+    for (int d = 0; d < C.n && d <= CARD_REACH; d++)
         for (int s = -1; s <= 1; s += 2) {
             int i = C.sel + d * s;
             if (i < 0 || i >= C.n || (d == 0 && s > 0)) continue;
@@ -275,9 +284,11 @@ static void *cards_main(void *ud)
                 kept--;
             }
         } else if (full) C.tried[i] = 1;
-        if (card || C.full[i]) C.revision++;
+        int changed = card || C.full[i];
+        if (changed) C.revision++;
         pthread_mutex_unlock(&C.lock);
         img_free(full);
+        if (changed && notify) notify();
         pthread_mutex_lock(&C.lock);
     }
     pthread_mutex_unlock(&C.lock);

@@ -66,6 +66,12 @@ static void spring_step(Spring *s, float dt, float k, float c)
 #define BOUNCE 320.f, 22.f
 #define SNAPPY 500.f, 40.f
 
+// The selection cursor pulses while the user is around, then rests. It runs whole cycles
+// from and back to the rest colour, so starting and stopping never jumps.
+#define PULSE_RATE 5.7f   // radians per second
+#define PULSE_FOR 6.f     // seconds of pulsing after the last button
+#define PULSE_PERIOD (6.2831853f / PULSE_RATE)
+
 enum { F_ALL, F_FAV, F_SYS };
 typedef struct {
     int kind, sys;
@@ -87,7 +93,10 @@ static struct {
     int nfolders;
 
     int view;
-    float t;                 // seconds since start, drives the cursor pulse
+    float pulse, pulse_end;  // cursor pulse clock; it stops (at rest colour) at pulse_end
+    int redraw;              // the next ui_draw would differ from the last one
+    long drawn_minute;       // status clock minute, art and card revisions last drawn
+    unsigned drawn_art, drawn_cards;
     Spring enter;            // view transition 0..1
 
     int sel;                 // home row selection
@@ -99,6 +108,9 @@ static struct {
     int *fgames, nfg;
     Spring ftrack;
     Spring *fscale;
+    // Folder tiles whose zoom spring may be moving (only selection changes move them);
+    // when it overflows, every spring is stepped until all settle.
+    int factive[32], nfactive, fall;
 
     int launching;           // game index, -1 when idle
     float launch_t;
@@ -117,6 +129,7 @@ static struct {
 enum { O_DARK, O_BOOT, O_ONION, O_COUNT };
 
 static void tiles_free(void);
+static void status_free(void);
 // The game switcher view, at the end of this file.
 static int sw_on(void);
 static void sw_button(Button b);
@@ -125,6 +138,28 @@ static void sw_draw(Image *c);
 static void sw_free(void);
 
 static int home_count(void) { return S.lib->nrecent + S.nfolders; }
+
+static void pulse_wake(void)
+{
+    if (S.pulse >= S.pulse_end) S.pulse = 0;
+    S.pulse_end = ceilf((S.pulse + PULSE_FOR) / PULSE_PERIOD) * PULSE_PERIOD;
+}
+
+// 0 at rest (C_SEL) .. 1 (C_SEL2).
+static float pulse_level(void)
+{
+    return S.pulse >= S.pulse_end ? 0 : .5f - .5f * cosf(S.pulse * PULSE_RATE);
+}
+
+// Wall-clock seconds, for the status clock; tests substitute their own.
+static double wall_real(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+static double (*wall)(void) = wall_real;
+void ui_set_wall_clock(double (*now)(void)) { wall = now ? now : wall_real; }
 
 static void add_folder(int kind, int sys, const char *label, uint32_t color)
 {
@@ -179,6 +214,8 @@ int ui_init(Library *lib, const char *font_dir)
     S.enter.x = S.enter.t = 1;
     for (int i = 0; i < home_count(); i++) S.hscale[i].x = S.hscale[i].t = 1;
     S.track.x = S.track.t = CENTER_X;
+    S.redraw = 1;
+    pulse_wake();
     return 0;
 }
 
@@ -192,6 +229,7 @@ void ui_free(void)
     img_free(S.layer);
     img_free(S.scene);
     tiles_free();
+    status_free();
     font_free(S.title); font_free(S.body); font_free(S.small); font_free(S.label);
 }
 
@@ -218,9 +256,17 @@ static int cmp_fg(const void *a, const void *b)
     return *(const int *)a - *(const int *)b; // library is already A–Z
 }
 
+static void factive_add(int k)
+{
+    for (int i = 0; i < S.nfactive; i++) if (S.factive[i] == k) return;
+    if (S.nfactive < (int)(sizeof S.factive / sizeof *S.factive)) S.factive[S.nfactive++] = k;
+    else S.fall = 1;
+}
+
 static void folder_select(int i)
 {
     const Grid *g = S.grid;
+    if (S.fsel < S.nfg) { S.fscale[S.fsel].t = 1.f; factive_add(S.fsel); }
     S.fsel = i;
     int col = i / g->rows, cols = (S.nfg + g->rows - 1) / g->rows;
     if (col < S.fcol) S.fcol = col;
@@ -228,7 +274,7 @@ static void folder_select(int i)
     if (S.fcol > cols - g->vis) S.fcol = cols - g->vis;
     if (S.fcol < 0) S.fcol = 0;
     S.ftrack.t = G_X - S.fcol * g->col;
-    for (int k = 0; k < S.nfg; k++) S.fscale[k].t = k == i ? 1.1f : 1.f;
+    if (i < S.nfg) { S.fscale[i].t = 1.1f; factive_add(i); }
 }
 
 static void folder_open(int f)
@@ -246,6 +292,8 @@ static void folder_open(int f)
     qsort(S.fgames, S.nfg, sizeof(int), cmp_fg);
     S.fscale = calloc(S.nfg ? S.nfg : 1, sizeof(Spring));
     for (int k = 0; k < S.nfg; k++) S.fscale[k].x = S.fscale[k].t = 1;
+    S.nfactive = S.fall = 0;
+    S.fsel = 0;
     S.fcol = 0;
     S.ftrack.x = S.ftrack.t = G_X;
     folder_select(0);
@@ -263,6 +311,8 @@ static void ui_button_inner(Button b);
 
 void ui_button(Button b)
 {
+    S.redraw = 1;
+    pulse_wake();
     if (sw_on()) {
         int sel = S.sel;
         sw_button(b);
@@ -300,7 +350,7 @@ void ui_set_dark(int dark)
     img_free(S.bg);
     build_bg();
     tiles_free(); // sprites carry the palette's shadow; the footer strip its background
-    S.scene_dirty = 1;
+    S.scene_dirty = S.redraw = 1;
 }
 
 int ui_dark(void) { return S.dark; }
@@ -309,6 +359,7 @@ void ui_set_boot(int on) { S.boot = on; }
 
 void ui_set_status(int battery, int charging, int wifi)
 {
+    if (S.battery != battery || S.charging != charging || S.wifi != wifi) S.redraw = 1;
     S.battery = battery;
     S.charging = charging;
     S.wifi = wifi;
@@ -372,7 +423,8 @@ static int scene_moving(void)
     for (int i = 0; i < home_count(); i++) if (spring_moving(&S.hscale[i])) return 1;
     if (S.view == V_FOLDER) {
         if (spring_moving(&S.ftrack)) return 1;
-        for (int i = 0; i < S.nfg; i++) if (spring_moving(&S.fscale[i])) return 1;
+        if (S.fall) return 1;
+        for (int i = 0; i < S.nfactive; i++) if (spring_moving(&S.fscale[S.factive[i]])) return 1;
     }
     return 0;
 }
@@ -384,16 +436,50 @@ static void scene_step(Spring *s, float dt, float k, float damping)
     if (before != s->x) S.scene_dirty = 1;
 }
 
+static int cursor_shown(void)
+{
+    if (sw_on()) return S.lib->nrecent > 0;
+    return !S.options && (S.view == V_HOME || S.nfg);
+}
+
+static int sw_animating(void);
+static unsigned sw_revision(void);
+
+// Whether the next update changes what's on screen.
+static int animating(void)
+{
+    if (S.pulse < S.pulse_end && cursor_shown()) return 1;
+    if (sw_on()) return sw_animating();
+    return scene_moving() || spring_moving(&S.enter) || S.launching >= 0;
+}
+
 void ui_update(float dt)
 {
-    S.t += dt;
+    if (animating()) S.redraw = 1;
+    if (S.pulse < S.pulse_end && cursor_shown()) {
+        S.pulse += dt;
+        if (S.pulse > S.pulse_end) S.pulse = S.pulse_end;
+    }
     if (sw_on()) { sw_update(dt); return; }
     spring_step(&S.enter, dt, SNAPPY);
     scene_step(&S.track, dt, BOUNCE);
     for (int i = 0; i < home_count(); i++) scene_step(&S.hscale[i], dt, 400.f, 18.f);
     if (S.view == V_FOLDER) {
         scene_step(&S.ftrack, dt, BOUNCE);
-        for (int i = 0; i < S.nfg; i++) scene_step(&S.fscale[i], dt, 400.f, 18.f);
+        if (S.fall) {
+            S.fall = 0;
+            for (int i = 0; i < S.nfg; i++) {
+                scene_step(&S.fscale[i], dt, 400.f, 18.f);
+                S.fall |= spring_moving(&S.fscale[i]);
+            }
+            if (!S.fall) S.nfactive = 0;
+        } else {
+            for (int i = 0; i < S.nfactive; i++) {
+                Spring *sp = &S.fscale[S.factive[i]];
+                scene_step(sp, dt, 400.f, 18.f);
+                if (!spring_moving(sp)) S.factive[i--] = S.factive[--S.nfactive];
+            }
+        }
     }
     if (S.launching >= 0) {
         S.launch_t += dt;
@@ -413,7 +499,7 @@ int ui_take_launch(void)
 
 void ui_reset_home(void)
 {
-    S.scene_dirty = 1;
+    S.scene_dirty = S.redraw = 1;
     tiles_free();
     // Back on the home row with the launched game first (simulator keeps running).
     S.view = V_HOME;
@@ -614,7 +700,7 @@ static void draw_folder_badge(Image *c, const Folder *f, float cx, float cy, flo
 
 static void draw_cursor(Image *c, float cx, float cy, float w, int base)
 {
-    float p = .5f + .5f * sinf(S.t * 5.7f);
+    float p = pulse_level();
     int size = zoomed(base);
     CursorMask *m = NULL;
     for (int k = 0; k < 3 && !m; k++)
@@ -720,11 +806,25 @@ static int draw_battery(Image *c, int right, int y)
     return tx;
 }
 
-static void draw_status(Image *c)
+static void status_clock(char *buf, int n)
+{
+    time_t now = (time_t)wall();
+    struct tm tm;
+    strftime(buf, n, "%a %d %b · %H:%M", localtime_r(&now, &tm));
+}
+
+// What the status strip shows; equal keys draw identical strips.
+static void status_key(char *out, int n)
+{
+    char clock[64];
+    status_clock(clock, sizeof clock);
+    snprintf(out, n, "%s|%d|%d|%d|%p", clock, S.battery, S.charging, S.wifi, (const void *)P);
+}
+
+static void draw_status_raw(Image *c)
 {
     char buf[64];
-    time_t now = time(NULL);
-    strftime(buf, sizeof buf, "%a %d %b · %H:%M", localtime(&now));
+    status_clock(buf, sizeof buf);
     text_draw(c, S.small, buf, 16, 7, rgb(C_SUB));
     build_status_masks();
     int x = SCREEN_W - 16, y = 11;
@@ -736,6 +836,48 @@ static void draw_status(Image *c)
                         lit ? rgb(C_SUB) : rgb(P->line));
         }
     }
+}
+
+// Chrome that changes rarely: drawn once onto a transparent band of the screen and blended
+// in each frame until what it shows (its key) changes.
+typedef struct {
+    Image *img;
+    char key[256];
+} Band;
+static Band status_band; // see draw_status
+
+static void band_free(Band *b)
+{
+    img_free(b->img);
+    b->img = NULL;
+    b->key[0] = 0;
+}
+
+// Returns the band's image cleared for redrawing when `key` changed, else NULL.
+static Image *band_begin(Band *b, int h, const char *key)
+{
+    if (b->img && !strcmp(b->key, key)) return NULL;
+    if (!b->img) b->img = img_new(SCREEN_W, h);
+    if (!b->img) return NULL;
+    memset(b->img->px, 0, (size_t)SCREEN_W * h * sizeof *b->img->px);
+    snprintf(b->key, sizeof b->key, "%s", key);
+    return b->img;
+}
+
+static void band_end(Band *b) { img_find_spans(b->img); }
+
+static void status_free(void) { band_free(&status_band); }
+
+// Clock, battery and Wi-Fi along the top, re-rendered only when one of them changes.
+#define STATUS_H 32
+static void draw_status(Image *c)
+{
+    char key[256];
+    status_key(key, sizeof key);
+    Image *band = band_begin(&status_band, STATUS_H, key);
+    if (band) { draw_status_raw(band); band_end(&status_band); }
+    if (status_band.img) gfx_blit(c, status_band.img, 0, 0, 255);
+    else draw_status_raw(c);
 }
 
 // Hints name the Miyoo's printed labels: A B X Y, L1 R1, SELECT START MENU.
@@ -947,8 +1089,14 @@ static void draw_folder_view(Image *c)
     char n[64];
     snprintf(n, sizeof n, "%d game%s · %s", f->ngames, f->ngames == 1 ? "" : "s", SORTS[S.sort]);
     text_draw(c, S.small, n, 84, 60, rgb(C_SUB));
+    // Only the columns that can reach the visible strip (zoomed tiles are up to 10% wider).
+    float reach = g->tile * .55f;
+    int c0 = (int)floorf((-8 - reach - S.ftrack.x - g->tile / 2.f) / g->col);
+    int c1 = (int)ceilf((G_EDGE + reach - S.ftrack.x - g->tile / 2.f) / g->col);
+    int k0 = c0 < 0 ? 0 : c0 * g->rows, k1 = (c1 + 1) * g->rows;
+    if (k1 > S.nfg) k1 = S.nfg;
     for (int pass = 0; pass < 2; pass++)
-        for (int k = 0; k < S.nfg; k++) {
+        for (int k = k0; k < k1; k++) {
             if ((k == S.fsel) != pass) continue;
             float cx = S.ftrack.x + (k / g->rows) * g->col + g->tile / 2.f, cy = G_Y + (k % g->rows) * g->row + g->tile / 2.f;
             float w = g->tile * S.fscale[k].x;
@@ -1005,9 +1153,22 @@ static void draw_launch(Image *c)
     }
 }
 
+double ui_idle(void)
+{
+    if (S.redraw || animating()) return 0;
+    if (icons_revision() != S.drawn_art) return 0;
+    if (sw_on() && sw_revision() != S.drawn_cards) return 0;
+    double now = wall();
+    if ((long)(now / 60) != S.drawn_minute) return 0;
+    return 60 - fmod(now, 60) + .01; // the status clock's next minute
+}
+
 void ui_draw(Image *c)
 {
-    if (sw_on()) { sw_draw(c); return; }
+    S.redraw = 0;
+    S.drawn_art = icons_revision();
+    S.drawn_minute = (long)(wall() / 60);
+    if (sw_on()) { S.drawn_cards = sw_revision(); sw_draw(c); return; }
     float e = S.enter.x;
     // Compose straight into the final canvas except when a zoom needs a source layer.
     Image *composed = e > .995f ? c : S.layer;
@@ -1092,6 +1253,7 @@ static struct {
     int layer_ok;             // S.layer holds the scene behind a zoom; reused while it's still
     unsigned layer_rev;       // card + art revisions it was drawn with
     int saving;               // SW_TOAST_*
+    Band top, bottom;         // status, toast and titles; position dots and footer
 } W;
 
 void ui_switch_hooks(const Image *(*card)(int), const Image *(*full)(int), void (*select)(int),
@@ -1102,13 +1264,21 @@ void ui_switch_hooks(const Image *(*card)(int), const Image *(*full)(int), void 
 
 void ui_switch_saving(int state)
 {
-    if (W.saving != state) W.layer_ok = 0;
+    if (W.saving != state) W.layer_ok = 0, S.redraw = 1;
     W.saving = state;
 }
 
 int ui_switch_target(void) { return W.close_to; }
 
 static int sw_on(void) { return W.on; }
+
+static unsigned sw_revision(void) { return W.revision ? W.revision() : 0; }
+
+static int sw_animating(void)
+{
+    for (int i = 0; i < S.lib->nrecent; i++) if (spring_moving(&S.hscale[i])) return 1;
+    return spring_moving(&W.zoom) || spring_moving(&S.track) || W.fade < 1 || (W.closing && !W.fired);
+}
 
 void ui_switch_reopen(void)
 {
@@ -1151,6 +1321,7 @@ static void sw_free(void)
     free(W.ring);
     img_free(W.home_bg); img_free(W.backdrop); img_free(W.old_backdrop);
     img_free(W.mixed); img_free(W.backdrop_full);
+    band_free(&W.top); band_free(&W.bottom);
     memset(&W, 0, sizeof W);
 }
 
@@ -1372,6 +1543,57 @@ static void sw_card_rect(int i, float *x, float *y, float *w, float *h)
     *x = cx - *w / 2; *y = SW_CY - *h / 2;
 }
 
+// Everything over the backdrop but the cards, kept in two bands: along the top the
+// status, save notification and the selection's title; along the bottom the position
+// dots and the footer. Each is redrawn only when what it shows changes.
+#define SW_TOP_H 120
+#define SW_BOTTOM_Y 370
+static void sw_draw_chrome(Image *c)
+{
+    Library *L = S.lib;
+    int resume = S.sel == 0 && W.running;
+    char key[256], status[200];
+    status_key(status, sizeof status);
+    snprintf(key, sizeof key, "%s|%d|%d|%d", status, S.sel, resume, W.saving);
+    Image *b = band_begin(&W.top, SW_TOP_H, key);
+    if (b) {
+        if (L->nrecent) {
+            const Game *g = &L->games[L->recent[S.sel]];
+            char meta[160];
+            snprintf(meta, sizeof meta, "%s%s", L->sys[g->sys].name, resume ? " · Paused" : "");
+            text_center(b, S.title, g->title, SCREEN_W / 2, 44, rgb(0xffffff), SCREEN_W - 60);
+            text_center(b, S.body, meta, SCREEN_W / 2, 86, argb(255, 0xb8, 0xbf, 0xd0), SCREEN_W - 60);
+        }
+        draw_status_raw(b);
+        if (W.saving) {
+            const char *t = W.saving == SW_TOAST_SAVING ? "Saving…" : W.saving == SW_TOAST_SAVED ? "✓ Saved" : "Couldn't save";
+            int tw = text_width(S.small, t), th = font_height(S.small) + 8;
+            float tx = SCREEN_W / 2.f - (tw + 24) / 2.f;
+            gfx_fill_rrect(b, tx, 6, tw + 24, th, th / 2.f, rgb(0xffffff));
+            text_draw(b, S.small, t, (int)tx + 12, 10, rgb(W.saving == SW_TOAST_FAILED ? 0xc0392b : 0x2f8a4c));
+        }
+        band_end(&W.top);
+    }
+    snprintf(key, sizeof key, "%d|%d|%d|%d", S.sel, L->nrecent, resume, W.running);
+    if ((b = band_begin(&W.bottom, SCREEN_H - SW_BOTTOM_Y, key))) {
+        const int y0 = SW_BOTTOM_Y;
+        if (L->nrecent > 1) {
+            float dw = 15, x0 = SCREEN_W / 2.f - (L->nrecent - 1) * dw / 2;
+            for (int i = 0; i < L->nrecent; i++) {
+                float sz = i == S.sel ? 12 : 8;
+                gfx_fill_rrect(b, x0 + i * dw - sz / 2, 380 - y0 - sz / 2, sz, sz, sz / 2,
+                               i == S.sel ? rgb(C_SEL) : argb(70, 255, 255, 255));
+            }
+        }
+        const char *const H[] = {"A", resume ? "Resume" : "Play", "B", "Shelf", "MENU", "Back to game"};
+        if (L->nrecent) draw_footer_raw(b, SCREEN_H - FOOTER_H - y0, H, W.running ? 6 : 4);
+        else draw_footer_raw(b, SCREEN_H - FOOTER_H - y0, H + 2, 2);
+        band_end(&W.bottom);
+    }
+    if (W.top.img) gfx_blit(c, W.top.img, 0, 0, 255);
+    if (W.bottom.img) gfx_blit(c, W.bottom.img, 0, SW_BOTTOM_Y, 255);
+}
+
 // The row, titles and chrome, without the selected card when `skip_sel`.
 static void sw_draw_scene(Image *c, int skip_sel)
 {
@@ -1380,13 +1602,6 @@ static void sw_draw_scene(Image *c, int skip_sel)
     if (!L->nrecent) {
         text_center(c, S.title, "Nothing played yet", SCREEN_W / 2, 200, rgb(C_INK), SCREEN_W - 60);
         text_center(c, S.body, "Games you play show up here", SCREEN_W / 2, 244, rgb(C_SUB), SCREEN_W - 60);
-    } else {
-        const Game *g = &L->games[L->recent[S.sel]];
-        char meta[160];
-        snprintf(meta, sizeof meta, "%s%s", L->sys[g->sys].name,
-                 S.sel == 0 && W.running ? " · Paused" : "");
-        text_center(c, S.title, g->title, SCREEN_W / 2, 44, rgb(0xffffff), SCREEN_W - 60);
-        text_center(c, S.body, meta, SCREEN_W / 2, 86, argb(255, 0xb8, 0xbf, 0xd0), SCREEN_W - 60);
     }
     for (int pass = 0; pass < 2; pass++)
         for (int i = 0; i < L->nrecent; i++) {
@@ -1402,30 +1617,11 @@ static void sw_draw_scene(Image *c, int skip_sel)
             else if (rest) gfx_blit(c, rest, (int)lroundf(x + w / 2 - rest->w / 2.f), (int)lroundf(y + h / 2 - rest->h / 2.f), 255);
             else gfx_blit_scaled_nearest(c, s, x - pad, y - pad, s->w * k, s->h * k); // moving
             if (pass) { // selection ring
-                float p = .5f + .5f * sinf(S.t * 5.7f);
+                float p = pulse_level();
                 sw_ring(c, x, y, w, h, lerp_rgb(C_SEL, C_SEL2, p));
             }
         }
-    if (L->nrecent > 1) {
-        float dw = 15, x0 = SCREEN_W / 2.f - (L->nrecent - 1) * dw / 2;
-        for (int i = 0; i < L->nrecent; i++) {
-            float s = i == S.sel ? 12 : 8;
-            gfx_fill_rrect(c, x0 + i * dw - s / 2, 380 - s / 2, s, s, s / 2,
-                           i == S.sel ? rgb(C_SEL) : argb(70, 255, 255, 255));
-        }
-    }
-    int resume = S.sel == 0 && W.running;
-    const char *const H[] = {"A", resume ? "Resume" : "Play", "B", "Shelf", "MENU", "Back to game"};
-    if (L->nrecent) draw_footer_raw(c, SCREEN_H - FOOTER_H, H, W.running ? 6 : 4);
-    else draw_footer_raw(c, SCREEN_H - FOOTER_H, H + 2, 2);
-    draw_status(c);
-    if (W.saving) {
-        const char *t = W.saving == SW_TOAST_SAVING ? "Saving…" : W.saving == SW_TOAST_SAVED ? "✓ Saved" : "Couldn't save";
-        int tw = text_width(S.small, t), th = font_height(S.small) + 8;
-        float tx = SCREEN_W / 2.f - (tw + 24) / 2.f;
-        gfx_fill_rrect(c, tx, 6, tw + 24, th, th / 2.f, rgb(0xffffff));
-        text_draw(c, S.small, t, (int)tx + 12, 10, rgb(W.saving == SW_TOAST_FAILED ? 0xc0392b : 0x2f8a4c));
-    }
+    sw_draw_chrome(c);
 }
 
 static void sw_draw(Image *c)

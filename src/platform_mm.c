@@ -1,8 +1,10 @@
 // Miyoo Mini / Mini Plus: SDL 1.2 with explicit 180-degree panel rotation.
 // Buttons arrive as SDL key events using the stock Miyoo mapping (see Onion's keymap_sw.h).
 #include <SDL/SDL.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <linux/fb.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -104,9 +106,14 @@ static double held_next;
 
 // UI click: the active Onion theme's change.wav (what MainUI plays), else Onion's default.
 // Audio goes through Onion's audioserver via libpadsp.so, preloaded by launch.sh.
+// SDL 1.2 keeps writing silence while paused, which keeps the audioserver busy too, so
+// the device is closed once a click has drained and reopened for the next one.
 static Uint8 *click;
 static Uint32 click_len, click_pos;
-static int audio_ok;
+static int audio_ok, audio_open;
+static SDL_AudioSpec audio_want, audio_got;
+static double audio_close_at;
+#define AUDIO_LINGER 2.0 // seconds open after a click: rapid scrolling doesn't reopen it
 
 static void audio_cb(void *ud, Uint8 *out, int len)
 {
@@ -133,6 +140,19 @@ static int theme_sound(char *out, size_t n)
     return r;
 }
 
+// Opens the device in the format the click was converted to. Returns 0 on success.
+static int audio_reopen(void)
+{
+    SDL_AudioSpec got;
+    if (SDL_OpenAudio(&audio_want, &got)) return -1;
+    if (got.format != audio_got.format || got.channels != audio_got.channels || got.freq != audio_got.freq) {
+        SDL_CloseAudio();
+        return -1;
+    }
+    audio_open = 1;
+    return 0;
+}
+
 static void audio_init(void)
 {
     if (getenv("SHELF_MUTE") || SDL_InitSubSystem(SDL_INIT_AUDIO)) return;
@@ -146,13 +166,14 @@ static void audio_init(void)
     for (size_t i = 0; i < sizeof paths / sizeof *paths && !buf; i++)
         if (!SDL_LoadWAV(paths[i], &wav, &buf, &len)) buf = NULL;
     if (!buf) { fprintf(stderr, "shelf: no click sound\n"); return; }
-    SDL_AudioSpec want = wav, got;
-    want.samples = 512; // ~12 ms at 44.1 kHz: the click lands with the frame
-    want.callback = audio_cb;
-    want.userdata = NULL;
-    if (SDL_OpenAudio(&want, &got)) { SDL_FreeWAV(buf); return; }
+    audio_want = wav;
+    audio_want.samples = 512; // ~12 ms at 44.1 kHz: the click lands with the frame
+    audio_want.callback = audio_cb;
+    audio_want.userdata = NULL;
+    if (SDL_OpenAudio(&audio_want, &audio_got)) { SDL_FreeWAV(buf); return; }
     SDL_AudioCVT cvt;
-    if (SDL_BuildAudioCVT(&cvt, wav.format, wav.channels, wav.freq, got.format, got.channels, got.freq) < 0) {
+    if (SDL_BuildAudioCVT(&cvt, wav.format, wav.channels, wav.freq, audio_got.format, audio_got.channels,
+                          audio_got.freq) < 0) {
         SDL_CloseAudio(); SDL_FreeWAV(buf); return;
     }
     cvt.len = (int)len;
@@ -165,15 +186,77 @@ static void audio_init(void)
     click_len = cvt.needed ? (Uint32)cvt.len_cvt : len;
     click_pos = click_len;
     audio_ok = 1;
-    SDL_PauseAudio(0);
+    SDL_CloseAudio(); // silent until the first click
 }
 
 void platform_click(void)
 {
     if (!audio_ok) return;
+    if (!audio_open && audio_reopen()) return;
     SDL_LockAudio();
     click_pos = 0; // restart: rapid scrolling retriggers rather than queueing
     SDL_UnlockAudio();
+    SDL_PauseAudio(0);
+    audio_close_at = platform_now() + AUDIO_LINGER;
+}
+
+// Closes the device once the last click has played and lingered.
+static void audio_idle(double now)
+{
+    if (!audio_open || now < audio_close_at) return;
+    SDL_LockAudio();
+    int drained = click_pos >= click_len;
+    SDL_UnlockAudio();
+    if (!drained) { audio_close_at = now + .1; return; }
+    SDL_CloseAudio();
+    audio_open = 0;
+}
+
+/* ---------- waiting for input ---------- */
+
+// SDL 1.2 reads the keys from the console tty (fbcon keyboard). Waiting polls that same
+// descriptor without reading it, so SDL still gets every byte; a pipe carries wakeups
+// from background threads.
+static int tty_fd = -1, wake_pipe[2] = {-1, -1};
+
+static int find_tty_fd(void)
+{
+    DIR *d = opendir("/proc/self/fd");
+    if (!d) return -1;
+    int found = -1;
+    for (struct dirent *e; found < 0 && (e = readdir(d));) {
+        char link[64], target[64];
+        snprintf(link, sizeof link, "/proc/self/fd/%s", e->d_name);
+        ssize_t n = readlink(link, target, sizeof target - 1);
+        if (n <= 0) continue;
+        target[n] = 0;
+        if (!strncmp(target, "/dev/tty", 8) && strcmp(target, "/dev/tty")) found = atoi(e->d_name);
+    }
+    closedir(d);
+    return found;
+}
+
+static void wait_init(void)
+{
+    tty_fd = find_tty_fd();
+    if (pipe(wake_pipe)) wake_pipe[0] = wake_pipe[1] = -1;
+    for (int i = 0; i < 2; i++)
+        if (wake_pipe[i] >= 0) fcntl(wake_pipe[i], F_SETFL, fcntl(wake_pipe[i], F_GETFL) | O_NONBLOCK);
+    if (tty_fd < 0) fprintf(stderr, "shelf: no input tty to wait on; idling in 10 ms steps\n");
+}
+
+static void wait_quit(void)
+{
+    int fds[2] = {wake_pipe[0], wake_pipe[1]};
+    wake_pipe[0] = wake_pipe[1] = -1;
+    for (int i = 0; i < 2; i++) if (fds[i] >= 0) close(fds[i]);
+    tty_fd = -1;
+}
+
+void platform_wake(void)
+{
+    int fd = wake_pipe[1];
+    if (fd >= 0 && write(fd, "w", 1) < 0) {} // full pipe: a wakeup is pending anyway
 }
 
 int platform_init(void)
@@ -184,13 +267,17 @@ int platform_init(void)
     if (!video) { fprintf(stderr, "SDL_SetVideoMode: %s\n", SDL_GetError()); return -1; }
     fb_init();
     audio_init();
+    wait_init();
     return 0;
 }
 
 void platform_quit(void)
 {
-    if (audio_ok) SDL_CloseAudio();
+    if (audio_open) SDL_CloseAudio();
+    audio_open = audio_ok = 0;
     free(click);
+    click = NULL;
+    wait_quit();
     fb_quit();
     SDL_Quit();
 }
@@ -309,4 +396,28 @@ void platform_sleep_until(double t)
     if (d <= 0) return;
     struct timespec ts = {(time_t)d, (long)((d - (time_t)d) * 1e9)};
     nanosleep(&ts, NULL);
+}
+
+void platform_wait(double until)
+{
+    double now = platform_now();
+    audio_idle(now);
+    if (audio_open && audio_close_at < until) until = audio_close_at;
+    if (held != BTN_NONE && held_next < until) until = held_next;
+    if (until <= now) return;
+    if (wake_pipe[0] < 0) { platform_sleep_until(until); return; }
+    struct pollfd fds[2] = {{wake_pipe[0], POLLIN, 0}, {tty_fd, POLLIN, 0}};
+    int nfds = tty_fd >= 0 ? 2 : 1;
+    // Bytes SDL left unread would keep the tty readable; don't spin on them.
+    if (tty_fd >= 0 && poll(fds + 1, 1, 0) > 0) {
+        platform_sleep_until(now + .005 < until ? now + .005 : until);
+        return;
+    }
+    double step = tty_fd >= 0 ? until - now : .01; // without the tty, check input every 10 ms
+    if (step > until - now) step = until - now;
+    int ms = (int)(step * 1000) + 1;
+    if (poll(fds, nfds, ms) > 0 && (fds[0].revents & POLLIN)) {
+        char drain[64];
+        while (read(wake_pipe[0], drain, sizeof drain) > 0) {}
+    }
 }

@@ -10,12 +10,19 @@
 
 typedef struct {
     Image *img[2];   // [0] small, [1] big
-    char want[2];    // requested this session
+    unsigned used[2]; // icon_get clock when last asked for, for eviction
+    char want[2];    // queued for loading
     char missing;    // no source art: caller draws a placeholder
 } Entry;
 
 static Library *L;
 static Entry *E;
+// Pending requests in the order they were made, big icons first: [1] big, [0] small.
+static struct { int *game, head, len; } Q[2];
+// Decoded icons are kept up to a budget, least recently asked for evicted first.
+#define BUDGET_DEFAULT (8u << 20)
+static size_t bytes, budget = BUDGET_DEFAULT;
+static unsigned use_clock, trimmed_at;
 static char cache_dir[PATH_LEN];
 static unsigned revision;
 // Guards Entry fields and revision once the worker runs.
@@ -23,6 +30,9 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t wake = PTHREAD_COND_INITIALIZER;
 static pthread_t worker;
 static int worker_running, worker_quit;
+static void (*notify)(void);
+
+void icons_set_notify(void (*fn)(void)) { notify = fn; }
 
 unsigned icons_revision(void)
 {
@@ -45,7 +55,13 @@ void icons_init(Library *lib)
 {
     L = lib;
     revision = 0;
+    bytes = 0;
+    use_clock = trimmed_at = 0;
     E = calloc(lib->ngames ? lib->ngames : 1, sizeof *E);
+    for (int b = 0; b < 2; b++) {
+        Q[b].game = malloc(sizeof(int) * (lib->ngames ? lib->ngames : 1));
+        Q[b].head = Q[b].len = 0;
+    }
     host_path(SD_PREFIX "/App/Shelf/cache", cache_dir, sizeof cache_dir);
     mkdirs(cache_dir);
 }
@@ -64,14 +80,18 @@ void icons_free(void)
     for (int i = 0; i < L->ngames; i++) { img_free(E[i].img[0]); img_free(E[i].img[1]); }
     free(E);
     E = NULL;
+    for (int b = 0; b < 2; b++) { free(Q[b].game); Q[b].game = NULL; }
 }
 
 const Image *icon_get(int game, int big)
 {
     Entry *e = &E[game];
     pthread_mutex_lock(&lock);
-    if (!e->img[big] && !e->missing && !e->want[big]) {
+    e->used[big] = ++use_clock;
+    // A request is queued at most once (want), so the queue never holds more than ngames.
+    if (!e->img[big] && !e->missing && !e->want[big] && Q[big].game) {
         e->want[big] = 1;
+        Q[big].game[(Q[big].head + Q[big].len++) % L->ngames] = game;
         pthread_cond_signal(&wake);
     }
     const Image *img = e->img[big];
@@ -197,21 +217,58 @@ static Image *build(int gi, int big)
     return img;
 }
 
-// Next request, big icons first in library order. Caller holds the lock.
+// Next request, big icons first, each size in the order asked for. Caller holds the lock.
 static int next_request(int *gi, int *big)
 {
-    for (int i = 0; i < L->ngames; i++)
-        for (int b = 1; b >= 0; b--)
-            if (E[i].want[b] && !E[i].img[b] && !E[i].missing) { *gi = i; *big = b; return 1; }
+    for (int b = 1; b >= 0; b--)
+        while (Q[b].len) {
+            int i = Q[b].game[Q[b].head];
+            Q[b].head = (Q[b].head + 1) % L->ngames;
+            Q[b].len--;
+            if (E[i].missing || E[i].img[b]) { E[i].want[b] = 0; continue; }
+            *gi = i; *big = b;
+            return 1;
+        }
     return 0;
 }
+
+static size_t image_bytes(const Image *img) { return img ? (size_t)img->w * img->h * sizeof *img->px : 0; }
 
 static void publish(int gi, int big, Image *img)
 {
     E[gi].img[big] = img;
     if (!img) E[gi].missing = 1;
     E[gi].want[big] = 0;
+    bytes += image_bytes(img);
     revision++;
+}
+
+void icons_trim(void)
+{
+    pthread_mutex_lock(&lock);
+    while (bytes > budget) {
+        int oldest = -1, ob = 0;
+        for (int i = 0; i < L->ngames; i++)
+            for (int b = 0; b < 2; b++)
+                if (E[i].img[b] && E[i].used[b] <= trimmed_at &&
+                    (oldest < 0 || E[i].used[b] < E[oldest].used[ob])) { oldest = i; ob = b; }
+        if (oldest < 0) break; // all asked for since the last trim: on screen, keep them
+        bytes -= image_bytes(E[oldest].img[ob]);
+        img_free(E[oldest].img[ob]);
+        E[oldest].img[ob] = NULL; // asked for again, it's queued again
+    }
+    trimmed_at = use_clock;
+    pthread_mutex_unlock(&lock);
+}
+
+void icons_set_budget(size_t max_bytes) { budget = max_bytes ? max_bytes : BUDGET_DEFAULT; }
+
+size_t icons_bytes(void)
+{
+    pthread_mutex_lock(&lock);
+    size_t n = bytes;
+    pthread_mutex_unlock(&lock);
+    return n;
 }
 
 int icons_pump(int budget)
@@ -237,6 +294,11 @@ static void *work(void *arg)
         Image *img = build(gi, big);
         pthread_mutex_lock(&lock);
         publish(gi, big, img);
+        if (notify) {
+            pthread_mutex_unlock(&lock);
+            notify();
+            pthread_mutex_lock(&lock);
+        }
     }
     pthread_mutex_unlock(&lock);
     return NULL;

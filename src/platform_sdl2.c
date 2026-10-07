@@ -1,5 +1,6 @@
 // Mac/Linux simulator: a 640x480 canvas in an SDL2 window, keyboard as the Miyoo buttons.
 #include <SDL.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -8,6 +9,7 @@
 static SDL_Window *win;
 static SDL_Renderer *ren;
 static SDL_Texture *tex;
+static Uint32 wake_event; // platform_wake's user event
 
 // D-pad auto-repeat, same feel as on the device.
 static Button held = BTN_NONE;
@@ -27,6 +29,7 @@ int platform_init(void)
     if (!win || !ren) { SDL_Log("SDL window: %s", SDL_GetError()); return -1; }
     SDL_RenderSetLogicalSize(ren, SCREEN_W, SCREEN_H);
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+    wake_event = SDL_RegisterEvents(1);
     tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, SCREEN_W, SCREEN_H);
     return tex ? 0 : -1;
 }
@@ -39,6 +42,7 @@ void platform_quit(void)
     SDL_DestroyTexture(tex);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
+    win = NULL;
     SDL_Quit();
 }
 
@@ -110,4 +114,22 @@ void platform_sleep_until(double t)
 {
     double d = t - platform_now();
     if (d > 0.001) SDL_Delay((Uint32)(d * 1000));
+}
+
+
+void platform_wait(double until)
+{
+    if (!win) { platform_sleep_until(until); return; }
+    if (held != BTN_NONE && held_next < until) until = held_next;
+    double d = until - platform_now();
+    if (d <= 0) return;
+    SDL_WaitEventTimeout(NULL, (int)ceil(d * 1000)); // leaves the event for platform_poll
+}
+
+void platform_wake(void)
+{
+    if (!win) return;
+    SDL_Event e = {0};
+    e.type = wake_event;
+    SDL_PushEvent(&e); // thread-safe; platform_poll discards it
 }

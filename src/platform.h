@@ -29,5 +29,11 @@ int platform_vsync_paced(void);
 void platform_click(void);
 double platform_now(void); // seconds, monotonic
 void platform_sleep_until(double t);
+// Sleeps until a button event is pending, a held d-pad button is due to repeat,
+// platform_wake() is called, or `until` (platform_now() time), whichever comes first.
+// Without platform_init it just sleeps until `until`.
+void platform_wait(double until);
+// Ends a platform_wait early. Safe from any thread (background loaders call it).
+void platform_wake(void);
 
 #endif
