@@ -1,3 +1,5 @@
 build/
 fixture/
 .DS_Store
+# Local working notes (device- and card-specific)
+TODO.md

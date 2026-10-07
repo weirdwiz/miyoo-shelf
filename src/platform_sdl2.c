@@ -30,6 +30,8 @@ int platform_init(void)
     return tex ? 0 : -1;
 }
 
+void platform_click(void) {} // the simulator stays silent
+
 void platform_quit(void)
 {
     SDL_DestroyTexture(tex);

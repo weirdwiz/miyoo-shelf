@@ -1,0 +1,13 @@
+[
+  {
+    "path": "Roms/GBA/Imgs/My Game (USA).png",
+    "repo": "Nintendo_-_Game_Boy_Advance",
+    "title": "My Game (USA)",
+    "note": "Libretro thumbnail: repo is the libretro-thumbnails system, title its Named_Boxarts name."
+  },
+  {
+    "path": "Roms/GBA/Imgs/My Homebrew.png",
+    "url": "https://example.com/my-homebrew-logo.png",
+    "note": "Any direct PNG URL works for games without a Libretro thumbnail."
+  }
+]

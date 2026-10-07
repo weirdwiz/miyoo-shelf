@@ -66,27 +66,104 @@ int main(int argc, char **argv)
     const char *shot = getenv("SHELF_SHOT");
     if (shot) return headless(&lib, cmd_path, canvas, getenv("SHELF_KEYS"), shot);
 
+    // Render-only benchmark: safe to run over SSH while Onion owns the screen.
+    const char *bench = getenv("SHELF_BENCH");
+    if (bench) {
+        int n = atoi(bench);
+        if (n < 1 || n > 10000) return 1;
+        const char *scene = getenv("SHELF_BENCH_SCENE");
+        if (!scene) scene = "home";
+        int grid = !strcmp(scene, "grid"), scroll = !strcmp(scene, "scroll");
+        int transitions = !strcmp(scene, "transition");
+        if (!grid && !scroll && !transitions && strcmp(scene, "home")) return 1;
+        // Grid and transitions start from the first library folder (A on a recent launches).
+        if (grid || transitions) ui_button(BTN_R);
+        if (grid) ui_button(BTN_A);
+        // Warm the same initial scene in both renderers; navigation still exercises
+        // newly visible tiles and art requests inside the measured loop.
+        for (int i = 0; i < 60; i++) {
+            ui_draw(canvas);
+            while (icons_pump(64)) {}
+            ui_update(1.f / 60);
+        }
+        icons_start_worker(); // as in the interactive loop: art decodes off the frame
+        double t0 = platform_now(), worst_frame = 0;
+        for (int i = 0; i < n; i++) {
+            double begin = platform_now();
+            if (scroll && i % 12 == 0)
+                ui_button((i / 72) % 2 ? BTN_LEFT : BTN_RIGHT);
+            if (grid && i % 12 == 0) {
+                static const Button moves[] = {BTN_DOWN, BTN_DOWN, BTN_RIGHT, BTN_UP, BTN_UP, BTN_LEFT};
+                ui_button(moves[(i / 12) % 6]);
+            }
+            if (transitions && i % 36 == 0)
+                ui_button((i / 36) % 2 ? BTN_B : BTN_A);
+            icons_pump(2);
+            ui_update(1.f / 60);
+            ui_draw(canvas);
+            double elapsed = platform_now() - begin;
+            if (elapsed > worst_frame) worst_frame = elapsed;
+        }
+        fprintf(stderr, "shelf: %s benchmark %d frames, %.2f ms/frame, worst %.2f ms\n",
+                scene, n, (platform_now() - t0) * 1000 / n, worst_frame * 1000);
+        img_free(canvas); ui_free(); icons_free(); lib_free(&lib);
+        return 0;
+    }
+
     if (platform_init()) return 1;
+    if (icons_start_worker()) fprintf(stderr, "shelf: icon worker unavailable; loading art per frame\n");
     const double frame = 1.0 / 60;
-    double next = platform_now();
+    double next = platform_now(), last_update = next;
     int running = 1;
+    int stats = getenv("SHELF_STATS") != NULL;
+    double stat_t0 = platform_now(), work = 0, worst = 0;
+    double draw_work = 0, present_work = 0;
+    int frames = 0;
     while (running) {
         Button b;
         while ((b = platform_poll()) != BTN_NONE) {
-            if (b == BTN_QUIT) running = 0;
-            else ui_button(b);
+            if (b == BTN_QUIT || b == BTN_MENU) running = 0; // MENU returns to Onion
+            else {
+                ui_button(b);
+                if (ui_take_sound()) platform_click();
+            }
         }
+        double t0 = platform_now();
         icons_pump(2);
-        ui_update((float)frame);
+        double update_now = platform_now();
+        float dt = (float)(update_now - last_update);
+        last_update = update_now;
+        if (dt > .1f) dt = .1f; // bound catch-up after a long stall
+        ui_update(dt);
         ui_draw(canvas);
+        double drawn = platform_now();
         platform_present(canvas);
+        if (stats) {
+            draw_work += drawn - t0;
+            present_work += platform_now() - drawn;
+            double w = platform_now() - t0;
+            work += w;
+            if (w > worst) worst = w;
+            if (++frames == 120) {
+                double el = platform_now() - stat_t0;
+                fprintf(stderr, "shelf: %.1f fps, frame work avg %.1f ms, worst %.1f ms\n",
+                        frames / el, work / frames * 1000, worst * 1000);
+                fprintf(stderr, "shelf: render %.2f ms, present %.2f ms\n",
+                        draw_work * 1000 / frames, present_work * 1000 / frames);
+                frames = 0; work = worst = draw_work = present_work = 0; stat_t0 = platform_now();
+            }
+        }
 
         int g = ui_take_launch();
         if (g >= 0) {
-            lib_launch(&lib, g, cmd_path);
+            int launched = lib_launch(&lib, g, cmd_path) == 0;
             ui_reset_home();
-            fprintf(stderr, "shelf: launch -> %s\n", cmd_path);
-            if (!sim) running = 0; // on the device Onion takes over from here
+            if (launched) {
+                fprintf(stderr, "shelf: launch -> %s\n", cmd_path);
+                if (!sim) running = 0; // on the device Onion takes over from here
+            } else {
+                fprintf(stderr, "shelf: launch failed; staying in Shelf\n");
+            }
         }
         next += frame;
         double now = platform_now();

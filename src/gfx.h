@@ -7,6 +7,7 @@
 typedef struct {
     int w, h;
     uint32_t *px; // premultiplied ARGB, row-major, stride == w
+    int16_t *spans; // optional per-row [begin, end) fully-opaque run, from img_find_spans
 } Image;
 
 // Build a premultiplied ARGB colour from straight RGB + alpha.
@@ -21,10 +22,12 @@ Image *img_new(int w, int h);
 void img_free(Image *img);
 Image *img_load(const char *path); // PNG/JPG/GIF via stb_image, NULL on failure
 Image *img_resize(const Image *src, int w, int h); // area-average down, bilinear up
-void img_blur(Image *img, int radius, int passes);  // separable box blur, in place
 void img_round(Image *img, float radius);           // anti-aliased rounded-corner mask
 int img_save_raw(const Image *img, const char *path);
 Image *img_load_raw(const char *path);
+// Record each row's opaque run so gfx_blit can copy it instead of blending.
+// Call again after changing the pixels.
+void img_find_spans(Image *img);
 
 void gfx_clear(Image *dst, uint32_t c);
 void gfx_fill_rect(Image *dst, int x, int y, int w, int h, uint32_t c);
@@ -32,6 +35,12 @@ void gfx_fill_rrect(Image *dst, float x, float y, float w, float h, float r, uin
 void gfx_stroke_rrect(Image *dst, float x, float y, float w, float h, float r, float t, uint32_t c);
 void gfx_blit(Image *dst, const Image *src, int x, int y, uint8_t alpha);
 void gfx_blit_scaled(Image *dst, const Image *src, float x, float y, float w, float h, uint8_t alpha);
+// Nearest-neighbour variant for short, fading motion where filtering is invisible.
+void gfx_blit_scaled_nearest(Image *dst, const Image *src, float x, float y, float w, float h, uint8_t alpha);
 void gfx_mask_a8(Image *dst, const uint8_t *mask, int mw, int mh, int x, int y, uint32_t c);
+// Draw a w x h mask stretched from an mw x mh one: corner x corner blocks stay fixed,
+// edges repeat the middle row/column, and the (empty) interior is skipped.
+void gfx_mask_a8_9slice(Image *dst, const uint8_t *mask, int mw, int mh, int corner,
+                        int x, int y, int w, int h, uint32_t c);
 
 #endif

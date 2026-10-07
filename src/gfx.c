@@ -41,6 +41,7 @@ Image *img_new(int w, int h)
     img->w = w;
     img->h = h;
     img->px = calloc((size_t)w * h, 4);
+    img->spans = NULL;
     if (!img->px) { free(img); return NULL; }
     return img;
 }
@@ -49,7 +50,23 @@ void img_free(Image *img)
 {
     if (!img) return;
     free(img->px);
+    free(img->spans);
     free(img);
+}
+
+void img_find_spans(Image *img)
+{
+    if (!img->spans) img->spans = malloc(sizeof *img->spans * 2 * img->h);
+    if (!img->spans) return;
+    for (int y = 0; y < img->h; y++) {
+        const uint32_t *row = img->px + y * img->w;
+        int a = 0;
+        while (a < img->w && row[a] >> 24 != 255) a++;
+        int b = a;
+        while (b < img->w && row[b] >> 24 == 255) b++;
+        img->spans[2 * y] = (int16_t)a;
+        img->spans[2 * y + 1] = (int16_t)b;
+    }
 }
 
 Image *img_load(const char *path)
@@ -122,41 +139,17 @@ Image *img_resize(const Image *src, int w, int h)
     return dst;
 }
 
-static void blur_line(uint32_t *buf, uint32_t *tmp, int n, int stride, int r)
-{
-    for (int i = 0; i < n; i++) tmp[i] = buf[i * stride];
-    uint32_t sum[4] = {0};
-    int win = 2 * r + 1;
-    for (int i = -r; i <= r; i++) {
-        uint32_t p = tmp[i < 0 ? 0 : (i >= n ? n - 1 : i)];
-        for (int c = 0; c < 4; c++) sum[c] += (p >> (c * 8)) & 255;
-    }
-    for (int i = 0; i < n; i++) {
-        buf[i * stride] = (sum[0] / win) | ((sum[1] / win) << 8) | ((sum[2] / win) << 16) | ((sum[3] / win) << 24);
-        int out = i - r, in = i + r + 1;
-        uint32_t po = tmp[out < 0 ? 0 : out], pi = tmp[in >= n ? n - 1 : in];
-        for (int c = 0; c < 4; c++) sum[c] += ((pi >> (c * 8)) & 255) - ((po >> (c * 8)) & 255);
-    }
-}
-
-void img_blur(Image *img, int radius, int passes)
-{
-    int n = img->w > img->h ? img->w : img->h;
-    uint32_t *tmp = malloc((size_t)n * 4);
-    if (!tmp) return;
-    for (int p = 0; p < passes; p++) {
-        for (int y = 0; y < img->h; y++) blur_line(img->px + y * img->w, tmp, img->w, 1, radius);
-        for (int x = 0; x < img->w; x++) blur_line(img->px + x, tmp, img->h, img->w, radius);
-    }
-    free(tmp);
-}
-
 // Coverage of pixel (px,py) inside a rounded rect, 0..1.
 static float rrect_cov(float px, float py, float x, float y, float w, float h, float r)
 {
     float cx = px < x + r ? x + r : (px > x + w - r ? x + w - r : px);
     float cy = py < y + r ? y + r : (py > y + h - r ? y + h - r : py);
     float dx = px - cx, dy = py - cy;
+    // Interior strips are fully covered; reserve square roots for corner edges.
+    if (r >= .5f && (dx == 0 || dy == 0) &&
+        px >= x + 1 && px <= x + w - 1 &&
+        py >= y + 1 && py <= y + h - 1)
+        return 1;
     float d = sqrtf(dx * dx + dy * dy) - r; // signed distance to edge for corners
     if (px < x || px > x + w || py < y || py > y + h) {
         float ex = px < x ? x - px : (px > x + w ? px - x - w : 0);
@@ -261,6 +254,17 @@ void gfx_blit(Image *dst, const Image *src, int x, int y, uint8_t alpha)
     for (int sy = sy0; sy < sy1; sy++) {
         const uint32_t *s = src->px + sy * src->w;
         uint32_t *d = dst->px + (y + sy) * dst->w + x;
+        if (alpha == 255 && src->spans) {
+            // Blend the soft edges, copy the opaque middle.
+            int a = src->spans[2 * sy], b = src->spans[2 * sy + 1];
+            if (a < sx0) a = sx0;
+            if (b > sx1) b = sx1;
+            if (a >= b) a = b = sx1;
+            for (int sx = sx0; sx < a; sx++) d[sx] = over(d[sx], s[sx]);
+            memcpy(d + a, s + a, (size_t)(b - a) * sizeof *d);
+            for (int sx = b; sx < sx1; sx++) d[sx] = over(d[sx], s[sx]);
+            continue;
+        }
         for (int sx = sx0; sx < sx1; sx++) d[sx] = over(d[sx], alpha == 255 ? s[sx] : scale_px(s[sx], alpha));
     }
 }
@@ -277,16 +281,76 @@ void gfx_blit_scaled(Image *dst, const Image *src, float x, float y, float w, fl
     if (y0 < 0) y0 = 0;
     if (x1 > dst->w) x1 = dst->w;
     if (y1 > dst->h) y1 = dst->h;
+    if (x1 <= x0 || y1 <= y0) return;
     float kx = src->w / w, ky = src->h / h;
+    // Separable bilinear sampling: compute horizontal coordinates once per column,
+    // and vertical coordinates once per row. UI canvases bound this stack map.
+    struct Column { int a, b; uint32_t weight; int valid; } columns[x1 - x0];
+    for (int xx = x0; xx < x1; xx++) {
+        struct Column *col = &columns[xx - x0];
+        float fx = (xx + .5f - x) * kx;
+        col->valid = fx >= 0 && fx < src->w;
+        if (!col->valid) continue;
+        fx -= .5f;
+        if (fx < 0) fx = 0;
+        col->a = (int)fx;
+        col->b = col->a + 1 < src->w ? col->a + 1 : src->w - 1;
+        if (col->a >= src->w) col->a = col->b = src->w - 1;
+        col->weight = (uint32_t)((fx - col->a) * 256);
+    }
     for (int yy = y0; yy < y1; yy++) {
-        float fy = (yy + 0.5f - y) * ky;
+        float fy = (yy + .5f - y) * ky;
         if (fy < 0 || fy >= src->h) continue;
+        fy -= .5f;
+        if (fy < 0) fy = 0;
+        int ya = (int)fy, yb = ya + 1 < src->h ? ya + 1 : src->h - 1;
+        if (ya >= src->h) ya = yb = src->h - 1;
+        uint32_t ty = (uint32_t)((fy - ya) * 256), iy = 256 - ty;
+        const uint32_t *top = src->px + ya * src->w, *bottom = src->px + yb * src->w;
+        uint32_t *row = dst->px + yy * dst->w;
         for (int xx = x0; xx < x1; xx++) {
-            float fx = (xx + 0.5f - x) * kx;
-            if (fx < 0 || fx >= src->w) continue;
-            uint32_t p = sample(src, fx, fy);
-            uint32_t *d = &dst->px[yy * dst->w + xx];
-            *d = over(*d, alpha == 255 ? p : scale_px(p, alpha));
+            const struct Column *col = &columns[xx - x0];
+            if (!col->valid) continue;
+            uint32_t tx = col->weight, ix = 256 - tx;
+            uint32_t a = top[col->a], b = top[col->b], d = bottom[col->a], e = bottom[col->b];
+            // Two 16-bit lanes retain the original sampler's precision/rounding.
+            uint32_t trb = (a & 0x00ff00ffu) * ix + (b & 0x00ff00ffu) * tx;
+            uint32_t brb = (d & 0x00ff00ffu) * ix + (e & 0x00ff00ffu) * tx;
+            uint32_t tag = ((a >> 8) & 0x00ff00ffu) * ix + ((b >> 8) & 0x00ff00ffu) * tx;
+            uint32_t bag = ((d >> 8) & 0x00ff00ffu) * ix + ((e >> 8) & 0x00ff00ffu) * tx;
+            uint32_t blue = ((trb & 65535) * iy + (brb & 65535) * ty) >> 16;
+            uint32_t red = ((trb >> 16) * iy + (brb >> 16) * ty) >> 16;
+            uint32_t green = ((tag & 65535) * iy + (bag & 65535) * ty) >> 16;
+            uint32_t opacity = ((tag >> 16) * iy + (bag >> 16) * ty) >> 16;
+            uint32_t p = blue | (green << 8) | (red << 16) | (opacity << 24);
+            row[xx] = over(row[xx], alpha == 255 ? p : scale_px(p, alpha));
+        }
+    }
+}
+
+void gfx_blit_scaled_nearest(Image *dst, const Image *src, float x, float y, float w, float h, uint8_t alpha)
+{
+    if (w <= 0 || h <= 0) return;
+    int x0 = (int)floorf(x), y0 = (int)floorf(y), x1 = (int)ceilf(x + w), y1 = (int)ceilf(y + h);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > dst->w) x1 = dst->w;
+    if (y1 > dst->h) y1 = dst->h;
+    if (x1 <= x0 || y1 <= y0) return;
+    float kx = src->w / w, ky = src->h / h;
+    int columns[x1 - x0];
+    for (int xx = x0; xx < x1; xx++) {
+        int sx = (int)((xx + .5f - x) * kx);
+        columns[xx - x0] = sx < 0 ? 0 : sx >= src->w ? src->w - 1 : sx;
+    }
+    for (int yy = y0; yy < y1; yy++) {
+        int sy = (int)((yy + .5f - y) * ky);
+        if (sy < 0 || sy >= src->h) continue;
+        const uint32_t *s = src->px + sy * src->w;
+        uint32_t *row = dst->px + yy * dst->w;
+        for (int xx = x0; xx < x1; xx++) {
+            uint32_t p = s[columns[xx - x0]];
+            row[xx] = over(row[xx], alpha == 255 ? p : scale_px(p, alpha));
         }
     }
 }
@@ -303,6 +367,28 @@ void gfx_mask_a8(Image *dst, const uint8_t *mask, int mw, int mh, int x, int y, 
             if (!a) continue;
             uint32_t *d = &dst->px[yy * dst->w + xx];
             *d = over(*d, scale_px(c, a));
+        }
+    }
+}
+
+void gfx_mask_a8_9slice(Image *dst, const uint8_t *mask, int mw, int mh, int corner,
+                        int x, int y, int w, int h, uint32_t c)
+{
+    if (w < 2 * corner || h < 2 * corner) return;
+    for (int yy = 0; yy < h; yy++) {
+        int dy = y + yy;
+        if (dy < 0 || dy >= dst->h) continue;
+        int edge = yy < corner || yy >= h - corner;
+        int sy = yy < corner ? yy : yy >= h - corner ? mh - (h - yy) : corner;
+        const uint8_t *row = mask + sy * mw;
+        uint32_t *d = dst->px + dy * dst->w;
+        for (int xx = 0; xx < w; xx++) {
+            if (!edge && xx == corner) xx = w - corner; // empty middle of a side row
+            int dx = x + xx;
+            if (dx < 0 || dx >= dst->w) continue;
+            int sx = xx < corner ? xx : xx >= w - corner ? mw - (w - xx) : corner;
+            uint8_t a = row[sx];
+            if (a) d[dx] = over(d[dx], scale_px(c, a));
         }
     }
 }

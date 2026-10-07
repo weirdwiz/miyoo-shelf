@@ -13,6 +13,8 @@ void ui_update(float dt);
 void ui_draw(Image *canvas);
 // Game index ready to launch once the launch animation finishes, else -1. Clears the request.
 int ui_take_launch(void);
+// Nonzero once per button press that moved the selection or changed view (UI click sound).
+int ui_take_sound(void);
 // Call after the library's recents changed: rebuilds the home row with the first item selected.
 void ui_reset_home(void);
 
