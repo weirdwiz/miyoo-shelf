@@ -107,6 +107,7 @@ static struct {
     int options, osel;       // Options panel open, its selected row
     int boot;                // Shelf is Onion's home screen (boot hook installed)
     int action;              // pending UiAction
+    int battery, charging, wifi; // see ui_set_status
 } S;
 
 // Options rows, top to bottom.
@@ -165,6 +166,7 @@ int ui_init(Library *lib, const char *font_dir)
     for (int i = 0; i < lib->nsys; i++) add_folder(F_SYS, i, lib->sys[i].label, lib->sys[i].color);
 
     S.launching = -1;
+    S.battery = S.wifi = -1;
     S.dark = P == &PALETTES[1];
     S.enter.x = S.enter.t = 1;
     for (int i = 0; i < home_count(); i++) S.hscale[i].x = S.hscale[i].t = 1;
@@ -288,6 +290,13 @@ void ui_set_dark(int dark)
 int ui_dark(void) { return S.dark; }
 
 void ui_set_boot(int on) { S.boot = on; }
+
+void ui_set_status(int battery, int charging, int wifi)
+{
+    S.battery = battery;
+    S.charging = charging;
+    S.wifi = wifi;
+}
 
 static void options_button(Button b)
 {
@@ -617,12 +626,88 @@ static void draw_cursor(Image *c, float cx, float cy, float w)
                        argb(230, 255, 255, 255));
 }
 
+// Status glyphs are coverage masks, 4x4 supersampled once from a shape test.
+#define WIFI_W 23
+#define WIFI_H 17
+#define BOLT_W 9
+#define BOLT_H 13
+static uint8_t wifi_mask[4][WIFI_W * WIFI_H], bolt_mask[BOLT_W * BOLT_H];
+
+// Wi-Fi fan: part 0 is the dot, 1..3 the arcs, within 45° of vertical.
+static int in_wifi(float x, float y, int part)
+{
+    float dx = x - WIFI_W / 2.f, dy = WIFI_H - .5f - y, r = sqrtf(dx * dx + dy * dy);
+    if (dy < 0 || fabsf(dx) > dy + .5f) return 0;
+    static const float BAND[4][2] = {{0, 2.6f}, {5, 7.6f}, {10, 12.6f}, {15, 17.6f}};
+    return r >= BAND[part][0] && r < BAND[part][1];
+}
+
+static int in_bolt(float x, float y)
+{
+    static const float PT[][2] = {{5.5f, 0}, {0.5f, 7.5f}, {4.2f, 7.5f}, {3.2f, 13}, {8.5f, 5.2f}, {4.8f, 5.2f}};
+    int n = sizeof PT / sizeof PT[0], in = 0;
+    for (int i = 0, j = n - 1; i < n; j = i++)
+        if ((PT[i][1] > y) != (PT[j][1] > y) &&
+            x < (PT[j][0] - PT[i][0]) * (y - PT[i][1]) / (PT[j][1] - PT[i][1]) + PT[i][0])
+            in = !in;
+    return in;
+}
+
+static void build_status_masks(void)
+{
+    static int built;
+    if (built) return;
+    built = 1;
+    for (int part = 0; part < 4; part++)
+        for (int y = 0; y < WIFI_H; y++)
+            for (int x = 0; x < WIFI_W; x++) {
+                int n = 0;
+                for (int s = 0; s < 16; s++) n += in_wifi(x + (s % 4 + .5f) / 4, y + (s / 4 + .5f) / 4, part);
+                wifi_mask[part][y * WIFI_W + x] = (uint8_t)(n * 255 / 16);
+            }
+    for (int y = 0; y < BOLT_H; y++)
+        for (int x = 0; x < BOLT_W; x++) {
+            int n = 0;
+            for (int s = 0; s < 16; s++) n += in_bolt(x + (s % 4 + .5f) / 4, y + (s / 4 + .5f) / 4);
+            bolt_mask[y * BOLT_W + x] = (uint8_t)(n * 255 / 16);
+        }
+}
+
+// Right-aligned at `right`; returns the left edge.
+static int draw_battery(Image *c, int right, int y)
+{
+    const int bw = 27, bh = 14;
+    int x = right - bw - 3;
+    uint32_t ink = rgb(C_SUB);
+    uint32_t fill = S.charging ? rgb(0x30a46c) : S.battery <= 15 ? rgb(0xe5484d) : ink;
+    gfx_stroke_rrect(c, x, y, bw, bh, 4, 1.6f, ink);
+    gfx_fill_rrect(c, x + bw + .5f, y + 4, 2.5f, bh - 8, 1, ink);
+    float w = (bw - 6) * (S.battery < 0 ? 0 : S.battery > 100 ? 100 : S.battery) / 100.f;
+    if (w > .5f) gfx_fill_rrect(c, x + 3, y + 3, w < 2 ? 2 : w, bh - 6, 1.5f, fill);
+    if (S.charging) gfx_mask_a8(c, bolt_mask, BOLT_W, BOLT_H, x - BOLT_W - 5, y, fill);
+    char pct[8];
+    snprintf(pct, sizeof pct, "%d%%", S.battery);
+    int tx = x - (S.charging ? BOLT_W + 9 : 6) - text_width(S.small, pct);
+    text_draw(c, S.small, pct, tx, y - 4, rgb(C_SUB));
+    return tx;
+}
+
 static void draw_status(Image *c)
 {
     char buf[64];
     time_t now = time(NULL);
     strftime(buf, sizeof buf, "%a %d %b · %H:%M", localtime(&now));
     text_draw(c, S.small, buf, 16, 7, rgb(C_SUB));
+    build_status_masks();
+    int x = SCREEN_W - 16, y = 11;
+    if (S.battery >= 0) x = draw_battery(c, x, y) - 14;
+    if (S.wifi >= 0) { // bars lit up to the signal; all dim while not connected
+        for (int part = 0; part < 4; part++) {
+            int lit = S.wifi > 0 && (part == 0 || part <= S.wifi);
+            gfx_mask_a8(c, wifi_mask[part], WIFI_W, WIFI_H, x - WIFI_W, y - 3,
+                        lit ? rgb(C_SUB) : rgb(P->line));
+        }
+    }
 }
 
 // Hints name the Miyoo's printed labels: A B X Y, L1 R1, SELECT START MENU.

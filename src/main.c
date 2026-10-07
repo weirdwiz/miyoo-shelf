@@ -44,6 +44,57 @@ static void settings_save(void)
     if (fclose(f) == 0) rename(tmp, path);
 }
 
+static int read_small(const char *path, char *buf, int n)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    size_t len = fread(buf, 1, n - 1, f);
+    fclose(f);
+    buf[len] = 0;
+    return (int)len;
+}
+
+// Battery from Onion's batmon (/tmp/.axp_result on the Mini Plus, else /tmp/percBat) and
+// Wi-Fi from the kernel. SHELF_STATUS="pct,charging,wifi" stands in on the simulator.
+static void status_poll(int sim)
+{
+    int battery = -1, charging = 0, wifi = -1;
+    char buf[512];
+    const char *fake = getenv("SHELF_STATUS");
+    if (fake || sim) {
+        if (!fake || sscanf(fake, "%d,%d,%d", &battery, &charging, &wifi) != 3) {
+            battery = 76; charging = 0; wifi = 3;
+        }
+        ui_set_status(battery, charging, wifi);
+        return;
+    }
+    if (read_small("/tmp/.axp_result", buf, sizeof buf) > 0) {
+        cJSON *j = cJSON_Parse(buf);
+        cJSON *b = cJSON_GetObjectItem(j, "battery"), *ch = cJSON_GetObjectItem(j, "charging");
+        if (cJSON_IsNumber(b)) battery = b->valueint;
+        charging = cJSON_IsNumber(ch) && ch->valueint;
+        cJSON_Delete(j);
+    }
+    if (battery < 0 && read_small("/tmp/percBat", buf, sizeof buf) > 0) battery = atoi(buf);
+    if (battery > 100) battery = 100;
+
+    unsigned flags = 0;
+    if (read_small("/sys/class/net/wlan0/flags", buf, sizeof buf) > 0 &&
+        sscanf(buf, "%x", &flags) == 1 && (flags & 1)) { // IFF_UP: Onion's Wi-Fi is on
+        wifi = 0;
+        if (read_small("/sys/class/net/wlan0/operstate", buf, sizeof buf) > 0 && !strncmp(buf, "up", 2) &&
+            read_small("/proc/net/wireless", buf, sizeof buf) > 0) {
+            const char *line = strstr(buf, "wlan0:");
+            float link, level;
+            int status;
+            if (line && sscanf(line + 6, "%x %f %f", &status, &link, &level) == 3)
+                wifi = level >= -60 ? 3 : level >= -70 ? 2 : 1;
+            else wifi = 1;
+        }
+    }
+    ui_set_status(battery, charging, wifi);
+}
+
 // SHELF_SHOT=out.ppm SHELF_KEYS="RRA..." renders without a window: each key is pressed
 // and given 0.6s of animation, then the final frame is written. Keys: U D L R A B Y l r s
 // (s = START).
@@ -107,6 +158,7 @@ int main(int argc, char **argv)
     if (ui_init(&lib, font_dir)) { fprintf(stderr, "shelf: fonts missing in %s\n", font_dir); return 1; }
     Image *canvas = img_new(SCREEN_W, SCREEN_H);
 
+    status_poll(sim);
     const char *shot = getenv("SHELF_SHOT");
     if (shot) return headless(&lib, cmd_path, canvas, getenv("SHELF_KEYS"), shot);
 
@@ -166,7 +218,9 @@ int main(int argc, char **argv)
     double stat_t0 = platform_now(), work = 0, worst = 0;
     double draw_work = 0, present_work = 0;
     int frames = 0;
+    double next_status = platform_now() + 5;
     while (running) {
+        if (platform_now() >= next_status) { status_poll(sim); next_status = platform_now() + 5; }
         Button b;
         while ((b = platform_poll()) != BTN_NONE) {
             if (b == BTN_QUIT) running = 0;

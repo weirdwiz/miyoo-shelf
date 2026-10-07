@@ -25,5 +25,8 @@ void ui_set_dark(int dark);   // may be called before ui_init
 int ui_dark(void);
 // Whether Shelf is Onion's home screen; picks the Options row that switches it.
 void ui_set_boot(int on);
+// Status bar: battery percent (-1 hides it), charging, Wi-Fi bars 1..3 (0 = on but not
+// connected, -1 = off, hidden).
+void ui_set_status(int battery, int charging, int wifi);
 
 #endif

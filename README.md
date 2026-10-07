@@ -15,6 +15,8 @@ A DSi/3DS-style home screen for the Miyoo Mini and Mini Plus that runs on top of
   console) at the end of the same row, with springy DS-style scrolling.
 - **Folders:** a 3-row grid that scrolls sideways. Y cycles the sort (A–Z, Recent, Favorites).
 - **Icons:** your existing box art in padded square frames, cached on the SD card.
+- **Status bar:** date and time, Wi-Fi signal, and battery level (green with a bolt while
+  charging, red at 15% or less), read from Onion's battery monitor.
 - **Sound:** navigation clicks use the active Onion theme's `change.wav`.
 - **Options (START):** dark mode, switching the home screen between Shelf and Onion's menu,
   and opening Onion's menu once. Saved in `App/Shelf/settings.json`.
