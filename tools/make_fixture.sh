@@ -82,4 +82,23 @@ entry() { # dir ext name
     entry SFC sfc "Super Metroid (Japan, USA) (En,Ja)"
     entry GB gb "Tetris (World) (Rev 1)"
 } > "$SD/Roms/favourite.json"
+# Onion's play activity DB: one rom row per game, one play_activity row per session.
+PA="$SD/Saves/CurrentProfile/play_activity"
+if command -v sqlite3 >/dev/null; then
+    mkdir -p "$PA"
+    rm -f "$PA/play_activity_db.sqlite"
+    sqlite3 "$PA/play_activity_db.sqlite" <<'EOF'
+CREATE TABLE rom(id INTEGER PRIMARY KEY, type TEXT, name TEXT, file_path TEXT, image_path TEXT, created_at INTEGER DEFAULT (strftime('%s', 'now')), updated_at INTEGER);
+CREATE TABLE play_activity(rom_id INTEGER, play_time INTEGER, created_at INTEGER DEFAULT (strftime('%s', 'now')), updated_at INTEGER);
+INSERT INTO rom(id, name, file_path) VALUES
+ (1, 'Castlevania - Aria of Sorrow (USA)', 'GBA/Castlevania - Aria of Sorrow (USA).gba'),
+ (2, 'Pokemon - Emerald Version (USA, Europe)', 'GBA/Pokemon - Emerald Version (USA, Europe).gba'),
+ (3, 'Super Metroid (Japan, USA) (En,Ja)', 'SFC/Super Metroid (Japan, USA) (En,Ja).sfc'),
+ (4, 'Advance Wars (USA)', 'GBA/Advance Wars (USA).gba');
+INSERT INTO play_activity(rom_id, play_time, created_at) VALUES
+ (1, 14400, strftime('%s', 'now') - 9 * 86400), (1, 9720, strftime('%s', 'now') - 86400),
+ (2, 3000, strftime('%s', 'now') - 3600), (3, 41000, strftime('%s', 'now') - 3 * 86400),
+ (4, 40, strftime('%s', 'now') - 40 * 86400);
+EOF
+fi
 echo "fixture ready: $SD"

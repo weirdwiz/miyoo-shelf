@@ -33,16 +33,18 @@ static const Palette *P = &PALETTES[0];
 #define DIVIDER_GAP 20   // extra space between Recent and Library
 #define CENTER_X 236     // (640 - 168) / 2
 
-// Folder grid geometry.
-#define G_TILE 88
-#define G_COL 104
-#define G_ROW 98
+// Folder view: the grid on the left, the selected game's detail panel on the right.
+// Three rows of small tiles, or two rows of big ones when the folder fits in a 2x2 block.
+typedef struct { int tile, col, row, rows, vis; } Grid;
+static const Grid GRIDS[2] = {{88, 100, 98, 3, 3}, {136, 152, 152, 2, 2}};
 #define G_X 24
 #define G_Y 100
-#define G_ROWS 3
-#define G_VIS 5
+#define G_EDGE 320       // tiles scrolling right slide under the panel from here
+#define PANEL_X 330
+#define PANEL_Y 40
+#define PANEL_W 290
+#define PANEL_H 382
 #define FOOTER_H 46
-#define CAPTION_Y 394
 
 typedef struct { float x, v, t; } Spring;
 
@@ -73,12 +75,12 @@ typedef struct {
 } Folder;
 
 enum { V_HOME, V_FOLDER };
-static const char *SORTS[] = {"A–Z", "Recent", "Favorites"};
+static const char *SORTS[] = {"A–Z", "Recent first", "Favorites first"};
 
 static struct {
     Library *lib;
     Font *title, *body, *small, *label;
-    Image *bg, *layer, *scene, *caption;
+    Image *bg, *layer, *scene;
     int scene_dirty;
     unsigned art_revision, scene_builds;
     Folder folders[MAX_SYSTEMS + 2];
@@ -93,6 +95,7 @@ static struct {
     Spring hscale[MAX_RECENT + MAX_SYSTEMS + 2];
 
     int folder, fsel, sort, fcol;
+    const Grid *grid;
     int *fgames, nfg;
     Spring ftrack;
     Spring *fscale;
@@ -158,7 +161,6 @@ int ui_init(Library *lib, const char *font_dir)
     build_bg();
     S.layer = img_new(SCREEN_W, SCREEN_H);
     S.scene = img_new(SCREEN_W, SCREEN_H);
-    S.caption = img_new(SCREEN_W, 40);
     S.scene_dirty = 1;
 
     add_folder(F_ALL, -1, "All games", 0x2b3040);
@@ -182,7 +184,6 @@ void ui_free(void)
     img_free(S.bg);
     img_free(S.layer);
     img_free(S.scene);
-    img_free(S.caption);
     tiles_free();
     font_free(S.title); font_free(S.body); font_free(S.small); font_free(S.label);
 }
@@ -212,13 +213,14 @@ static int cmp_fg(const void *a, const void *b)
 
 static void folder_select(int i)
 {
+    const Grid *g = S.grid;
     S.fsel = i;
-    int col = i / G_ROWS, cols = (S.nfg + G_ROWS - 1) / G_ROWS;
+    int col = i / g->rows, cols = (S.nfg + g->rows - 1) / g->rows;
     if (col < S.fcol) S.fcol = col;
-    if (col > S.fcol + G_VIS - 1) S.fcol = col - G_VIS + 1;
-    if (S.fcol > cols - G_VIS) S.fcol = cols - G_VIS;
+    if (col > S.fcol + g->vis - 1) S.fcol = col - g->vis + 1;
+    if (S.fcol > cols - g->vis) S.fcol = cols - g->vis;
     if (S.fcol < 0) S.fcol = 0;
-    S.ftrack.t = G_X - S.fcol * G_COL;
+    S.ftrack.t = G_X - S.fcol * g->col;
     for (int k = 0; k < S.nfg; k++) S.fscale[k].t = k == i ? 1.1f : 1.f;
 }
 
@@ -230,6 +232,7 @@ static void folder_open(int f)
     free(S.fgames);
     free(S.fscale);
     S.nfg = fd->ngames;
+    S.grid = &GRIDS[S.nfg <= 4];
     S.fgames = malloc(sizeof(int) * (S.nfg ? S.nfg : 1));
     memcpy(S.fgames, fd->games, sizeof(int) * S.nfg);
     sort_mode = S.sort;
@@ -331,14 +334,14 @@ static void ui_button_inner(Button b)
             else folder_open(S.sel - S.lib->nrecent);
         }
     } else {
-        int i = S.fsel;
-        if (b == BTN_LEFT && i - G_ROWS >= 0) folder_select(i - G_ROWS);
+        int i = S.fsel, rows = S.grid->rows;
+        if (b == BTN_LEFT && i - rows >= 0) folder_select(i - rows);
         if (b == BTN_RIGHT) {
-            if (i + G_ROWS < S.nfg) folder_select(i + G_ROWS);
-            else if ((i / G_ROWS + 1) * G_ROWS < S.nfg) folder_select(S.nfg - 1); // ragged last column
+            if (i + rows < S.nfg) folder_select(i + rows);
+            else if ((i / rows + 1) * rows < S.nfg) folder_select(S.nfg - 1); // ragged last column
         }
-        if (b == BTN_UP && i % G_ROWS > 0) folder_select(i - 1);
-        if (b == BTN_DOWN && i % G_ROWS < G_ROWS - 1 && i + 1 < S.nfg) folder_select(i + 1);
+        if (b == BTN_UP && i % rows > 0) folder_select(i - 1);
+        if (b == BTN_DOWN && i % rows < rows - 1 && i + 1 < S.nfg) folder_select(i + 1);
         if (b == BTN_L) folder_select(0);
         if (b == BTN_R && S.nfg) folder_select(S.nfg - 1);
         if (b == BTN_Y) { S.sort = (S.sort + 1) % 3; int f = S.folder; folder_open(f); S.enter.x = 1; }
@@ -489,11 +492,13 @@ typedef struct {
 static TileSprite tiles[TILE_CACHE_CAP];
 static Image *footer_img;      // see draw_footer
 static char footer_key[160];
+static Image *panel_base, *panel_img; // see draw_detail
+static int panel_game = -1, panel_art;
 static unsigned tile_clock;
-// Selection ring masks, rasterized once per kind (home row, folder grid) at the selected
-// size and 9-sliced to whatever size the zoom spring is at.
+// Selection ring masks, rasterized once per tile size (home row, each folder grid) at the
+// selected size and 9-sliced to whatever size the zoom spring is at.
 typedef struct { uint8_t *outer, *inner; int size, pad, extent, corner; } CursorMask;
-static CursorMask cursors[2];
+static CursorMask cursors[3];
 
 static void tiles_free(void)
 {
@@ -502,7 +507,8 @@ static void tiles_free(void)
         memset(&tiles[i], 0, sizeof tiles[i]);
     }
     img_free(footer_img); footer_img = NULL; footer_key[0] = 0;
-    for (int k = 0; k < 2; k++) {
+    img_free(panel_base); img_free(panel_img); panel_base = panel_img = NULL; panel_game = -1;
+    for (int k = 0; k < 3; k++) {
         free(cursors[k].outer);
         free(cursors[k].inner);
         memset(&cursors[k], 0, sizeof cursors[k]);
@@ -546,10 +552,12 @@ static const Image *tile_sprite(int kind, int id, int size, int big)
     return slot->image;
 }
 
-static void draw_tile(Image *c, int kind, int id, float cx, float cy, float w, int big)
+// Size of a `base` tile while selected: home tiles zoom 8%, folder tiles 10%.
+static int zoomed(int base) { return (int)lroundf(base * (base == TILE ? 1.08f : 1.1f)); }
+
+static void draw_tile(Image *c, int kind, int id, float cx, float cy, float w, int base)
 {
-    int base = big ? TILE : G_TILE;
-    int selected = (int)lroundf(base * (big ? 1.08f : 1.1f));
+    int big = base > ICON_SMALL, selected = zoomed(base);
     int size = fabsf(w - selected) < .6f ? selected : base;
     const Image *sprite = tile_sprite(kind, id, size, big);
     if (!sprite) {
@@ -568,14 +576,14 @@ static void draw_tile(Image *c, int kind, int id, float cx, float cy, float w, i
     }
 }
 
-static void draw_game(Image *c, int gi, float cx, float cy, float w, int big)
+static void draw_game(Image *c, int gi, float cx, float cy, float w, int base)
 {
-    draw_tile(c, 0, gi, cx, cy, w, big);
+    draw_tile(c, 0, gi, cx, cy, w, base);
 }
 
 static void draw_folder(Image *c, const Folder *f, float cx, float cy, float w)
 {
-    draw_tile(c, 1, (int)(f - S.folders), cx, cy, w, 1);
+    draw_tile(c, 1, (int)(f - S.folders), cx, cy, w, TILE);
 }
 
 // Game count bubble on a folder's corner; drawn after the cursor so it stays readable.
@@ -590,13 +598,19 @@ static void draw_folder_badge(Image *c, const Folder *f, float cx, float cy, flo
     text_draw(c, S.small, n, (int)(x + w - bw + 18), (int)(y - 8), rgb(C_INK));
 }
 
-static void draw_cursor(Image *c, float cx, float cy, float w)
+static void draw_cursor(Image *c, float cx, float cy, float w, int base)
 {
     float p = .5f + .5f * sinf(S.t * 5.7f);
-    int big = w > 120;
-    CursorMask *m = &cursors[big];
+    int size = zoomed(base);
+    CursorMask *m = NULL;
+    for (int k = 0; k < 3 && !m; k++)
+        if (!cursors[k].outer || cursors[k].size == size) m = &cursors[k];
+    if (!m) { // a fourth size: reuse the first slot
+        m = &cursors[0];
+        free(m->outer); free(m->inner);
+        memset(m, 0, sizeof *m);
+    }
     if (!m->outer) {
-        int size = (int)lroundf((big ? TILE : G_TILE) * (big ? 1.08f : 1.1f));
         float o = 7.f * size / TILE + 1;
         int pad = (int)ceilf(o) + 2, extent = size + 2 * pad;
         Image *outer = img_new(extent, extent), *inner = img_new(extent, extent);
@@ -617,9 +631,9 @@ static void draw_cursor(Image *c, float cx, float cy, float w)
         img_free(outer); img_free(inner);
         *m = (CursorMask){om, im, size, pad, extent, pad + (int)ceilf(size * .085f) + 2};
     }
-    int size = (int)lroundf(w), extent = size + 2 * m->pad;
-    int x = (int)lroundf(cx - size / 2.f) - m->pad;
-    int y = (int)lroundf(cy - size / 2.f) - m->pad;
+    int ring = (int)lroundf(w), extent = ring + 2 * m->pad;
+    int x = (int)lroundf(cx - ring / 2.f) - m->pad;
+    int y = (int)lroundf(cy - ring / 2.f) - m->pad;
     gfx_mask_a8_9slice(c, m->outer, m->extent, m->extent, m->corner, x, y, extent, extent,
                        lerp_rgb(C_SEL, C_SEL2, p));
     gfx_mask_a8_9slice(c, m->inner, m->extent, m->extent, m->corner, x, y, extent, extent,
@@ -759,7 +773,7 @@ static void draw_home(Image *c)
         text_center(c, S.title, g->title, SCREEN_W / 2, 44, rgb(C_INK), SCREEN_W - 60);
     } else {
         const Folder *f = &S.folders[S.sel - L->nrecent];
-        snprintf(meta, sizeof meta, "Folder · %d games", f->ngames);
+        snprintf(meta, sizeof meta, "Folder · %d game%s", f->ngames, f->ngames == 1 ? "" : "s");
         text_center(c, S.title, f->label, SCREEN_W / 2, 44, rgb(C_INK), SCREEN_W - 60);
     }
     text_center(c, S.body, meta, SCREEN_W / 2, 86, rgb(C_SUB), SCREEN_W - 60);
@@ -775,7 +789,7 @@ static void draw_home(Image *c)
             if ((i == S.sel) != pass) continue;
             float cx = tx + item_x(i) + TILE / 2.f, w = TILE * S.hscale[i].x;
             if (cx + w < -20 || cx - w > SCREEN_W + 20) continue;
-            if (i < L->nrecent) draw_game(c, L->recent[i], cx, cy, w, 1);
+            if (i < L->nrecent) draw_game(c, L->recent[i], cx, cy, w, TILE);
             else draw_folder(c, &S.folders[i - L->nrecent], cx, cy, w);
             if (i >= L->nrecent) draw_folder_badge(c, &S.folders[i - L->nrecent], cx, cy, w);
         }
@@ -790,43 +804,145 @@ static void draw_home(Image *c)
     draw_footer(c, H, 8);
 }
 
-static void draw_folder_caption(Image *c, int y)
+// Splits s at spaces into up to `max` lines no wider than max_w; the last line takes the
+// rest, cut with an ellipsis. Returns the line count.
+static int wrap_text(Font *f, const char *s, int max_w, char out[][128], int max)
 {
-    const Game *g = &S.lib->games[S.fgames[S.fsel]];
-    char name[200];
-    snprintf(name, sizeof name, "%s · %s", g->title, S.lib->sys[g->sys].label);
-    text_center(c, S.label, name, SCREEN_W / 2, y, rgb(C_INK), SCREEN_W - 48);
+    int n = 0;
+    while (*s && n < max) {
+        while (*s == ' ') s++;
+        int fit = 0;
+        for (int i = 1; n < max - 1; i++) { // longest run of whole words that fits
+            if (s[i] != ' ' && s[i]) continue;
+            char t[128];
+            snprintf(t, sizeof t, "%.*s", i, s);
+            if (text_width(f, t) > max_w) break;
+            fit = i;
+            if (!s[i]) break;
+        }
+        if (!fit) { text_fit(f, s, max_w, out[n++], 128); break; }
+        snprintf(out[n++], 128, "%.*s", fit, s);
+        s += fit;
+    }
+    return n;
+}
+
+static void format_play_time(const Game *g, char *out, int n)
+{
+    int m = g->play_time / 60;
+    if (!g->play_count) snprintf(out, n, "None yet");
+    else if (m < 1) snprintf(out, n, "< 1 m");
+    else if (m < 60) snprintf(out, n, "%d m", m);
+    else snprintf(out, n, "%d h %d m", m / 60, m % 60);
+}
+
+static time_t day_start(time_t t)
+{
+    struct tm d;
+    localtime_r(&t, &d);
+    d.tm_hour = d.tm_min = d.tm_sec = 0;
+    d.tm_isdst = -1;
+    return mktime(&d);
+}
+
+static void format_last_played(const Game *g, char *out, int n)
+{
+    // Without network time the clock may start near 1970, and so may Onion's records;
+    // only trust dates after 2020. Otherwise fall back to the recents list.
+    const time_t sane = 1577836800;
+    time_t now = time(NULL), t = (time_t)g->last_played;
+    if (t > sane && now > sane) {
+        long days = lround(difftime(day_start(now), day_start(t)) / 86400);
+        struct tm d;
+        localtime_r(&t, &d);
+        static const char *const MON[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+        if (days <= 0) snprintf(out, n, "Today");
+        else if (days == 1) snprintf(out, n, "Yesterday");
+        else if (days < 7) snprintf(out, n, "%ld days ago", days);
+        else if (days < 300) snprintf(out, n, "%d %s", d.tm_mday, MON[d.tm_mon]);
+        else snprintf(out, n, "%s %d", MON[d.tm_mon], d.tm_year + 1900);
+    } else if (g->recent == 0) snprintf(out, n, "Most recent");
+    else if (g->recent > 0) snprintf(out, n, "Recently");
+    else snprintf(out, n, g->play_count ? "A while ago" : "Never");
+}
+
+// The selected game's art, title, system and play stats. The panel is opaque over the
+// background, so it's kept as one pre-composited image per selection and copied in; the
+// empty card is rasterized once. Its left margin also covers grid tiles that have
+// scrolled under it.
+static void draw_detail(Image *c, int gi)
+{
+    const int x0 = G_EDGE, y0 = PANEL_Y - 8;
+    const int iw = PANEL_X + PANEL_W + 8 - x0, ih = PANEL_H + 16;
+    const float px = PANEL_X - x0, py = PANEL_Y - y0;
+    const Image *icon = icon_get(gi, 1);
+    if (!panel_base) {
+        panel_base = img_new(iw, ih);
+        if (!panel_base) return;
+        for (int y = 0; y < ih; y++)
+            memcpy(panel_base->px + y * iw, S.bg->px + (y0 + y) * SCREEN_W + x0, iw * sizeof *panel_base->px);
+        gfx_fill_rrect(panel_base, px + 1, py + 3, PANEL_W - 2, PANEL_H - 1, 16, argb(P->shadow_a / 2, 20, 30, 60));
+        gfx_fill_rrect(panel_base, px, py, PANEL_W, PANEL_H, 16, rgb(P->panel));
+    }
+    if (!panel_img || panel_game != gi || panel_art != (icon != NULL)) {
+        if (!panel_img) panel_img = img_new(iw, ih);
+        if (!panel_img) return;
+        Image *p = panel_img;
+        memcpy(p->px, panel_base->px, (size_t)iw * ih * sizeof *p->px);
+        const Game *g = &S.lib->games[gi];
+        float ax = px + (PANEL_W - TILE) / 2.f, ay = py + 16;
+        if (icon) gfx_blit(p, icon, (int)ax, (int)ay, 255); // already TILE square, rounded
+        else draw_placeholder(p, g, ax, ay, TILE);
+
+        int tx = (int)px + 18, tw = PANEL_W - 36, ty = (int)py + TILE + 30;
+        char lines[2][128];
+        int nl = wrap_text(S.label, g->title, tw, lines, 2);
+        for (int i = 0; i < nl; i++, ty += font_height(S.label))
+            text_draw(p, S.label, lines[i], tx, ty, rgb(C_INK));
+        char buf[128];
+        text_fit(S.small, S.lib->sys[g->sys].name, tw, buf, sizeof buf);
+        text_draw(p, S.small, buf, tx, ty + 2, rgb(C_SUB));
+
+        char play[32], last[32], sessions[16];
+        format_play_time(g, play, sizeof play);
+        format_last_played(g, last, sizeof last);
+        snprintf(sessions, sizeof sessions, "%d", g->play_count);
+        const char *const LABEL[4] = {"PLAY TIME", "LAST PLAYED", "SESSIONS", "FAVORITE"};
+        const char *value[4] = {play, last, sessions, g->fav ? "Yes" : "No"};
+        for (int i = 0; i < 4; i++) {
+            int sx = tx + (i % 2) * (tw / 2 + 4), sy = (int)py + 282 + (i / 2) * 50;
+            text_draw(p, S.small, LABEL[i], sx, sy, rgb(C_SUB));
+            uint32_t ink = i == 3 && g->fav ? rgb(0xf0a020) : rgb(C_INK);
+            text_fit(S.body, value[i], tw / 2 - 4, buf, sizeof buf);
+            text_draw(p, S.body, buf, sx, sy + 21, ink);
+        }
+        img_find_spans(p);
+        panel_game = gi;
+        panel_art = icon != NULL;
+    }
+    gfx_blit(c, panel_img, x0, y0, 255);
 }
 
 static void draw_folder_view(Image *c)
 {
     const Folder *f = &S.folders[S.folder];
+    const Grid *g = S.grid;
     gfx_fill_rrect(c, 24, 36, 48, 48, 12, rgb(f->color));
     text_draw(c, S.label, f->label, 84, 34, rgb(C_INK));
-    char n[48];
-    snprintf(n, sizeof n, "%d games", f->ngames);
+    char n[64];
+    snprintf(n, sizeof n, "%d game%s · %s", f->ngames, f->ngames == 1 ? "" : "s", SORTS[S.sort]);
     text_draw(c, S.small, n, 84, 60, rgb(C_SUB));
-    // Sort chips cycle with Y; the hint sits beside them so they don't read as tappable.
-    int x = SCREEN_W - 24, ch = font_height(S.small) + 8;
-    for (int i = 2; i >= 0; i--) {
-        int w = text_width(S.small, SORTS[i]) + 20;
-        x -= w;
-        gfx_fill_rrect(c, x, 46, w, ch, ch / 2.f, rgb(i == S.sort ? C_INK : P->chip));
-        text_draw(c, S.small, SORTS[i], x + 10, 50, rgb(i == S.sort ? P->on_ink : C_SUB));
-        x -= 6;
-    }
-    int yb = ch - 4;
-    gfx_fill_rrect(c, x - yb, 48, yb, yb, yb / 2.f, rgb(P->key));
-    text_center(c, S.small, "Y", x - yb / 2, 50, rgb(0xffffff), yb);
     for (int pass = 0; pass < 2; pass++)
         for (int k = 0; k < S.nfg; k++) {
             if ((k == S.fsel) != pass) continue;
-            float cx = S.ftrack.x + (k / G_ROWS) * G_COL + G_TILE / 2.f, cy = G_Y + (k % G_ROWS) * G_ROW + G_TILE / 2.f;
-            if (cx < -G_TILE || cx > SCREEN_W + G_TILE) continue;
-            float w = G_TILE * S.fscale[k].x;
-            draw_game(c, S.fgames[k], cx, cy, w, 0);
+            float cx = S.ftrack.x + (k / g->rows) * g->col + g->tile / 2.f, cy = G_Y + (k % g->rows) * g->row + g->tile / 2.f;
+            float w = g->tile * S.fscale[k].x;
+            if (cx + w / 2 < -8 || cx - w / 2 > G_EDGE) continue;
+            draw_game(c, S.fgames[k], cx, cy, w, g->tile);
         }
-    if (!S.nfg) text_center(c, S.body, "Nothing here yet", SCREEN_W / 2, 220, rgb(C_SUB), SCREEN_W);
+    if (S.nfg) draw_detail(c, S.fgames[S.fsel]);
+    else text_center(c, S.body, "Nothing here yet", SCREEN_W / 2, 220, rgb(C_SUB), SCREEN_W);
     static const char *const H[] = {"A", "Play", "B", "Back", "Y", "Sort", "L1", "First", "R1", "Last"};
     draw_footer(c, H, 10);
 }
@@ -867,7 +983,7 @@ static void draw_launch(Image *c)
     float a = S.launch_t / .3f;
     if (a > 1) a = 1;
     gfx_fill_rect(c, 0, 0, SCREEN_W, SCREEN_H, argb((uint8_t)(a * 235), 20, 22, 30));
-    draw_game(c, S.launching, SCREEN_W / 2.f, SCREEN_H / 2.f - 20, TILE * S.launch_scale.x, 1);
+    draw_game(c, S.launching, SCREEN_W / 2.f, SCREEN_H / 2.f - 20, TILE * S.launch_scale.x, TILE);
     if (S.launch_t > .15f) {
         char cap[200];
         snprintf(cap, sizeof cap, "Starting %s…", S.lib->games[S.launching].title);
@@ -893,8 +1009,6 @@ void ui_draw(Image *c)
             static const char *const H[] = {"A", "Select", "B", "Close"};
             draw_footer(target, H, 4);
         }
-        gfx_clear(S.caption, 0);
-        if (S.view == V_FOLDER && S.nfg) draw_folder_caption(S.caption, 0);
         S.scene_dirty = !retain;
         S.scene_builds++;
         S.art_revision = revision;
@@ -907,14 +1021,14 @@ void ui_draw(Image *c)
     } else if (S.view == V_HOME) {
         float cx = S.track.x + item_x(S.sel) + TILE / 2.f;
         float w = TILE * S.hscale[S.sel].x;
-        draw_cursor(composed, cx, ROW_Y + TILE / 2.f, w);
+        draw_cursor(composed, cx, ROW_Y + TILE / 2.f, w, TILE);
         if (S.sel >= S.lib->nrecent)
             draw_folder_badge(composed, &S.folders[S.sel - S.lib->nrecent], cx, ROW_Y + TILE / 2.f, w);
     } else if (S.nfg) {
-        float cx = S.ftrack.x + (S.fsel / G_ROWS) * G_COL + G_TILE / 2.f;
-        float cy = G_Y + (S.fsel % G_ROWS) * G_ROW + G_TILE / 2.f;
-        draw_cursor(composed, cx, cy, G_TILE * S.fscale[S.fsel].x);
-        gfx_blit(composed, S.caption, 0, CAPTION_Y, 255);
+        const Grid *g = S.grid;
+        float cx = S.ftrack.x + (S.fsel / g->rows) * g->col + g->tile / 2.f;
+        float cy = G_Y + (S.fsel % g->rows) * g->row + g->tile / 2.f;
+        draw_cursor(composed, cx, cy, g->tile * S.fscale[S.fsel].x, g->tile);
     }
     if (e <= .995f) {
         float k = .92f + .08f * e, w = SCREEN_W * k, h = SCREEN_H * k;

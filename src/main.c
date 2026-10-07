@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "../third_party/cJSON.h"
+#include "activity.h"
 #include "icons.h"
 #include "library.h"
 #include "platform.h"
@@ -144,7 +145,8 @@ int main(int argc, char **argv)
 
     Library lib;
     if (lib_load(&lib)) return 1;
-    fprintf(stderr, "shelf: %d systems, %d games, %d recent\n", lib.nsys, lib.ngames, lib.nrecent);
+    fprintf(stderr, "shelf: %d systems, %d games, %d recent, %d with play time\n", lib.nsys, lib.ngames,
+            lib.nrecent, activity_load(&lib));
 
     // SHELF_THEME=light|dark overrides the saved setting (screenshots).
     const char *theme = getenv("SHELF_THEME");

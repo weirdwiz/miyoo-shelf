@@ -1,161 +1,64 @@
 # Shelf
 
-A DSi/3DS-style home screen for the Miyoo Mini and Mini Plus that runs on top of
-[Onion OS](https://github.com/OnionUI/Onion). See your games as square icons, press A to play.
+A DSi/3DS-style home screen for the Miyoo Mini and Mini Plus, running on top of
+[Onion OS](https://github.com/OnionUI/Onion). Your games as square icons; press A to play.
 
-| Home | Library | Folder |
+| Home | Folder | Dark mode |
 |---|---|---|
-| ![](docs/screenshots/1-home.png) | ![](docs/screenshots/2-library.png) | ![](docs/screenshots/3-folder.png) |
+| ![](docs/screenshots/1-home.png) | ![](docs/screenshots/3-folder.png) | ![](docs/screenshots/5-dark.png) |
 
-| Dark mode | Options (START) |
-|---|---|
-| ![](docs/screenshots/5-dark.png) | ![](docs/screenshots/6-options-dark.png) |
+## What it does
 
-- **Home row:** recent games first, then library folders (All games, Favorites, one per
-  console) at the end of the same row, with springy DS-style scrolling.
-- **Folders:** a 3-row grid that scrolls sideways. Y cycles the sort (A–Z, Recent, Favorites).
-- **Icons:** your existing box art in padded square frames, cached on the SD card.
-- **Status bar:** date and time, Wi-Fi signal, and battery level (green with a bolt while
-  charging, red at 15% or less), read from Onion's battery monitor.
-- **Sound:** navigation clicks use the active Onion theme's `change.wav`.
-- **Options (START):** dark mode, switching the home screen between Shelf and Onion's menu,
-  and opening Onion's menu once. Saved in `App/Shelf/settings.json`.
+- **Home row:** recent games, then folders for All games, Favorites and each console, with
+  springy DS-style scrolling.
+- **Folders:** a grid beside a detail panel showing the selected game's art, play time
+  (from Onion's play activity), last played and favorite. Y cycles the sort.
+- **Plays through Onion:** games launch via Onion's runtime, so saves, play time and the
+  game switcher work as usual, and every game returns to Shelf.
+- **Replaces Onion's menu (optional):** boot straight into Shelf. Hold SELECT at boot, or
+  use Options, to get stock Onion back. No Onion files are modified.
+- **Status bar, sound, dark mode:** clock, Wi-Fi and battery; the Onion theme's click sound;
+  a dark palette under START → Options.
+- Uses your existing box art and Onion's recents and favorites files.
 
-**Status:** early. Shelf runs as an Onion app, or can replace Onion's menu so the device
-boots into it and every game returns to it (see [Boot into Shelf](#boot-into-shelf)).
+Status: early. MENU always opens Onion's menu.
 
 ## Controls
 
-| Button | Home | Folder |
-|---|---|---|
-| D-pad | move | move |
-| A | play / open folder | play |
-| B | | back |
-| Y | | change sort |
-| L1 / R1 | jump to Recent / Library | first / last game |
-| START | Options | Options |
-| MENU | Onion's menu | Onion's menu |
+D-pad moves · A play/open · B back · Y sort · L1/R1 jump · START options · MENU Onion's menu
 
 ## Install
 
-1. Build the device binary (needs podman or docker; uses Onion's toolchain image):
-
-   ```sh
-   make mm
-   ```
-
-2. Copy it to the SD card as `App/Shelf/`:
-
-   ```
-   App/Shelf/shelf          build/mm/shelf
-   App/Shelf/launch.sh      assets/app/launch.sh
-   App/Shelf/config.json    assets/app/config.json
-   App/Shelf/fonts/         assets/fonts/*.ttf
-   App/Shelf/boot.sh        assets/app/boot.sh
-   App/Shelf/mainui.sh      assets/app/mainui.sh
-   ```
-
-   Or over Wi-Fi with Onion's SSH enabled: `MM_HOST=<device-ip> make push`.
-
-3. On the device open **Apps → Shelf**. `MM_HOST=<device-ip> make log` shows the last log.
-
-### Boot into Shelf
-
-On the device, open **Apps → Shelf**, press START and pick **Make Shelf the home screen**,
-or over SSH run `MM_HOST=<device-ip> make boot-on` (`boot.sh enable`). Either makes Shelf
-the menu Onion starts at boot and returns to after every game.
-MENU in Shelf opens Onion's own menu; whatever you start from there also comes back to Shelf.
-
-- **Skip once:** hold SELECT while powering on to get stock Onion for that boot.
-- **Undo:** START → **Use Onion's menu instead** in Shelf (Onion's menu opens straight away;
-  Apps → Shelf → START switches back), `make boot-off` (`boot.sh disable`), or delete
-  `.tmp_update/startup/shelf.sh` (or the whole `App/Shelf`) from the SD card on a computer.
-
-No Onion file is modified. At boot, `startup/shelf.sh` bind-mounts a small stub over
-`miyoo/app/MainUI`, named like the `MainUI-<model>-<mode>` binary Onion would mount there, so
-Onion's runtime keeps it. The stub starts `mainui.sh`, which runs Shelf and falls back to
-Onion's menu if Shelf exits without a game or fails. The mount doesn't survive a reboot. If you
-switch Onion's expert/clean mode, Onion mounts its own menu again until the next boot.
-
-## How it fits into Onion
-
-Shelf is a separate app, not a fork. It only uses Onion's files:
-
-| Onion piece | How Shelf uses it |
-|---|---|
-| `Emu/<SYS>/config.json` | consoles, ROM folder, file extensions, launch script |
-| `Roms/<SYS>/Imgs/<rom>.png` | box art (Onion's scraper output); Shelf never downloads art |
-| `Roms/recentlist.json`, `recentlist-hidden.json`, `favourite.json` | recents and favorites, written in MainUI's format |
-| `.tmp_update/cmd_to_run.sh` | the game command, in MainUI's exact layout |
-| `.tmp_update/startup/` | optional boot hook that puts Shelf in MainUI's place |
-
-When you pick a game, Shelf writes the command and exits. `launch.sh` swaps it in as
-Onion's next command (by rename, since Onion's shell is still reading the old one) and
-sets `/tmp/quick_switch`. Onion's runtime then launches the game as if MainUI had,
-with saves, play time and the game switcher working as usual.
-
-## Artwork
-
-Shelf shows whatever is in Onion's `Imgs` folders; scrape with Onion's scraper as usual.
-Games without art get a coloured placeholder tile.
-
-For games the scraper misses, `tools/fetch_artwork.py` downloads art you list explicitly
-in a JSON manifest. Each entry names the target `path` plus either a Libretro thumbnail
-(`repo` and `title`) or a direct `url` for things Libretro doesn't have, like homebrew.
-It never touches ROMs or replaces existing art. See `tools/artwork-example.json`.
-
 ```sh
-python3 tools/fetch_artwork.py my-artwork.json /path/to/SDCARD
+make mm                            # build for the device (podman or docker)
+MM_HOST=<device-ip> make push      # copy to App/Shelf over SSH (enable SSH in Onion's Tweaks)
+MM_HOST=<device-ip> make boot-on   # optional: boot into Shelf (make boot-off undoes it)
 ```
 
-## Develop on a computer
+Without SSH, copy `build/mm/shelf`, `assets/app/*` and `assets/fonts/` to `App/Shelf/` on
+the SD card, then open **Apps → Shelf**.
+
+## Develop
 
 Needs SDL2 (`brew install sdl2`).
 
 ```sh
-make run      # build the simulator and a sample SD card in fixture/, open a 640x480 window
-make test     # library discovery, UI cache behaviour, pixel-exact graphics primitives
-make shots    # headless screenshots into docs/screenshots
+make run     # simulator against a sample SD card in fixture/
+make test    # library, UI cache and graphics tests
+make shots   # headless screenshots into docs/screenshots
 ```
 
-Simulator keys: arrows · `Z`/`Space`/`Enter` = A · `X`/`Backspace` = B · `S`/`Y` = Y ·
-`Q`/`W` = L1/R1 · `O` = START · `M` = MENU · `Esc` quits. `SHELF_SCALE=3 make run` enlarges the window.
-Point it at a copy of a real card with
-`SHELF_ROOT=/Volumes/SDCARD SHELF_FONTS=$PWD/assets/fonts SHELF_CMD=/tmp/cmd.sh build/shelf-sim`.
+Simulator keys: arrows, `Z` = A, `X` = B, `S` = Y, `Q`/`W` = L1/R1, `O` = START, `M` = MENU.
 
-Rendering is software-only into a 640x480 buffer. Tiles are cached sprites whose opaque
-rows are copied rather than blended; the settled scene is retained, so idle frames only
-redraw the cursor. Box art decodes on a background thread. On the device,
-`SHELF_BENCH=600 SHELF_BENCH_SCENE=scroll ./shelf` measures rendering without taking over
-the screen (scenes: `home`, `scroll`, `grid`, `transition`).
-
-ROM discovery follows each system's `extlist`, includes category subfolders (skipping
-hidden folders, `Imgs` and symlinks) and lists M3U/CUE entries instead of their discs.
-
-## Layout
-
-```
-src/main.c           main loop, headless screenshots, benchmarks
-src/ui.c             home row, folder grid, springs, launch animation
-src/library.c        Onion SD card reader, launch command and recents writer
-src/icons.c          art tiles, SD cache, background loader
-src/gfx.c, text.c    software canvas, stb_truetype text
-src/platform_mm.c    Miyoo: SDL 1.2 display (180° panel), buttons, click sound
-src/platform_sdl2.c  simulator window and keyboard
-assets/app/          Onion app files (launch.sh, config.json) and the boot hook (boot.sh, mainui.sh)
-tools/               fixture builder, tests, device helper, artwork and font scripts
-```
+Everything is plain C with a software renderer: `src/ui.c` (screens), `src/library.c` (reads
+Onion's SD card), `src/icons.c` (art cache), `src/platform_*.c` (device vs simulator).
 
 ## Credits
 
-- [Onion OS](https://github.com/OnionUI/Onion), and [Allium](https://github.com/goweiwen/Allium) for the simulator-first idea
-- [stb_image, stb_truetype](https://github.com/nothings/stb) (public domain / MIT)
-- [cJSON](https://github.com/DaveGamble/cJSON) (MIT, `third_party/cJSON.LICENSE`)
-- M PLUS Rounded 1c, © 2016 The Rounded M+ Project Authors, SIL Open Font License 1.1
-  (`assets/fonts/OFL.txt`)
-- Sample box art in the screenshots from [libretro-thumbnails](https://github.com/libretro-thumbnails)
+[Onion OS](https://github.com/OnionUI/Onion), [Allium](https://github.com/goweiwen/Allium)
+for the simulator-first idea, [stb](https://github.com/nothings/stb),
+[cJSON](https://github.com/DaveGamble/cJSON) (MIT), M PLUS Rounded 1c (SIL OFL 1.1,
+`assets/fonts/OFL.txt`), sample box art from
+[libretro-thumbnails](https://github.com/libretro-thumbnails).
 
-## License
-
-Shelf is MIT licensed (see `LICENSE`). Bundled third-party code and fonts keep their own
-licenses, listed under Credits.
+MIT licensed (see `LICENSE`); bundled code and fonts keep their own licenses.

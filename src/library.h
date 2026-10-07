@@ -30,6 +30,9 @@ typedef struct {
     char path[PATH_LEN];   // normalised device path of the ROM
     int fav;
     int recent;            // rank in recents, -1 if not recent
+    int play_time;         // seconds, from Onion's play activity DB (activity_load)
+    int play_count;        // sessions
+    long long last_played; // unix time the last session started, 0 if unknown
 } Game;
 
 typedef struct {

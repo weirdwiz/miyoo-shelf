@@ -13,7 +13,7 @@ CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers
 BUILD := build
 
-CORE_SRC := src/main.c src/gfx.c src/text.c src/library.c src/icons.c src/ui.c third_party/cJSON.c
+CORE_SRC := src/main.c src/gfx.c src/text.c src/library.c src/icons.c src/ui.c src/activity.c third_party/cJSON.c
 SIM_SRC := $(CORE_SRC) src/platform_sdl2.c
 SDL_CFLAGS = $(shell sdl2-config --cflags)
 SDL_LIBS = $(shell sdl2-config --libs)
@@ -91,7 +91,7 @@ mm-inner: $(MM_BUILD)/shelf
 $(MM_BUILD)/shelf: $(MM_SRC) $(wildcard src/*.h) Makefile
 	@mkdir -p $(MM_BUILD)
 	$(CROSS_COMPILE)gcc -O3 -fno-math-errno -marm -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -std=c11 -D_DEFAULT_SOURCE \
-		-Wall -Wno-unused-parameter -Wno-sign-compare -Wno-format-truncation -o $@ $(MM_SRC) -lSDL -lm -lpthread
+		-Wall -Wno-unused-parameter -Wno-sign-compare -Wno-format-truncation -o $@ $(MM_SRC) -lSDL -lm -lpthread -ldl
 
 APP_DIR := /mnt/SDCARD/App/Shelf
 
