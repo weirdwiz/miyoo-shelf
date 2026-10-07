@@ -308,6 +308,26 @@ static int cmp_game(const void *a, const void *b)
     return strcasecmp(((const Game *)a)->title, ((const Game *)b)->title);
 }
 
+// Fills s from Emu/<dir>/config.json. Returns 0 if it names a ROM folder and launcher.
+static int system_from_config(System *s, const char *dir, cJSON *cfg)
+{
+    const char *rompath = cJSON_GetStringValue(cJSON_GetObjectItem(cfg, "rompath"));
+    const char *launch = cJSON_GetStringValue(cJSON_GetObjectItem(cfg, "launch"));
+    const char *imgpath = cJSON_GetStringValue(cJSON_GetObjectItem(cfg, "imgpath"));
+    if (!rompath || !launch) return -1;
+    memset(s, 0, sizeof *s);
+    snprintf(s->dir, sizeof s->dir, "%s", dir);
+    snprintf(s->emu_dir, sizeof s->emu_dir, SD_PREFIX "/Emu/%s", dir);
+    snprintf(s->launch, sizeof s->launch, "%s/%s", s->emu_dir, launch);
+    snprintf(s->rom_dir, sizeof s->rom_dir, "%s/%s", s->emu_dir, rompath);
+    path_normalise(s->rom_dir);
+    if (imgpath) snprintf(s->img_dir, sizeof s->img_dir, "%s/%s", s->emu_dir, imgpath);
+    else snprintf(s->img_dir, sizeof s->img_dir, "%s/Imgs", s->rom_dir);
+    path_normalise(s->img_dir);
+    sys_identity(s, cJSON_GetStringValue(cJSON_GetObjectItem(cfg, "label")));
+    return 0;
+}
+
 int lib_load(Library *lib)
 {
     memset(lib, 0, sizeof *lib);
@@ -329,21 +349,8 @@ int lib_load(Library *lib)
         cJSON *cfg = cJSON_Parse(txt);
         free(txt);
         if (!cfg) continue;
-        const char *rompath = cJSON_GetStringValue(cJSON_GetObjectItem(cfg, "rompath"));
-        const char *launch = cJSON_GetStringValue(cJSON_GetObjectItem(cfg, "launch"));
-        const char *imgpath = cJSON_GetStringValue(cJSON_GetObjectItem(cfg, "imgpath"));
-        if (rompath && launch) {
-            System *s = &lib->sys[lib->nsys];
-            memset(s, 0, sizeof *s);
-            snprintf(s->dir, sizeof s->dir, "%s", e->d_name);
-            snprintf(s->emu_dir, sizeof s->emu_dir, SD_PREFIX "/Emu/%s", e->d_name);
-            snprintf(s->launch, sizeof s->launch, "%s/%s", s->emu_dir, launch);
-            snprintf(s->rom_dir, sizeof s->rom_dir, "%s/%s", s->emu_dir, rompath);
-            path_normalise(s->rom_dir);
-            if (imgpath) snprintf(s->img_dir, sizeof s->img_dir, "%s/%s", s->emu_dir, imgpath);
-            else snprintf(s->img_dir, sizeof s->img_dir, "%s/Imgs", s->rom_dir);
-            path_normalise(s->img_dir);
-            sys_identity(s, cJSON_GetStringValue(cJSON_GetObjectItem(cfg, "label")));
+        System *s = &lib->sys[lib->nsys];
+        if (!system_from_config(s, e->d_name, cfg)) {
             scan_directory(lib, &cap, lib->nsys, s->rom_dir,
                            cJSON_GetStringValue(cJSON_GetObjectItem(cfg, "extlist")));
             if (s->ngames) lib->nsys++;
@@ -489,5 +496,153 @@ int lib_launch(Library *lib, int gi, const char *cmd_path)
         if (lib->recent[i] != gi) order[n++] = lib->recent[i];
     for (int i = 0; i < n; i++) { lib->recent[i] = order[i]; lib->games[order[i]].recent = i; }
     lib->nrecent = n;
+    return 0;
+}
+
+/* ---------- recents only, for the game switcher ---------- */
+
+// Onion's switcher reads the hidden list when "hide recents" is on, else the visible one.
+static void recents_file(char *host, int n)
+{
+    struct stat st;
+    host_path(SD_PREFIX "/Roms/recentlist-hidden.json", host, n);
+    if (stat(host, &st)) host_path(SD_PREFIX "/Roms/recentlist.json", host, n);
+}
+
+static int dev_exists(const char *dev)
+{
+    char host[PATH_LEN];
+    struct stat st;
+    host_path(dev, host, sizeof host);
+    return !stat(host, &st);
+}
+
+// Splits one recents line as Onion does: type 5 (ROM) or 17, and a rompath of the form
+// "launch:rompath" overrides "launch".
+static int parse_recent(const char *line, Recent *r)
+{
+    cJSON *j = cJSON_Parse(line);
+    if (!j) return -1;
+    cJSON *type = cJSON_GetObjectItem(j, "type");
+    const char *rp = cJSON_GetStringValue(cJSON_GetObjectItem(j, "rompath"));
+    const char *la = cJSON_GetStringValue(cJSON_GetObjectItem(j, "launch"));
+    int ok = cJSON_IsNumber(type) && (type->valueint == 5 || type->valueint == 17) && rp;
+    if (ok) {
+        const char *colon = strchr(rp, ':');
+        if (colon) {
+            snprintf(r->launch, sizeof r->launch, "%.*s", (int)(colon - rp), rp);
+            snprintf(r->rompath, sizeof r->rompath, "%s", colon + 1);
+        } else {
+            snprintf(r->launch, sizeof r->launch, "%s", la ? la : "");
+            snprintf(r->rompath, sizeof r->rompath, "%s", rp);
+        }
+    }
+    cJSON_Delete(j);
+    return ok ? 0 : -1;
+}
+
+// The system a recent belongs to: the Emu folder its launcher lives in when that folder's
+// config covers the ROM, else one named after the ROM's folder.
+static int recent_system(Library *lib, const Recent *r, const char *path)
+{
+    char dir[64] = "";
+    const char *emu = strstr(r->launch, "/Emu/");
+    if (emu) {
+        emu += 5;
+        const char *end = strchr(emu, '/');
+        if (end && end - emu < (int)sizeof dir) snprintf(dir, sizeof dir, "%.*s", (int)(end - emu), emu);
+    }
+    for (int i = 0; i < lib->nsys; i++)
+        if (!strcmp(lib->sys[i].dir, dir) && !strncmp(path, lib->sys[i].rom_dir, strlen(lib->sys[i].rom_dir)))
+            return i;
+    if (lib->nsys == MAX_SYSTEMS) return -1;
+    System *s = &lib->sys[lib->nsys];
+    char cfg_host[PATH_LEN];
+    snprintf(cfg_host, sizeof cfg_host, SD_PREFIX "/Emu/%s/config.json", dir);
+    host_path(cfg_host, cfg_host, sizeof cfg_host);
+    char *txt = *dir ? read_file(cfg_host) : NULL;
+    cJSON *cfg = txt ? cJSON_Parse(txt) : NULL;
+    free(txt);
+    int found = cfg && !system_from_config(s, dir, cfg) && !strncmp(path, s->rom_dir, strlen(s->rom_dir));
+    cJSON_Delete(cfg);
+    if (!found) {
+        const char *slash = strrchr(path, '/');
+        memset(s, 0, sizeof *s);
+        snprintf(s->rom_dir, sizeof s->rom_dir, "%.*s", (int)(slash - path), path);
+        snprintf(s->img_dir, sizeof s->img_dir, "%s/Imgs", s->rom_dir);
+        snprintf(s->launch, sizeof s->launch, "%s", r->launch);
+        const char *name = strrchr(s->rom_dir, '/');
+        snprintf(s->dir, sizeof s->dir, "%s", name ? name + 1 : s->rom_dir);
+        sys_identity(s, NULL);
+    }
+    return lib->nsys++;
+}
+
+int lib_load_recents(Library *lib, Recent *rec, int max)
+{
+    memset(lib, 0, sizeof *lib);
+    lib->games = calloc(max > 0 ? max : 1, sizeof(Game));
+    if (!lib->games) return -1;
+    char host[PATH_LEN];
+    recents_file(host, sizeof host);
+    char *s = read_file(host);
+    if (!s) return 0;
+    char *save;
+    for (char *line = strtok_r(s, "\n", &save); line && lib->ngames < max; line = strtok_r(NULL, "\n", &save)) {
+        Recent *r = &rec[lib->ngames];
+        if (parse_recent(line, r)) continue;
+        int dup = 0;
+        for (int i = 0; i < lib->ngames && !dup; i++) dup = !strcmp(rec[i].rompath, r->rompath);
+        if (dup || !dev_exists(r->rompath) || !dev_exists(r->launch)) continue;
+        Game *g = &lib->games[lib->ngames];
+        snprintf(g->path, sizeof g->path, "%s", r->rompath);
+        path_normalise(g->path);
+        const char *slash = strrchr(g->path, '/');
+        if (!slash) continue;
+        g->sys = recent_system(lib, r, g->path);
+        if (g->sys < 0) continue;
+        snprintf(g->stem, sizeof g->stem, "%s", slash + 1);
+        char *dot = strrchr(g->stem, '.');
+        if (dot) *dot = 0;
+        make_title(g->stem, g->title, sizeof g->title);
+        g->recent = lib->ngames;
+        lib->sys[g->sys].ngames++;
+        if (lib->nrecent < MAX_RECENT) lib->recent[lib->nrecent++] = lib->ngames;
+        lib->ngames++;
+    }
+    free(s);
+    return 0;
+}
+
+int lib_resume(const Recent *r, const char *cmd_path)
+{
+    if (unquotable(r->launch) || unquotable(r->rompath)) return -1;
+    FILE *f = fopen(cmd_path, "w");
+    if (!f) return -1;
+    fprintf(f, "LD_PRELOAD=/mnt/SDCARD/miyoo/app/../lib/libpadsp.so \"%s\" \"%s\"\n", r->launch, r->rompath);
+    int failed = fflush(f) != 0 || fchmod(fileno(f), 0755);
+    if (fclose(f) || failed) { remove(cmd_path); return -1; }
+
+    // Move its line to the top, as Onion does, so it's first next time.
+    char host[PATH_LEN], tmp[PATH_LEN + 4];
+    recents_file(host, sizeof host);
+    snprintf(tmp, sizeof tmp, "%s.tmp", host);
+    char *old = read_file(host);
+    if (!old) return 0;
+    FILE *out = fopen(tmp, "w");
+    if (!out) { free(old); return 0; }
+    size_t total = strlen(old);
+    for (char *c = old; *c; c++) if (*c == '\n') *c = 0;
+    char *first = NULL;
+    for (char *line = old; line < old + total; line += strlen(line) + 1) {
+        Recent other;
+        if (!first && !parse_recent(line, &other) && !strcmp(other.rompath, r->rompath)) first = line;
+    }
+    if (first) fprintf(out, "%s\n", first);
+    for (char *line = old; line < old + total; line += strlen(line) + 1)
+        if (line != first && *line) fprintf(out, "%s\n", line);
+    int bad = fclose(out) != 0;
+    free(old);
+    if (bad || rename(tmp, host)) { remove(tmp); return 0; }
     return 0;
 }

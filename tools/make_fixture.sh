@@ -101,4 +101,41 @@ INSERT INTO play_activity(rom_id, play_time, created_at) VALUES
  (4, 40, strftime('%s', 'now') - 40 * 86400);
 EOF
 fi
+# Switcher screenshots, named as Onion names them (romScreens/<hash of rompath>.png): in-game
+# snaps from libretro-thumbnails at 640x480. Tetris has none, to show the box-art card.
+RS="$SD/Saves/CurrentProfile/romScreens"
+mkdir -p "$RS"
+grep -v "Tetris" "$SD/Roms/recentlist.json" | while IFS= read -r line; do
+    rompath=$(printf '%s' "$line" | sed 's/.*"rompath":"\([^"]*\)".*/\1/')
+    stem=$(basename "$rompath"); stem=${stem%.*}; sys=$(basename "$(dirname "$rompath")")
+    case $sys in
+    GBA) repo=$GBA ;; SFC) repo=$SFC ;; PS) repo=Sony_-_PlayStation ;; *) continue ;;
+    esac
+    name=$(python3 -I - "$rompath" <<'PY'
+import sys
+# Onion's FNV1A_Pippip_Yurii (src/common/utils/hash.h), little-endian.
+s = sys.argv[1].encode(); n = len(s); M = (1 << 64) - 1
+h, P = 14695981039346656037, 591798841
+word = lambda o: int.from_bytes(s[o:o + 8], "little")
+if n > 8:
+    cycles = ((n - 1) >> 4) + 1; head = n - (cycles << 3)
+    for c in range(cycles):
+        h = ((h ^ word(c * 8)) * P) & M
+        h = ((h ^ word(c * 8 + head)) * P) & M
+else:
+    h = ((h ^ word(0)) * P) & M
+h32 = (h ^ (h >> 32)) & 0xffffffff
+print(h32 ^ (h32 >> 16))
+PY
+)
+    [ -f "$RS/$name.png" ] && continue
+    url="https://raw.githubusercontent.com/libretro-thumbnails/$repo/master/Named_Snaps/$(python3 -I -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$stem").png"
+    if curl -sfL --connect-timeout 5 --max-time 20 -o "$RS/$name.png" "$url"; then
+        sips -z 480 640 "$RS/$name.png" >/dev/null 2>&1
+        echo "screen $stem"
+    else
+        rm -f "$RS/$name.png"
+        echo "noscreen $stem"
+    fi
+done
 echo "fixture ready: $SD"

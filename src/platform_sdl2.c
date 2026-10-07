@@ -1,6 +1,7 @@
 // Mac/Linux simulator: a 640x480 canvas in an SDL2 window, keyboard as the Miyoo buttons.
 #include <SDL.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "platform.h"
 
@@ -89,6 +90,18 @@ void platform_present(const Image *frame)
     SDL_RenderClear(ren);
     SDL_RenderCopy(ren, tex, NULL, NULL);
     SDL_RenderPresent(ren);
+}
+
+int platform_grab(Image *out)
+{
+    const char *path = getenv("SHELF_FRAME");
+    Image *img = path ? img_load(path) : NULL;
+    Image *fit = img ? img_resize(img, SCREEN_W, SCREEN_H) : NULL;
+    img_free(img);
+    if (!fit) return -1;
+    memcpy(out->px, fit->px, (size_t)SCREEN_W * SCREEN_H * 4);
+    img_free(fit);
+    return 0;
 }
 
 double platform_now(void) { return SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency(); }

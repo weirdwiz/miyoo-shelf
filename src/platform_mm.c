@@ -267,6 +267,33 @@ void platform_present(const Image *frame)
     SDL_Flip(video);
 }
 
+int platform_grab(Image *out)
+{
+    struct fb_var_screeninfo var;
+    struct fb_fix_screeninfo fix;
+    int fd = open("/dev/fb0", O_RDONLY);
+    if (fd < 0) return -1;
+    int rc = -1;
+    if (!ioctl(fd, FBIOGET_VSCREENINFO, &var) && !ioctl(fd, FBIOGET_FSCREENINFO, &fix) &&
+        var.xres == SCREEN_W && var.yres == SCREEN_H && var.bits_per_pixel == 32 &&
+        (size_t)fix.line_length * (var.yoffset + SCREEN_H) <= fix.smem_len) {
+        unsigned char *mem = mmap(NULL, fix.smem_len, PROT_READ, MAP_SHARED, fd, 0);
+        if (mem != MAP_FAILED) {
+            // The visible page, turned the right way up (the panel is mounted rotated).
+            const unsigned char *page = mem + (size_t)fix.line_length * var.yoffset;
+            for (int y = 0; y < SCREEN_H; y++) {
+                const uint32_t *src = (const uint32_t *)(page + (size_t)(SCREEN_H - 1 - y) * fix.line_length);
+                uint32_t *dst = out->px + y * SCREEN_W;
+                for (int x = 0; x < SCREEN_W; x++) dst[x] = src[SCREEN_W - 1 - x] | 0xff000000u;
+            }
+            munmap(mem, fix.smem_len);
+            rc = 0;
+        }
+    }
+    close(fd);
+    return rc;
+}
+
 int platform_vsync_paced(void) { return fb >= 0; }
 
 double platform_now(void)

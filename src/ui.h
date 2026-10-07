@@ -19,7 +19,8 @@ int ui_take_sound(void);
 void ui_reset_home(void);
 
 // Requests from the Options panel (START) and MENU, taken once each.
-enum { UI_NONE, UI_EXIT, UI_THEME, UI_BOOT_ONION, UI_BOOT_SHELF };
+enum { UI_NONE, UI_EXIT, UI_THEME, UI_BOOT_ONION, UI_BOOT_SHELF,
+       UI_SW_RESUME, UI_SW_PLAY, UI_SW_HOME };
 int ui_take_action(void);
 void ui_set_dark(int dark);   // may be called before ui_init
 int ui_dark(void);
@@ -28,5 +29,18 @@ void ui_set_boot(int on);
 // Status bar: battery percent (-1 hides it), charging, Wi-Fi bars 1..3 (0 = on but not
 // connected, -1 = off, hidden).
 void ui_set_status(int battery, int charging, int wifi);
+
+// Game switcher view (see switcher.h): recents as screenshot cards. With `overlay` and
+// `running`, recents[0] is the paused game and the view opens by shrinking it from full
+// screen. Actions: UI_SW_RESUME (back to the paused game), UI_SW_PLAY (start
+// ui_switch_target()), UI_SW_HOME (to Shelf). Each is taken once its animation ends.
+int ui_init_switcher(Library *lib, const char *font_dir, int overlay, int running);
+// Where screenshots come from: a card-size and a full-size image per recent (NULL while
+// loading or missing), the selection to load first, and a counter that changes with them.
+void ui_switch_hooks(const Image *(*card)(int), const Image *(*full)(int), void (*select)(int),
+                     unsigned (*revision)(void));
+enum { SW_TOAST_NONE, SW_TOAST_SAVING, SW_TOAST_SAVED, SW_TOAST_FAILED };
+void ui_switch_saving(int toast);
+int ui_switch_target(void);
 
 #endif

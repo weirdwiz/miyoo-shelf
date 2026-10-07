@@ -55,4 +55,19 @@ int lib_img_path(const Library *lib, const Game *g, char *out, int n); // host p
 // Writes /tmp/cmd_to_run.sh (or `cmd_path`) and moves the game to the top of recentlist.json.
 int lib_launch(Library *lib, int game, const char *cmd_path);
 
+// A recents entry as Onion recorded it. Paths stay verbatim ("/mnt/SDCARD/Emu/GBA/../../
+// Roms/..."): Onion names a game's switcher screenshot after a hash of that exact string.
+typedef struct {
+    char rompath[PATH_LEN];
+    char launch[PATH_LEN];
+} Recent;
+
+// The game switcher's list, without scanning ROM folders: the recents file Onion's
+// switcher reads, deduplicated, skipping missing ROMs. games[i] matches rec[i] and
+// recent[i] == i. Up to `max` entries.
+int lib_load_recents(Library *lib, Recent *rec, int max);
+// Writes the command that resumes `r` (Onion's runtime auto-loads its state) and moves
+// it to the top of the recents file.
+int lib_resume(const Recent *r, const char *cmd_path);
+
 #endif

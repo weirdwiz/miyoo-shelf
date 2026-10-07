@@ -7,6 +7,10 @@ A DSi/3DS-style home screen for the Miyoo Mini and Mini Plus, running on top of
 |---|---|---|
 | ![](docs/screenshots/1-home.png) | ![](docs/screenshots/3-folder.png) | ![](docs/screenshots/5-dark.png) |
 
+| Game switcher (MENU in a game) | Switching |
+|---|---|
+| ![](docs/screenshots/7-switcher.png) | ![](docs/screenshots/8-switcher-next.png) |
+
 ## What it does
 
 - **Home row:** recent games, then folders for All games, Favorites and each console, with
@@ -17,11 +21,15 @@ A DSi/3DS-style home screen for the Miyoo Mini and Mini Plus, running on top of
   game switcher work as usual, and every game returns to Shelf.
 - **Replaces Onion's menu (optional):** boot straight into Shelf. Hold SELECT at boot, or
   use Options, to get stock Onion back. No Onion files are modified.
+- **Game switcher:** with Shelf as the menu, MENU in a game opens Shelf's switcher. The
+  paused game shrinks into a card among your recent games, each showing where you left it.
+  A resumes or switches (the game is saved first), B goes to Shelf.
 - **Status bar, sound, dark mode:** clock, Wi-Fi and battery; the Onion theme's click sound;
   a dark palette under START → Options.
 - Uses your existing box art and Onion's recents and favorites files.
 
-Status: early. MENU always opens Onion's menu.
+Status: early; the game switcher is new and still being tested on the device. MENU in
+Shelf opens Onion's menu.
 
 ## Controls
 
@@ -51,14 +59,18 @@ make shots   # headless screenshots into docs/screenshots
 Simulator keys: arrows, `Z` = A, `X` = B, `S` = Y, `Q`/`W` = L1/R1, `O` = START, `M` = MENU.
 
 Everything is plain C with a software renderer: `src/ui.c` (screens), `src/library.c` (reads
-Onion's SD card), `src/icons.c` (art cache), `src/platform_*.c` (device vs simulator).
+Onion's SD card), `src/icons.c` (art cache), `src/switcher.c` (game switcher: RetroArch,
+screenshots), `src/platform_*.c` (device vs simulator).
+
+The switcher in the simulator: `SHELF_SWITCHER=overlay SHELF_FRAME=<picture of the paused
+game>` with the usual `SHELF_ROOT`/`SHELF_FONTS`.
 
 ## Credits
 
 [Onion OS](https://github.com/OnionUI/Onion), [Allium](https://github.com/goweiwen/Allium)
 for the simulator-first idea, [stb](https://github.com/nothings/stb),
 [cJSON](https://github.com/DaveGamble/cJSON) (MIT), M PLUS Rounded 1c (SIL OFL 1.1,
-`assets/fonts/OFL.txt`), sample box art from
-[libretro-thumbnails](https://github.com/libretro-thumbnails).
+`assets/fonts/OFL.txt`), sample box art and game
+snaps from [libretro-thumbnails](https://github.com/libretro-thumbnails).
 
 MIT licensed (see `LICENSE`); bundled code and fonts keep their own licenses.

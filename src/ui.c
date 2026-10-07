@@ -117,6 +117,12 @@ static struct {
 enum { O_DARK, O_BOOT, O_ONION, O_COUNT };
 
 static void tiles_free(void);
+// The game switcher view, at the end of this file.
+static int sw_on(void);
+static void sw_button(Button b);
+static void sw_update(float dt);
+static void sw_draw(Image *c);
+static void sw_free(void);
 
 static int home_count(void) { return S.lib->nrecent + S.nfolders; }
 
@@ -178,6 +184,7 @@ int ui_init(Library *lib, const char *font_dir)
 
 void ui_free(void)
 {
+    sw_free();
     for (int i = 0; i < S.nfolders; i++) free(S.folders[i].games);
     free(S.fgames);
     free(S.fscale);
@@ -256,6 +263,12 @@ static void ui_button_inner(Button b);
 
 void ui_button(Button b)
 {
+    if (sw_on()) {
+        int sel = S.sel;
+        sw_button(b);
+        if (S.sel != sel) S.sound = 1;
+        return;
+    }
     if (S.launching >= 0) return;
     int view = S.view, sel = S.sel, fsel = S.fsel, sort = S.sort;
     int options = S.options, osel = S.osel, dark = S.dark;
@@ -374,6 +387,7 @@ static void scene_step(Spring *s, float dt, float k, float damping)
 void ui_update(float dt)
 {
     S.t += dt;
+    if (sw_on()) { sw_update(dt); return; }
     spring_step(&S.enter, dt, SNAPPY);
     scene_step(&S.track, dt, BOUNCE);
     for (int i = 0; i < home_count(); i++) scene_step(&S.hscale[i], dt, 400.f, 18.f);
@@ -993,6 +1007,7 @@ static void draw_launch(Image *c)
 
 void ui_draw(Image *c)
 {
+    if (sw_on()) { sw_draw(c); return; }
     float e = S.enter.x;
     // Compose straight into the final canvas except when a zoom needs a source layer.
     Image *composed = e > .995f ? c : S.layer;
@@ -1037,4 +1052,344 @@ void ui_draw(Image *c)
     }
     draw_status(c);
     if (S.launching >= 0) draw_launch(c);
+}
+
+/* ---------- game switcher ---------- */
+
+// Cards: a 4:3 screenshot in a white frame. The selected card is full size, the others
+// SW_SMALL of it.
+#define SW_SHOT_W 248
+#define SW_SHOT_H 186
+#define SW_FRAME 8
+#define SW_W (SW_SHOT_W + 2 * SW_FRAME)
+#define SW_H (SW_SHOT_H + 2 * SW_FRAME)
+#define SW_STEP 280
+#define SW_CY 250
+#define SW_SMALL .86f
+#define SW_SPRITE_PAD 8
+
+static struct {
+    int on, overlay, running;  // switcher view; over a paused game; recents[0] is that game
+    const Image *(*card)(int), *(*full)(int);
+    void (*select)(int);
+    unsigned (*revision)(void);
+    Image *sprites[MAX_RECENT];
+    const Image *sprite_src[MAX_RECENT], *sprite_icon[MAX_RECENT];
+    Image *home_bg;           // Shelf's own background: B fades to it, as Shelf starts on it
+    Image *backdrop, *old_backdrop;
+    int backdrop_for;         // recent the backdrop was made from, -1 none
+    const Image *backdrop_src;
+    float fade;               // 0..1 cross-fade from old_backdrop
+    Spring zoom;              // 0: selected card fills the screen, 1: in the row
+    int closing, close_to;    // UI_SW_* being animated to, and the recent
+    float home_t;             // B: fade-out progress
+    int fired;                // the closing action was handed out; hold the last frame
+    int saving;               // SW_TOAST_*
+} W;
+
+void ui_switch_hooks(const Image *(*card)(int), const Image *(*full)(int), void (*select)(int),
+                     unsigned (*revision)(void))
+{
+    W.card = card; W.full = full; W.select = select; W.revision = revision;
+}
+
+void ui_switch_saving(int state) { W.saving = state; }
+
+int ui_switch_target(void) { return W.close_to; }
+
+static int sw_on(void) { return W.on; }
+
+static void sw_select(int i)
+{
+    S.sel = i;
+    S.track.t = SCREEN_W / 2.f - i * SW_STEP;
+    for (int k = 0; k < S.lib->nrecent; k++) S.hscale[k].t = k == i ? 1.f : SW_SMALL;
+    if (W.select) W.select(i);
+}
+
+int ui_init_switcher(Library *lib, const char *font_dir, int overlay, int running)
+{
+    if (ui_init(lib, font_dir)) return -1;
+    W.on = 1;
+    W.overlay = overlay;
+    W.running = running;
+    W.backdrop_for = -1;
+    W.home_bg = S.bg;     // in the user's palette
+    P = &PALETTES[1];     // the switcher is always dark: it sits over a dimmed game
+    S.bg = NULL;
+    build_bg();
+    for (int k = 0; k < lib->nrecent; k++) S.hscale[k].x = S.hscale[k].t = SW_SMALL;
+    sw_select(0);
+    S.track.x = S.track.t;
+    S.hscale[0].x = 1;
+    // Over a game, open from its frame filling the screen.
+    W.zoom.x = overlay && running ? 0 : 1;
+    W.zoom.t = 1;
+    return 0;
+}
+
+static void sw_free(void)
+{
+    for (int i = 0; i < MAX_RECENT; i++) img_free(W.sprites[i]);
+    img_free(W.home_bg); img_free(W.backdrop); img_free(W.old_backdrop);
+    memset(&W, 0, sizeof W);
+}
+
+static void sw_close(int action, int i)
+{
+    W.closing = action;
+    W.close_to = i;
+    W.home_t = 0;
+    if (action != UI_SW_HOME) W.zoom.t = 0; // the card grows back to full screen
+    else W.zoom.x = W.zoom.t = 1;           // the row fades to Shelf
+}
+
+static void sw_button(Button b)
+{
+    if (W.closing) return;
+    int n = S.lib->nrecent;
+    if (b == BTN_LEFT && S.sel > 0) sw_select(S.sel - 1);
+    if (b == BTN_RIGHT && S.sel < n - 1) sw_select(S.sel + 1);
+    if (b == BTN_L) sw_select(0);
+    if (b == BTN_R && n) sw_select(n - 1);
+    if (b == BTN_A && n) sw_close(S.sel == 0 && W.running ? UI_SW_RESUME : UI_SW_PLAY, S.sel);
+    if (b == BTN_MENU) {
+        if (W.running) { sw_select(0); sw_close(UI_SW_RESUME, 0); }
+        else sw_close(UI_SW_HOME, -1);
+    }
+    if (b == BTN_B) sw_close(UI_SW_HOME, -1);
+    if (b == BTN_QUIT) { // power off: get back to the game at once, as Onion does
+        if (W.running) { S.action = UI_SW_RESUME; W.close_to = 0; }
+        else S.action = UI_SW_HOME;
+    }
+}
+
+static void sw_update(float dt)
+{
+    spring_step(&W.zoom, dt, SNAPPY);
+    spring_step(&S.track, dt, BOUNCE);
+    for (int i = 0; i < S.lib->nrecent; i++) spring_step(&S.hscale[i], dt, 400.f, 22.f);
+    if (W.fade < 1) { W.fade += dt / .22f; if (W.fade > 1) W.fade = 1; }
+    if (W.closing == UI_SW_HOME) {
+        W.home_t += dt / .25f;
+        if (W.home_t >= 1 && !W.fired) { S.action = UI_SW_HOME; W.fired = 1; }
+    } else if (W.closing && W.zoom.x < .004f && !W.fired) {
+        S.action = W.closing;
+        W.fired = 1;
+    }
+}
+
+// One box-blur pass along a row or column of opaque pixels, edges clamped.
+static void blur_line(uint32_t *buf, uint32_t *tmp, int n, int stride, int r)
+{
+    for (int i = 0; i < n; i++) tmp[i] = buf[i * stride];
+    int win = 2 * r + 1, sum[3] = {0};
+    for (int i = -r; i <= r; i++) {
+        uint32_t p = tmp[i < 0 ? 0 : (i >= n ? n - 1 : i)];
+        for (int c = 0; c < 3; c++) sum[c] += (p >> (c * 8)) & 255;
+    }
+    for (int i = 0; i < n; i++) {
+        buf[i * stride] = 0xff000000u | (sum[0] / win) | ((sum[1] / win) << 8) | ((sum[2] / win) << 16);
+        int out = i - r, in = i + r + 1;
+        uint32_t po = tmp[out < 0 ? 0 : out], pi = tmp[in >= n ? n - 1 : in];
+        for (int c = 0; c < 3; c++) sum[c] += (int)((pi >> (c * 8)) & 255) - (int)((po >> (c * 8)) & 255);
+    }
+}
+
+static void box_blur(Image *img, int r)
+{
+    int n = img->w > img->h ? img->w : img->h;
+    uint32_t *tmp = malloc((size_t)n * 4);
+    if (!tmp) return;
+    for (int pass = 0; pass < 3; pass++) {
+        for (int y = 0; y < img->h; y++) blur_line(img->px + y * img->w, tmp, img->w, 1, r);
+        for (int x = 0; x < img->w; x++) blur_line(img->px + x, tmp, img->h, img->w, r);
+    }
+    free(tmp);
+}
+
+// The selected game's screenshot, blurred and dimmed. Blurring a small copy and scaling
+// it up is both cheaper and smoother than blurring at full size.
+static Image *make_backdrop(const Image *shot)
+{
+    Image *small = img_resize(shot, 64, 48);
+    if (!small) return NULL;
+    box_blur(small, 3);
+    for (int i = 0; i < 64 * 48; i++) {
+        uint32_t p = small->px[i];
+        int r = (p >> 16 & 255) * 2 / 5 + 10, g = (p >> 8 & 255) * 2 / 5 + 12, b = (p & 255) * 2 / 5 + 20;
+        small->px[i] = rgb((uint32_t)(r << 16 | g << 8 | b));
+    }
+    Image *big = img_resize(small, SCREEN_W, SCREEN_H);
+    img_free(small);
+    return big;
+}
+
+static void sw_update_backdrop(void)
+{
+    const Image *src = W.card ? W.card(S.sel) : NULL;
+    if (W.backdrop_for == S.sel && W.backdrop_src == src) return;
+    if (!src && W.backdrop_for >= 0 && !W.backdrop_src) { W.backdrop_for = S.sel; return; }
+    Image *next = src ? make_backdrop(src) : NULL;
+    if (!next) { // no screenshot: Shelf's dark background
+        next = img_new(SCREEN_W, SCREEN_H);
+        if (!next) return;
+        memcpy(next->px, S.bg->px, (size_t)SCREEN_W * SCREEN_H * 4);
+    }
+    img_free(W.old_backdrop);
+    W.old_backdrop = W.backdrop;
+    W.backdrop = next;
+    W.fade = W.old_backdrop ? 0 : 1;
+    W.backdrop_for = S.sel;
+    W.backdrop_src = src;
+}
+
+// One card at full size with its frame, shadow and system chip, rebuilt when its
+// screenshot or art arrives.
+static const Image *sw_sprite(int i)
+{
+    int gi = S.lib->recent[i];
+    const Image *shot = W.card ? W.card(i) : NULL;
+    const Image *icon = shot ? NULL : icon_get(gi, 1);
+    if (W.sprites[i] && W.sprite_src[i] == shot && W.sprite_icon[i] == icon) return W.sprites[i];
+    img_free(W.sprites[i]);
+    Image *s = W.sprites[i] = img_new(SW_W + 2 * SW_SPRITE_PAD, SW_H + 2 * SW_SPRITE_PAD);
+    W.sprite_src[i] = shot;
+    W.sprite_icon[i] = icon;
+    if (!s) return NULL;
+    const float x = SW_SPRITE_PAD, y = SW_SPRITE_PAD;
+    gfx_fill_rrect(s, x + 1, y + 5, SW_W - 2, SW_H - 1, 14, argb(110, 0, 0, 0));
+    gfx_fill_rrect(s, x, y, SW_W, SW_H, 14, rgb(0xffffff));
+    const Game *g = &S.lib->games[gi];
+    const System *sys = &S.lib->sys[g->sys];
+    float sx = x + SW_FRAME, sy = y + SW_FRAME;
+    if (shot) {
+        Image *r = img_new(SW_SHOT_W, SW_SHOT_H);
+        if (r) {
+            memcpy(r->px, shot->px, (size_t)SW_SHOT_W * SW_SHOT_H * 4);
+            img_round(r, 7);
+            gfx_blit(s, r, (int)sx, (int)sy, 255);
+            img_free(r);
+        }
+    } else {
+        // Never left through the switcher, so no screenshot: its box art on its colour.
+        gfx_fill_rrect(s, sx, sy, SW_SHOT_W, SW_SHOT_H, 7, rgb(sys->color));
+        float a = 150, ax = sx + (SW_SHOT_W - a) / 2, ay = sy + (SW_SHOT_H - a) / 2;
+        if (icon) gfx_blit_scaled(s, icon, ax, ay, a, a, 255);
+        else draw_placeholder(s, g, ax, ay, a);
+    }
+    if (shot && sys->label[0]) { // system chip, bottom left
+        int tw = text_width(S.small, sys->label), ch = font_height(S.small) + 4;
+        gfx_fill_rrect(s, sx + 8, sy + SW_SHOT_H - ch - 8, tw + 16, ch, ch / 2.f, rgb(sys->color));
+        text_draw(s, S.small, sys->label, (int)sx + 16, (int)(sy + SW_SHOT_H - ch - 6), rgb(0xffffff));
+    }
+    if (i == 0 && W.running) { // the paused game, chip on the top edge
+        const char *t = "PAUSED";
+        int tw = text_width(S.small, t), ch = font_height(S.small) + 6;
+        float cx = x + SW_W / 2.f - (tw + 22) / 2.f, cy = y - 4;
+        gfx_fill_rrect(s, cx - 3, cy - 3, tw + 28, ch + 6, (ch + 6) / 2.f, rgb(0xffffff));
+        gfx_fill_rrect(s, cx, cy, tw + 22, ch, ch / 2.f, rgb(0x262a35));
+        text_draw(s, S.small, t, (int)cx + 11, (int)cy + 3, rgb(0xffffff));
+    }
+    img_find_spans(s);
+    return s;
+}
+
+static void sw_card_rect(int i, float *x, float *y, float *w, float *h)
+{
+    float k = S.hscale[i].x, cx = S.track.x + i * SW_STEP;
+    *w = SW_W * k; *h = SW_H * k;
+    *x = cx - *w / 2; *y = SW_CY - *h / 2;
+}
+
+// The row, titles and chrome, without the selected card when `skip_sel`.
+static void sw_draw_scene(Image *c, int skip_sel)
+{
+    if (W.backdrop) {
+        if (W.fade < 1 && W.old_backdrop) {
+            memcpy(c->px, W.old_backdrop->px, (size_t)SCREEN_W * SCREEN_H * 4);
+            gfx_blit(c, W.backdrop, 0, 0, (uint8_t)(W.fade * 255));
+        } else memcpy(c->px, W.backdrop->px, (size_t)SCREEN_W * SCREEN_H * 4);
+    } else memcpy(c->px, S.bg->px, (size_t)SCREEN_W * SCREEN_H * 4);
+
+    Library *L = S.lib;
+    if (!L->nrecent) {
+        text_center(c, S.title, "Nothing played yet", SCREEN_W / 2, 200, rgb(C_INK), SCREEN_W - 60);
+        text_center(c, S.body, "Games you play show up here", SCREEN_W / 2, 244, rgb(C_SUB), SCREEN_W - 60);
+    } else {
+        const Game *g = &L->games[L->recent[S.sel]];
+        char meta[160];
+        snprintf(meta, sizeof meta, "%s%s", L->sys[g->sys].name,
+                 S.sel == 0 && W.running ? " · Paused" : "");
+        text_center(c, S.title, g->title, SCREEN_W / 2, 44, rgb(0xffffff), SCREEN_W - 60);
+        text_center(c, S.body, meta, SCREEN_W / 2, 86, argb(255, 0xb8, 0xbf, 0xd0), SCREEN_W - 60);
+    }
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < L->nrecent; i++) {
+            if ((i == S.sel) != pass || (pass && skip_sel)) continue;
+            float x, y, w, h;
+            sw_card_rect(i, &x, &y, &w, &h);
+            if (x + w < -20 || x > SCREEN_W + 20) continue;
+            const Image *s = sw_sprite(i);
+            if (!s) continue;
+            float k = w / SW_W, pad = SW_SPRITE_PAD * k;
+            if (fabsf(k - 1) < .004f) gfx_blit(c, s, (int)lroundf(x) - SW_SPRITE_PAD, (int)lroundf(y) - SW_SPRITE_PAD, 255);
+            else gfx_blit_scaled(c, s, x - pad, y - pad, s->w * k, s->h * k, 255);
+            if (pass) { // selection ring
+                float p = .5f + .5f * sinf(S.t * 5.7f);
+                gfx_stroke_rrect(c, x - 6, y - 6, w + 12, h + 12, 19, 4, lerp_rgb(C_SEL, C_SEL2, p));
+            }
+        }
+    if (L->nrecent > 1) {
+        float dw = 15, x0 = SCREEN_W / 2.f - (L->nrecent - 1) * dw / 2;
+        for (int i = 0; i < L->nrecent; i++) {
+            float s = i == S.sel ? 12 : 8;
+            gfx_fill_rrect(c, x0 + i * dw - s / 2, 380 - s / 2, s, s, s / 2,
+                           i == S.sel ? rgb(C_SEL) : argb(70, 255, 255, 255));
+        }
+    }
+    int resume = S.sel == 0 && W.running;
+    const char *const H[] = {"A", resume ? "Resume" : "Play", "B", "Shelf", "MENU", "Back to game"};
+    if (L->nrecent) draw_footer_raw(c, SCREEN_H - FOOTER_H, H, W.running ? 6 : 4);
+    else draw_footer_raw(c, SCREEN_H - FOOTER_H, H + 2, 2);
+    draw_status(c);
+    if (W.saving) {
+        const char *t = W.saving == SW_TOAST_SAVING ? "Saving…" : W.saving == SW_TOAST_SAVED ? "✓ Saved" : "Couldn't save";
+        int tw = text_width(S.small, t), th = font_height(S.small) + 8;
+        float tx = SCREEN_W / 2.f - (tw + 24) / 2.f;
+        gfx_fill_rrect(c, tx, 6, tw + 24, th, th / 2.f, rgb(0xffffff));
+        text_draw(c, S.small, t, (int)tx + 12, 10, rgb(W.saving == SW_TOAST_FAILED ? 0xc0392b : 0x2f8a4c));
+    }
+}
+
+static void sw_draw(Image *c)
+{
+    sw_update_backdrop();
+    if (W.closing == UI_SW_HOME) {
+        sw_draw_scene(S.layer, 0);
+        float a = W.home_t > 1 ? 1 : W.home_t;
+        memcpy(c->px, S.layer->px, (size_t)SCREEN_W * SCREEN_H * 4);
+        gfx_blit(c, W.home_bg, 0, 0, (uint8_t)(a * 255));
+        return;
+    }
+    float z = W.zoom.x;
+    if (z > .996f || !S.lib->nrecent) { sw_draw_scene(c, 0); return; }
+    // Zooming between the selected card and the full screen: the scene without that card,
+    // its white frame growing in, and the screenshot scaled over it.
+    sw_draw_scene(S.layer, 1);
+    float x, y, w, h;
+    sw_card_rect(S.sel, &x, &y, &w, &h);
+    if (z < 0) z = 0;
+    float rx = x * z, ry = y * z, rw = SCREEN_W + (w - SCREEN_W) * z, rh = SCREEN_H + (h - SCREEN_H) * z;
+    float fr = SW_FRAME * (w / SW_W) * z;
+    if (z > .02f) gfx_fill_rrect(S.layer, rx, ry, rw, rh, 14 * z, rgb(0xffffff));
+    const Image *src = W.full ? W.full(S.sel) : NULL;
+    if (!src && W.card) src = W.card(S.sel);
+    if (src) gfx_fade_scaled_nearest(c, S.layer, src, rx + fr, ry + fr, rw - 2 * fr, rh - 2 * fr, 255);
+    else { // no screenshot: grow the card itself
+        memcpy(c->px, S.layer->px, (size_t)SCREEN_W * SCREEN_H * 4);
+        const Image *s = sw_sprite(S.sel);
+        float kx = rw / SW_W, ky = rh / SW_H;
+        if (s) gfx_blit_scaled(c, s, rx - SW_SPRITE_PAD * kx, ry - SW_SPRITE_PAD * ky, s->w * kx, s->h * ky, 255);
+    }
 }

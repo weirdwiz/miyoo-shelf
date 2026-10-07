@@ -13,15 +13,16 @@ CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers
 BUILD := build
 
-CORE_SRC := src/main.c src/gfx.c src/text.c src/library.c src/icons.c src/ui.c src/activity.c third_party/cJSON.c
+CORE_SRC := src/main.c src/gfx.c src/text.c src/library.c src/icons.c src/ui.c src/activity.c src/switcher.c third_party/cJSON.c
 SIM_SRC := $(CORE_SRC) src/platform_sdl2.c
 SDL_CFLAGS = $(shell sdl2-config --cflags)
 SDL_LIBS = $(shell sdl2-config --libs)
 
 .PHONY: sim run fixture clean mm mm-inner push log test boot-on boot-off
 
-test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUILD)/test-ui-cache fixture/SDCARD/Emu
+test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUILD)/test-ui-cache $(BUILD)/test-switcher fixture/SDCARD/Emu
 	$(BUILD)/test-library
+	$(BUILD)/test-switcher "$(CURDIR)/fixture/SDCARD"
 	$(BUILD)/test-rrect
 	$(BUILD)/test-scaled-blit
 	$(BUILD)/test-ui-cache "$(CURDIR)/fixture/SDCARD" "$(CURDIR)/assets/fonts"
@@ -29,6 +30,10 @@ test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUIL
 $(BUILD)/test-library: tools/test_library.c src/library.c src/library.h third_party/cJSON.c third_party/cJSON.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tools/test_library.c src/library.c third_party/cJSON.c
+
+$(BUILD)/test-switcher: tools/test_switcher.c src/switcher.c src/switcher.h src/library.c src/library.h src/gfx.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tools/test_switcher.c src/switcher.c src/library.c src/gfx.c third_party/cJSON.c -lm -lpthread
 
 $(BUILD)/test-ui-cache: tools/test_ui_cache.c src/ui.c src/icons.c src/library.c src/text.c src/gfx.c $(wildcard src/*.h)
 	@mkdir -p $(BUILD)
@@ -60,7 +65,8 @@ run: sim fixture/SDCARD/Emu
 clean:
 	rm -rf $(BUILD)
 
-# Headless screenshots into docs/screenshots (keys: U D L R A B Y l r s; names ending -dark use the dark theme).
+# Headless screenshots into docs/screenshots (keys: U D L R A B Y l r s; names ending -dark use the dark theme),
+# then the game switcher.
 .PHONY: shots
 shots: sim fixture/SDCARD/Emu
 	@mkdir -p docs/screenshots $(BUILD)/shots
@@ -73,6 +79,14 @@ shots: sim fixture/SDCARD/Emu
 		sips -s format png $(BUILD)/shots/$$name.ppm --out docs/screenshots/$$name.png >/dev/null; \
 	done
 	@cp $(BUILD)/shots/recent.bak fixture/SDCARD/Roms/recentlist.json
+	@# The switcher over a paused Pokemon Emerald (its fixture snapshot stands in for the frame).
+	@for spec in "7-switcher:" "8-switcher-next:R"; do \
+		name=$${spec%%:*}; keys=$${spec#*:}; \
+		SHELF_SWITCHER=overlay SHELF_FRAME=$(CURDIR)/fixture/SDCARD/Saves/CurrentProfile/romScreens/2349991472.png \
+		SHELF_ROOT=$(CURDIR)/fixture/SDCARD SHELF_FONTS=$(CURDIR)/assets/fonts \
+		SHELF_SHOT=$(BUILD)/shots/$$name.ppm SHELF_FRAMES=40 SHELF_KEYS="$$keys" $(BUILD)/shelf-sim 2>/dev/null; \
+		sips -s format png $(BUILD)/shots/$$name.ppm --out docs/screenshots/$$name.png >/dev/null; \
+	done
 	@ls docs/screenshots
 
 # ---------- Miyoo Mini Plus ----------
@@ -103,6 +117,7 @@ push: $(MM_BUILD)/shelf
 	tools/mm.sh 'cat > $(APP_DIR)/config.json' < assets/app/config.json
 	@for f in launch.sh boot.sh mainui.sh; do \
 		tools/mm.sh "cat > $(APP_DIR)/$$f && chmod +x $(APP_DIR)/$$f" < assets/app/$$f; done
+	tools/mm.sh 'sh $(APP_DIR)/boot.sh switcher' # the mounted switcher is the old binary
 	@echo "pushed: open Apps > Shelf on the device. Log: make log"
 
 boot-on:

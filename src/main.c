@@ -1,9 +1,12 @@
 // Shelf: a DSi/3DS-style launcher that stands in for Onion's MainUI.
 // It shows Recent games and Library folders, and when you pick a game it writes
 // /tmp/cmd_to_run.sh and exits. Onion's runtime then runs the game and starts us again.
+#include <arpa/inet.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include "../third_party/cJSON.h"
@@ -11,6 +14,7 @@
 #include "icons.h"
 #include "library.h"
 #include "platform.h"
+#include "switcher.h"
 #include "ui.h"
 
 // Exit codes that ask mainui.sh / launch.sh to run boot.sh after Shelf quits.
@@ -96,6 +100,20 @@ static void status_poll(int sim)
     ui_set_status(battery, charging, wifi);
 }
 
+static int write_ppm(const Image *img, const char *out)
+{
+    FILE *f = fopen(out, "wb");
+    if (!f) return 1;
+    fprintf(f, "P6\n%d %d\n255\n", img->w, img->h);
+    for (int i = 0; i < img->w * img->h; i++) {
+        uint32_t p = img->px[i];
+        unsigned char rgb3[3] = {p >> 16, p >> 8, p};
+        fwrite(rgb3, 1, 3, f);
+    }
+    fclose(f);
+    return 0;
+}
+
 // SHELF_SHOT=out.ppm SHELF_KEYS="RRA..." renders without a window: each key is pressed
 // and given 0.6s of animation, then the final frame is written. Keys: U D L R A B Y l r s
 // (s = START).
@@ -117,21 +135,178 @@ static int headless(Library *lib, const char *cmd_path, Image *canvas, const cha
         if (!*k) break;
     }
     ui_draw(canvas);
-    FILE *f = fopen(out, "wb");
-    if (!f) return 1;
-    fprintf(f, "P6\n%d %d\n255\n", canvas->w, canvas->h);
-    for (int i = 0; i < canvas->w * canvas->h; i++) {
-        uint32_t p = canvas->px[i];
-        unsigned char rgb3[3] = {p >> 16, p >> 8, p};
-        fwrite(rgb3, 1, 3, f);
+    return write_ppm(canvas, out);
+}
+
+/* ---------- game switcher ---------- */
+
+#define SYSDIR SD_PREFIX "/.tmp_update"
+
+static void touch(const char *dev)
+{
+    char host[PATH_LEN];
+    host_path(dev, host, sizeof host);
+    FILE *f = fopen(host, "w");
+    if (f) fclose(f);
+}
+
+static void unlink_dev(const char *dev)
+{
+    char host[PATH_LEN];
+    host_path(dev, host, sizeof host);
+    remove(host);
+}
+
+// If Shelf's switcher dies over a paused game, the game would stay frozen with MENU
+// disabled. Unpause it on the way out (sendto is async-signal-safe).
+static void overlay_crash(int sig)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in to = {0};
+    to.sin_family = AF_INET;
+    to.sin_port = htons(55355);
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sendto(fd, "UNPAUSE", 7, 0, (struct sockaddr *)&to, sizeof to);
+    unlink(SYSDIR "/.runGameSwitcher");
+    _exit(128 + sig);
+}
+
+// Onion's own switcher, copied aside by boot.sh before it mounts Shelf over it.
+static void exec_onion_switcher(char **argv)
+{
+    static const char ONION[] = SD_PREFIX "/App/Shelf/boot/gameSwitcher-onion";
+    if (access(ONION, X_OK)) return;
+    fprintf(stderr, "shelf: falling back to Onion's switcher\n");
+    execv(ONION, argv);
+}
+
+static int switcher_main(int overlay, int sim, const char *font_dir, char **argv)
+{
+    static Recent rec[MAX_RECENT];
+    static Library lib;
+    double t0 = platform_now();
+    Image *canvas = img_new(SCREEN_W, SCREEN_H), *frame = img_new(SCREEN_W, SCREEN_H);
+    // The paused game's last frame, before anything draws over it.
+    int have_frame = overlay && canvas && frame && !platform_grab(frame);
+    if (lib_load_recents(&lib, rec, MAX_RECENT) || !canvas) {
+        if (overlay && !sim) exec_onion_switcher(argv);
+        return 1;
     }
-    fclose(f);
+    int running = overlay && lib.ngames && sw_overlay_begin(have_frame ? frame : NULL, &rec[0]);
+    if (sim && overlay && getenv("SHELF_FRAME")) running = lib.ngames > 0; // no RetroArch to ask
+    if (overlay && !sim) {
+        signal(SIGSEGV, overlay_crash);
+        signal(SIGBUS, overlay_crash);
+        signal(SIGABRT, overlay_crash);
+        signal(SIGFPE, overlay_crash);
+        setenv("SHELF_MUTE", "1", 1); // RetroArch has the audio device
+    }
+    settings_load();
+    icons_init(&lib);
+    sw_cards_start(&lib, rec, 248, 186, running && have_frame ? frame : NULL);
+    if (running && have_frame) frame = NULL;
+    ui_switch_hooks(sw_card, sw_full, sw_card_select, sw_cards_revision);
+    const char *shot = getenv("SHELF_SHOT");
+    if (shot) { // headless, as for Shelf: SHELF_FRAMES frames (default 36) after each key
+        static const char MAP[] = "LRABlrm";
+        static const Button BTN[] = {BTN_LEFT, BTN_RIGHT, BTN_A, BTN_B, BTN_L, BTN_R, BTN_MENU};
+        const char *fr = getenv("SHELF_FRAMES");
+        int frames = fr ? atoi(fr) : 36;
+        if (ui_init_switcher(&lib, font_dir, overlay, running)) return 1;
+        ui_draw(canvas);
+        fprintf(stderr, "shelf: switcher first frame after %.0f ms\n", (platform_now() - t0) * 1000);
+        ui_set_status(76, 0, 3);
+        for (const char *k = getenv("SHELF_KEYS") ? getenv("SHELF_KEYS") : ""; ; k++) {
+            const char *m = *k ? strchr(MAP, *k) : NULL;
+            if (m) ui_button(BTN[m - MAP]);
+            for (int f = 0; f < frames; f++) {
+                if (f == 0) usleep(150000); // let the card worker catch up
+                ui_switch_saving(running ? SW_TOAST_SAVED : SW_TOAST_NONE);
+                ui_update(1.f / 60);
+                ui_draw(canvas);
+                while (icons_pump(64)) {}
+                ui_take_action();
+            }
+            if (!*k) break;
+        }
+        ui_draw(canvas);
+        int rc = write_ppm(canvas, shot);
+        if (running) sw_overlay_resume(); // finishes the save, as leaving does
+        sw_cards_stop();
+        return rc;
+    }
+    if (ui_init_switcher(&lib, font_dir, overlay, running) || platform_init()) {
+        fprintf(stderr, "shelf: switcher couldn't start\n");
+        if (running) sw_overlay_resume();
+        if (overlay && !sim) { unlink_dev(SYSDIR "/.runGameSwitcher"); exec_onion_switcher(argv); }
+        return 1;
+    }
+    icons_start_worker();
+    status_poll(sim);
+    fprintf(stderr, "shelf: switcher up in %.0f ms (%d recents, %s)\n", (platform_now() - t0) * 1000,
+            lib.ngames, running ? "game paused" : overlay ? "no game running" : "menu");
+
+    double last = platform_now(), next_status = last + 5;
+    int action = UI_NONE, toast = SW_TOAST_NONE;
+    while (action == UI_NONE) {
+        Button b;
+        while ((b = platform_poll()) != BTN_NONE) {
+            ui_button(b);
+            if (ui_take_sound()) platform_click();
+        }
+        if (platform_now() >= next_status) { status_poll(sim); next_status = platform_now() + 5; }
+        int save = running ? sw_save_state() : SW_SAVE_NONE;
+        int t = save == SW_SAVE_BUSY ? SW_TOAST_SAVING : save == SW_SAVE_DONE ? SW_TOAST_SAVED
+              : save == SW_SAVE_FAILED ? SW_TOAST_FAILED : SW_TOAST_NONE;
+        if (t != toast) ui_switch_saving(toast = t);
+        double now = platform_now();
+        float dt = (float)(now - last);
+        last = now;
+        ui_update(dt > .1f ? .1f : dt);
+        ui_draw(canvas);
+        platform_present(canvas);
+        action = ui_take_action();
+        if (!platform_vsync_paced()) platform_sleep_until(now + 1.0 / 60);
+    }
+
+    int target = ui_switch_target();
+    fprintf(stderr, "shelf: switcher %s %s\n", action == UI_SW_RESUME ? "resume" : action == UI_SW_PLAY ? "play" : "home",
+            target >= 0 ? rec[target].rompath : "");
+    if (action == UI_SW_PLAY) {
+        // Onion's resume: queue the game, keep the queued command over the runtime's
+        // "back to MainUI" step, and auto-load its state.
+        char cmd[PATH_LEN], tmp[PATH_LEN + 4];
+        host_path(SYSDIR "/cmd_to_run.sh", cmd, sizeof cmd);
+        snprintf(tmp, sizeof tmp, "%s.new", cmd);
+        // The runtime's sh may still be reading cmd_to_run.sh (the game being left):
+        // replace it by rename rather than rewriting it.
+        if (lib_resume(&rec[target], tmp) || rename(tmp, cmd)) {
+            fprintf(stderr, "shelf: couldn't queue the game\n");
+            action = UI_SW_HOME;
+        } else if (!sim) {
+            touch("/tmp/quick_switch");
+            touch("/tmp/force_auto_load_state");
+        }
+    }
+    if (action == UI_SW_HOME) unlink_dev(SYSDIR "/cmd_to_run.sh");
+    unlink_dev(SYSDIR "/.runGameSwitcher");
+    sync();
+    if (action == UI_SW_RESUME) sw_overlay_resume();
+    else if (running) sw_quit_game();
+    else if (overlay && !sim) sw_quit_game(); // RetroArch without our game: still close it
+
+    sw_cards_stop();
+    ui_free();
+    icons_free();
+    platform_quit();
+    img_free(canvas);
+    img_free(frame);
+    lib_free(&lib);
     return 0;
 }
 
 int main(int argc, char **argv)
 {
-    (void)argc; (void)argv;
     const char *root = getenv("SHELF_ROOT");      // simulator: folder standing in for /mnt/SDCARD
     const char *fonts = getenv("SHELF_FONTS");    // defaults to the installed app folder
     const char *cmd = getenv("SHELF_CMD");        // where to write the launch command
@@ -142,6 +317,14 @@ int main(int argc, char **argv)
     if (fonts) snprintf(font_dir, sizeof font_dir, "%s", fonts);
     else host_path(SD_PREFIX "/App/Shelf/fonts", font_dir, sizeof font_dir);
     snprintf(cmd_path, sizeof cmd_path, "%s", cmd ? cmd : "/tmp/cmd_to_run.sh");
+
+    // Run as Onion's gameSwitcher (boot.sh mounts Shelf there), or SHELF_SWITCHER=1|overlay.
+    const char *base = strrchr(argv[0], '/');
+    const char *sw = getenv("SHELF_SWITCHER");
+    if (!strcmp(base ? base + 1 : argv[0], "gameSwitcher") || sw) {
+        int overlay = (argc > 1 && !strcmp(argv[1], "--overlay")) || (sw && !strcmp(sw, "overlay"));
+        return switcher_main(overlay, sim, font_dir, argv);
+    }
 
     Library lib;
     if (lib_load(&lib)) return 1;

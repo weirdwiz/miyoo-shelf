@@ -18,6 +18,10 @@ void platform_quit(void);
 // Returns the next button press (including d-pad auto-repeat), BTN_NONE when drained.
 Button platform_poll(void);
 void platform_present(const Image *frame);
+// Copies what the screen shows now (the paused game, for the switcher) into a
+// SCREEN_W x SCREEN_H image, upright. Call before platform_init. Simulator: SHELF_FRAME
+// names a picture to use. Returns 0 on success.
+int platform_grab(Image *out);
 // Nonzero when present waits on vblank (for the previous frame's flip), so the frame
 // loop needn't sleep to pace.
 int platform_vsync_paced(void);
