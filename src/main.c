@@ -2,6 +2,7 @@
 // It shows Recent games and Library folders, and when you pick a game it writes
 // /tmp/cmd_to_run.sh and exits. Onion's runtime then runs the game and starts us again.
 #include <arpa/inet.h>
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -143,12 +144,17 @@ static int headless(Library *lib, const char *cmd_path, Image *canvas, const cha
 
 #define SYSDIR SD_PREFIX "/.tmp_update"
 
-static void touch(const char *dev)
+// Creates an empty marker file. Returns 0, or -1 (reported) when it couldn't be made.
+static int touch(const char *dev)
 {
     char host[PATH_LEN];
     host_path(dev, host, sizeof host);
     FILE *f = fopen(host, "w");
-    if (f) fclose(f);
+    if (!f || fclose(f)) {
+        fprintf(stderr, "shelf: couldn't create %s: %s\n", host, strerror(errno));
+        return -1;
+    }
+    return 0;
 }
 
 static void unlink_dev(const char *dev)
@@ -156,6 +162,21 @@ static void unlink_dev(const char *dev)
     char host[PATH_LEN];
     host_path(dev, host, sizeof host);
     remove(host);
+}
+
+// Where Onion's runtime looks for its handoff flags (tests point it elsewhere).
+static const char *runtime_tmp = "/tmp";
+
+// Tells the runtime to run the queued game next and load its autosave. Both flags or
+// neither: a game started without its state looks like lost progress.
+static int queue_resume_flags(void)
+{
+    char quick[PATH_LEN], load[PATH_LEN];
+    snprintf(quick, sizeof quick, "%s/quick_switch", runtime_tmp);
+    snprintf(load, sizeof load, "%s/force_auto_load_state", runtime_tmp);
+    if (touch(quick)) return -1;
+    if (touch(load)) { unlink(quick); return -1; }
+    return 0;
 }
 
 // If Shelf's switcher dies over a paused game, the game would stay frozen with MENU
@@ -238,7 +259,7 @@ static int switcher_main(int overlay, int sim, const char *font_dir, char **argv
         setenv("SHELF_MUTE", "1", 1); // RetroArch has the audio device
     }
     settings_load();
-    icons_init(&lib);
+    if (icons_init(&lib)) fprintf(stderr, "shelf: no memory for artwork; showing none\n");
     sw_cards_start(&lib, rec, 248, 186, running && have_frame ? frame : NULL);
     if (running && have_frame) frame = NULL;
     ui_switch_hooks(sw_card, sw_full, sw_card_select, sw_cards_revision);
@@ -342,12 +363,12 @@ static int switcher_main(int overlay, int sim, const char *font_dir, char **argv
         snprintf(tmp, sizeof tmp, "%s.new", cmd);
         // The runtime's sh may still be reading cmd_to_run.sh (the game being left):
         // replace it by rename rather than rewriting it.
-        if (lib_resume(&rec[target], tmp) || rename(tmp, cmd)) {
+        if (lib_resume(&rec[target], tmp) < 0 || rename(tmp, cmd)) {
             fprintf(stderr, "shelf: couldn't queue the game\n");
             action = UI_SW_HOME;
-        } else if (!sim) {
-            touch("/tmp/quick_switch");
-            touch("/tmp/force_auto_load_state");
+        } else if (!sim && queue_resume_flags()) {
+            fprintf(stderr, "shelf: couldn't hand the game to the runtime; going home\n");
+            action = UI_SW_HOME;
         }
     }
     if (action == UI_SW_HOME) unlink_dev(SYSDIR "/cmd_to_run.sh");
@@ -407,7 +428,7 @@ static int home_after(void *ud)
     if (l->status) return 1;
     int g = ui_take_launch();
     if (g >= 0) {
-        int launched = lib_launch(l->lib, g, l->cmd_path) == 0;
+        int launched = lib_launch(l->lib, g, l->cmd_path) >= 0;
         ui_reset_home();
         if (launched) {
             fprintf(stderr, "shelf: launch -> %s\n", l->cmd_path);
@@ -485,7 +506,7 @@ int main(int argc, char **argv)
     host_path(SD_PREFIX "/.tmp_update/startup/shelf.sh", hook, sizeof hook);
     ui_set_boot(access(hook, F_OK) == 0);
 
-    icons_init(&lib);
+    if (icons_init(&lib)) fprintf(stderr, "shelf: no memory for artwork; showing none\n");
     if (ui_init(&lib, font_dir)) { fprintf(stderr, "shelf: fonts missing in %s\n", font_dir); return 1; }
     Image *canvas = img_new(SCREEN_W, SCREEN_H);
 

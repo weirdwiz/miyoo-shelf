@@ -20,13 +20,14 @@ SDL_LIBS = $(shell sdl2-config --libs)
 
 .PHONY: sim run fixture clean mm mm-inner push log test boot-on boot-off
 
-test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUILD)/test-ui-cache $(BUILD)/test-switcher $(BUILD)/test-loop fixture/SDCARD/Emu
+test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUILD)/test-ui-cache $(BUILD)/test-ui-alloc $(BUILD)/test-switcher $(BUILD)/test-loop fixture/SDCARD/Emu
 	$(BUILD)/test-library
 	$(BUILD)/test-switcher "$(CURDIR)/fixture/SDCARD"
 	$(BUILD)/test-rrect
 	$(BUILD)/test-scaled-blit
 	$(BUILD)/test-ui-cache "$(CURDIR)/fixture/SDCARD" "$(CURDIR)/assets/fonts"
 	$(BUILD)/test-loop "$(CURDIR)/fixture/SDCARD" "$(CURDIR)/assets/fonts"
+	$(BUILD)/test-ui-alloc "$(CURDIR)/fixture/SDCARD" "$(CURDIR)/assets/fonts"
 
 $(BUILD)/test-loop: tools/test_loop.c src/loop.c src/ui.c src/icons.c src/library.c src/text.c src/gfx.c $(wildcard src/*.h)
 	@mkdir -p $(BUILD)
@@ -43,6 +44,13 @@ $(BUILD)/test-switcher: tools/test_switcher.c src/switcher.c src/switcher.h src/
 $(BUILD)/test-ui-cache: tools/test_ui_cache.c src/ui.c src/icons.c src/library.c src/text.c src/gfx.c $(wildcard src/*.h)
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tools/test_ui_cache.c src/icons.c src/library.c src/text.c src/gfx.c third_party/cJSON.c -lm
+
+# The UI's sources with every allocation routed through the fault injector.
+FAILALLOC_SRC := src/ui.c src/icons.c src/text.c src/gfx.c
+$(BUILD)/test-ui-alloc: tools/test_ui_alloc.c tools/failalloc.c tools/failalloc.h $(FAILALLOC_SRC) src/library.c $(wildcard src/*.h)
+	@mkdir -p $(BUILD)/failalloc
+	for f in $(FAILALLOC_SRC); do $(CC) $(CFLAGS) -include tools/failalloc.h -c $$f -o $(BUILD)/failalloc/$$(basename $$f .c).o || exit 1; done
+	$(CC) $(CFLAGS) -o $@ tools/test_ui_alloc.c tools/failalloc.c $(patsubst src/%.c,$(BUILD)/failalloc/%.o,$(FAILALLOC_SRC)) src/library.c third_party/cJSON.c -lm -lpthread
 
 $(BUILD)/test-scaled-blit: tools/test_scaled_blit.c src/gfx.c src/gfx.h
 	@mkdir -p $(BUILD)

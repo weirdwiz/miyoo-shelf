@@ -161,7 +161,7 @@ static double wall_real(void)
 static double (*wall)(void) = wall_real;
 void ui_set_wall_clock(double (*now)(void)) { wall = now ? now : wall_real; }
 
-static void add_folder(int kind, int sys, const char *label, uint32_t color)
+static int add_folder(int kind, int sys, const char *label, uint32_t color)
 {
     Folder *f = &S.folders[S.nfolders];
     memset(f, 0, sizeof *f);
@@ -170,20 +170,24 @@ static void add_folder(int kind, int sys, const char *label, uint32_t color)
     snprintf(f->label, sizeof f->label, "%s", label);
     f->color = color;
     f->games = malloc(sizeof(int) * (S.lib->ngames ? S.lib->ngames : 1));
+    if (!f->games) return -1;
     for (int i = 0; i < S.lib->ngames; i++) {
         Game *g = &S.lib->games[i];
         if (kind == F_ALL || (kind == F_FAV && g->fav) || (kind == F_SYS && g->sys == sys)) f->games[f->ngames++] = i;
     }
     if (f->ngames || kind == F_ALL) S.nfolders++;
     else free(f->games);
+    return 0;
 }
 
-static void build_bg(void)
+static int build_bg(void)
 {
     S.bg = img_new(SCREEN_W, SCREEN_H);
+    if (!S.bg) return -1;
     gfx_clear(S.bg, rgb(C_BG));
     for (int y = 8; y < SCREEN_H; y += 16)
         for (int x = 8; x < SCREEN_W; x += 16) gfx_fill_rrect(S.bg, x - 1.3f, y - 1.3f, 2.6f, 2.6f, 1.3f, rgb(C_DOT));
+    return 0;
 }
 
 int ui_init(Library *lib, const char *font_dir)
@@ -198,15 +202,13 @@ int ui_init(Library *lib, const char *font_dir)
     S.label = font_load(xbold, 20);
     S.body = font_load(bold, 19);
     S.small = font_load(bold, 17);
-    if (!S.title || !S.body || !S.small || !S.label) return -1;
-    build_bg();
     S.layer = img_new(SCREEN_W, SCREEN_H);
     S.scene = img_new(SCREEN_W, SCREEN_H);
     S.scene_dirty = 1;
-
-    add_folder(F_ALL, -1, "All games", 0x2b3040);
-    add_folder(F_FAV, -1, "Favorites", 0xf0a020);
-    for (int i = 0; i < lib->nsys; i++) add_folder(F_SYS, i, lib->sys[i].label, lib->sys[i].color);
+    int bad = !S.title || !S.body || !S.small || !S.label || !S.layer || !S.scene || build_bg() ||
+              add_folder(F_ALL, -1, "All games", 0x2b3040) || add_folder(F_FAV, -1, "Favorites", 0xf0a020);
+    for (int i = 0; !bad && i < lib->nsys; i++) bad = add_folder(F_SYS, i, lib->sys[i].label, lib->sys[i].color);
+    if (bad) { ui_free(); return -1; } // ui_free undoes any part of this
 
     S.launching = -1;
     S.battery = S.wifi = -1;
@@ -231,6 +233,7 @@ void ui_free(void)
     tiles_free();
     status_free();
     font_free(S.title); font_free(S.body); font_free(S.small); font_free(S.label);
+    memset(&S, 0, sizeof S);
 }
 
 /* ---------- model helpers ---------- */
@@ -277,20 +280,24 @@ static void folder_select(int i)
     if (i < S.nfg) { S.fscale[i].t = 1.1f; factive_add(i); }
 }
 
+// Out of memory leaves the view (and any open folder) as it was.
 static void folder_open(int f)
 {
     Folder *fd = &S.folders[f];
+    int n = fd->ngames, *games = malloc(sizeof(int) * (n ? n : 1));
+    Spring *scale = calloc(n ? n : 1, sizeof(Spring));
+    if (!games || !scale) { free(games); free(scale); return; }
     S.folder = f;
     S.view = V_FOLDER;
     free(S.fgames);
     free(S.fscale);
-    S.nfg = fd->ngames;
+    S.nfg = n;
     S.grid = &GRIDS[S.nfg <= 4];
-    S.fgames = malloc(sizeof(int) * (S.nfg ? S.nfg : 1));
+    S.fgames = games;
     memcpy(S.fgames, fd->games, sizeof(int) * S.nfg);
     sort_mode = S.sort;
     qsort(S.fgames, S.nfg, sizeof(int), cmp_fg);
-    S.fscale = calloc(S.nfg ? S.nfg : 1, sizeof(Spring));
+    S.fscale = scale;
     for (int k = 0; k < S.nfg; k++) S.fscale[k].x = S.fscale[k].t = 1;
     S.nfactive = S.fall = 0;
     S.fsel = 0;
@@ -347,8 +354,9 @@ void ui_set_dark(int dark)
     P = &PALETTES[dark ? 1 : 0];
     S.dark = dark ? 1 : 0;
     if (!S.bg) return; // before ui_init: build_bg picks the palette up
-    img_free(S.bg);
-    build_bg();
+    Image *old = S.bg;
+    if (build_bg()) S.bg = old; // out of memory: keep the old dots rather than none
+    else img_free(old);
     tiles_free(); // sprites carry the palette's shadow; the footer strip its background
     S.scene_dirty = S.redraw = 1;
 }
@@ -1304,7 +1312,7 @@ int ui_init_switcher(Library *lib, const char *font_dir, int overlay, int runnin
     W.home_bg = S.bg;     // in the user's palette
     P = &PALETTES[1];     // the switcher is always dark: it sits over a dimmed game
     S.bg = NULL;
-    build_bg();
+    if (build_bg()) { ui_free(); return -1; }
     for (int k = 0; k < lib->nrecent; k++) S.hscale[k].x = S.hscale[k].t = SW_SMALL;
     sw_select(0);
     S.track.x = S.track.t;

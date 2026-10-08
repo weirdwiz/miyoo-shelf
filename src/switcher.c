@@ -297,11 +297,17 @@ static void *cards_main(void *ud)
 
 void sw_cards_start(const Library *lib, const Recent *rec, int w, int h, Image *live)
 {
-    C.lib = lib; C.rec = rec; C.n = lib->ngames; C.w = w; C.h = h; C.sel = 0;
+    C.lib = lib; C.rec = rec; C.n = lib->ngames; C.w = w; C.h = h; C.sel = 0; C.quit = 0;
     C.card = calloc(C.n + 1, sizeof *C.card);
     C.full = calloc(C.n + 1, sizeof *C.full);
     C.tried = calloc(C.n + 1, 1);
     C.used = calloc(C.n + 1, sizeof *C.used);
+    if (!C.card || !C.full || !C.tried || !C.used) { // no cards: the row shows placeholders
+        fprintf(stderr, "shelf: no memory for screenshot cards\n");
+        sw_cards_stop();
+        img_free(live);
+        return;
+    }
     if (live && C.n) {
         C.full[0] = live;
         C.card[0] = card_from(live);
@@ -320,9 +326,14 @@ void sw_cards_stop(void)
         pthread_join(C.thread, NULL);
         C.running = 0;
     }
-    for (int i = 0; i < C.n; i++) { img_free(C.card[i]); img_free(C.full[i]); }
+    for (int i = 0; i < C.n; i++) {
+        if (C.card) img_free(C.card[i]);
+        if (C.full) img_free(C.full[i]);
+    }
     free(C.card); free(C.full); free(C.tried); free(C.used);
     C.card = C.full = NULL;
+    C.tried = NULL;
+    C.used = NULL;
     C.n = 0;
 }
 

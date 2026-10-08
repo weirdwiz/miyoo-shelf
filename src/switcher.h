@@ -37,6 +37,11 @@ void sw_quit_game(void);
 // given, is recents[0]'s screen as it is now (the paused game); the cards take it over.
 void sw_cards_start(const Library *lib, const Recent *rec, int w, int h, Image *live);
 void sw_cards_stop(void);
+// Images are borrowed and only used on the main thread, which is also the only caller
+// of sw_card_select. The worker never replaces or frees a card once published, so a
+// card stays valid (and its address identifies it) until sw_cards_stop. A full-size
+// image may be evicted once it is no longer the selection: use it only until the next
+// sw_card_select or sw_cards_stop.
 // The card image, NULL while loading or when the game has no screenshot.
 const Image *sw_card(int i);
 // The selected recent's screenshot at full size, NULL until loaded.

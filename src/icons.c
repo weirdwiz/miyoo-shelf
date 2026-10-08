@@ -51,7 +51,7 @@ static void mkdirs(const char *path)
     mkdir(p, 0755);
 }
 
-void icons_init(Library *lib)
+int icons_init(Library *lib)
 {
     L = lib;
     revision = 0;
@@ -62,8 +62,15 @@ void icons_init(Library *lib)
         Q[b].game = malloc(sizeof(int) * (lib->ngames ? lib->ngames : 1));
         Q[b].head = Q[b].len = 0;
     }
+    if (!E || !Q[0].game || !Q[1].game) { // no art: icon_get answers NULL
+        free(E);
+        E = NULL;
+        for (int b = 0; b < 2; b++) { free(Q[b].game); Q[b].game = NULL; }
+        return -1;
+    }
     host_path(SD_PREFIX "/App/Shelf/cache", cache_dir, sizeof cache_dir);
     mkdirs(cache_dir);
+    return 0;
 }
 
 void icons_free(void)
@@ -85,6 +92,7 @@ void icons_free(void)
 
 const Image *icon_get(int game, int big)
 {
+    if (!E) return NULL;
     Entry *e = &E[game];
     pthread_mutex_lock(&lock);
     e->used[big] = ++use_clock;
@@ -307,6 +315,7 @@ static void *work(void *arg)
 int icons_start_worker(void)
 {
     if (worker_running) return 0;
+    if (!E) return -1;
     worker_quit = 0;
     if (pthread_create(&worker, NULL, work, NULL)) return -1;
     worker_running = 1;

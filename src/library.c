@@ -462,7 +462,7 @@ int lib_launch(Library *lib, int gi, const char *cmd_path)
     snprintf(tmp, sizeof tmp, "%s.tmp", host);
     char *old = read_file(host);
     FILE *out = fopen(tmp, "w");
-    if (!out) { free(old); return 0; }
+    if (!out) { perror("shelf: recents"); free(old); return LIB_RECENTS_UNSAVED; }
 
     char label[256], launch[PATH_LEN * 2], rp[PATH_LEN * 2], img_dev[PATH_LEN], img[PATH_LEN * 2];
     json_escape(g->stem, label, sizeof label);
@@ -485,10 +485,15 @@ int lib_launch(Library *lib, int gi, const char *cmd_path)
         }
         free(old);
     }
-    fclose(out);
-    rename(tmp, host);
+    int bad = ferror(out);
+    if (fclose(out)) bad = 1;
+    if (bad || rename(tmp, host)) {
+        perror("shelf: recents");
+        remove(tmp);
+        return LIB_RECENTS_UNSAVED;
+    }
 
-    // Refresh in-memory recents.
+    // Refresh in-memory recents to match the file.
     for (int i = 0; i < lib->ngames; i++) lib->games[i].recent = -1;
     int n = 0, order[MAX_RECENT];
     order[n++] = gi;
@@ -630,7 +635,7 @@ int lib_resume(const Recent *r, const char *cmd_path)
     char *old = read_file(host);
     if (!old) return 0;
     FILE *out = fopen(tmp, "w");
-    if (!out) { free(old); return 0; }
+    if (!out) { perror("shelf: recents"); free(old); return LIB_RECENTS_UNSAVED; }
     size_t total = strlen(old);
     for (char *c = old; *c; c++) if (*c == '\n') *c = 0;
     char *first = NULL;
@@ -641,8 +646,9 @@ int lib_resume(const Recent *r, const char *cmd_path)
     if (first) fprintf(out, "%s\n", first);
     for (char *line = old; line < old + total; line += strlen(line) + 1)
         if (line != first && *line) fprintf(out, "%s\n", line);
-    int bad = fclose(out) != 0;
+    int bad = ferror(out);
+    if (fclose(out)) bad = 1;
     free(old);
-    if (bad || rename(tmp, host)) { remove(tmp); return 0; }
+    if (bad || rename(tmp, host)) { perror("shelf: recents"); remove(tmp); return LIB_RECENTS_UNSAVED; }
     return 0;
 }

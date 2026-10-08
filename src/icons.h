@@ -10,7 +10,8 @@
 #define ICON_BIG 168
 #define ICON_SMALL 92
 
-void icons_init(Library *lib);
+// Out of memory returns -1; Shelf then runs without art (icon_get answers NULL).
+int icons_init(Library *lib);
 void icons_free(void);
 // Returns the icon if ready, NULL while pending. Requests generation for later.
 // The image is borrowed: it stays valid until the next icons_trim() or icons_free(), so

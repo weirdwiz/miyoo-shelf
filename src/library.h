@@ -52,7 +52,12 @@ int lib_load(Library *lib);
 void lib_free(Library *lib);
 int lib_img_path(const Library *lib, const Game *g, char *out, int n); // host path, 0 if exists
 
+// lib_launch/lib_resume: the command is written but the recents file couldn't be
+// rewritten. The game still launches; the file (and lib's recents) keep their old order.
+#define LIB_RECENTS_UNSAVED 1
+
 // Writes /tmp/cmd_to_run.sh (or `cmd_path`) and moves the game to the top of recentlist.json.
+// Returns 0, LIB_RECENTS_UNSAVED, or -1 when the command couldn't be written (no launch).
 int lib_launch(Library *lib, int game, const char *cmd_path);
 
 // A recents entry as Onion recorded it. Paths stay verbatim ("/mnt/SDCARD/Emu/GBA/../../
@@ -67,7 +72,7 @@ typedef struct {
 // recent[i] == i. Up to `max` entries.
 int lib_load_recents(Library *lib, Recent *rec, int max);
 // Writes the command that resumes `r` (Onion's runtime auto-loads its state) and moves
-// it to the top of the recents file.
+// it to the top of the recents file. Returns as lib_launch does.
 int lib_resume(const Recent *r, const char *cmd_path);
 
 #endif

@@ -5,6 +5,10 @@
 #include <string.h>
 
 #define STB_TRUETYPE_IMPLEMENTATION
+// stb asserts on a failed allocation, then handles it: let it (glyph() retries later).
+// The device build keeps asserts, and the other checks guard against malformed fonts,
+// while Shelf only loads its own.
+#define STBTT_assert(x) ((void)0)
 #include "../third_party/stb_truetype.h"
 
 #define CACHE_SIZE 512
@@ -94,6 +98,8 @@ static Glyph *glyph(Font *f, int cp)
     stbtt_GetCodepointHMetrics(&f->info, cp, &adv, &lsb);
     g->advance = (int)(adv * f->scale + 0.5f);
     g->bitmap = stbtt_GetCodepointBitmap(&f->info, 0, f->scale, cp, &g->w, &g->h, &g->xoff, &g->yoff);
+    if (!g->bitmap && !stbtt_IsGlyphEmpty(&f->info, stbtt_FindGlyphIndex(&f->info, cp)))
+        g->cp = 0; // out of memory: draw it without ink this time and rasterize it again next
     return g;
 }
 
