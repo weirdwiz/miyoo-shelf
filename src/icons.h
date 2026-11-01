@@ -30,6 +30,8 @@ size_t icons_bytes(void);
 // Generates up to `budget` pending icons on the caller's thread. Returns how many it
 // made; always 0 once icons_start_worker() has taken over.
 int icons_pump(int budget);
+// Nonzero while requests wait for icons_pump (always 0 once the worker has taken over).
+int icons_pending(void);
 // Decode and resize requested art on a background thread so frames never wait on the
 // SD card or PNG decoding. Returns 0 on success; on failure keep calling icons_pump.
 int icons_start_worker(void);

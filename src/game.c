@@ -341,7 +341,9 @@ static double menu_tick(void *ud, double now)
     (void)ud;
     icons_pump(2);
     icons_trim();
-    return now + 1; // art and the clock can arrive while the row rests
+    // Art made here (no worker) needs the next pass. Otherwise nothing outside the screen
+    // changes: the worker's art wakes the loop itself and ui_idle has the clock's minute.
+    return icons_pending() ? now : now + 3600;
 }
 
 static void menu_update(void *ud, float dt)
@@ -401,6 +403,7 @@ static int run_menu(Session *s)
         return MENU_RESUME;
     }
 
+    platform_performance(0); // a paused game needs no more than the home screen
     Menu menu = {s, &cards, canvas, 0, 0};
     LoopIO io = {platform_now, platform_poll, platform_wait, platform_present, platform_vsync_paced()};
     LoopScreen screen = {&menu, menu_button, menu_tick, menu_update, menu_idle, menu_draw, menu_after};
@@ -433,6 +436,7 @@ static int play(Session *s)
                 if (result == MENU_HOME) return GAME_HOME;
                 if (result == MENU_POWER_OFF) return GAME_POWER_OFF;
                 if (result == MENU_RESTART) player_reset();
+                platform_performance(1);
                 platform_audio_source(player_audio_read);
                 player_audio_flush();
                 last = platform_now();

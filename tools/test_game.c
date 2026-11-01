@@ -12,6 +12,7 @@
 #include "../src/game.h"
 #include "../src/icons.h"
 #include "../src/library.h"
+#include "../src/ui.h"
 #include "fake_platform.h"
 
 static int failures;
@@ -152,6 +153,23 @@ static void watch_saves(const char *call)
     if (!strcmp(call, "power_off")) at_off = state_counter(watched);
 }
 
+// The fake log's entries that start with `prefix`, space separated.
+static const char *calls(const char *prefix)
+{
+    static char out[1024];
+    char log[4096];
+    snprintf(log, sizeof log, "%s", fp_log());
+    out[0] = 0;
+    for (char *w = strtok(log, " "); w; w = strtok(NULL, " "))
+        if (!strncmp(w, prefix, strlen(prefix)))
+            snprintf(out + strlen(out), sizeof out - strlen(out), "%s%s", out[0] ? " " : "", w);
+    return out;
+}
+
+// The status clock on the fake clock: its minute turns at t = 55, 115, ...
+#define WALL0 1767225605.0
+static double fake_wall(void) { return WALL0 + platform_now(); }
+
 // One session with the script the caller queued; returns game_play's result.
 static int session(int game, int *next)
 {
@@ -248,6 +266,22 @@ int main(int argc, char **argv)
     long resumed_from = state_counter(alpha);
     CHECK(session(alpha, &next) == GAME_HOME);
     CHECK(state_counter(alpha) - resumed_from > 100); // ~1 s before the menu + ~1.2 s after resuming
+
+    // The paused menu runs on the menu's CPU governor and gives the game back full speed
+    // when it resumes. Settled, it sleeps until the status clock's minute turns instead of
+    // waking every second.
+    ui_set_wall_clock(fake_wall);
+    fp_reset();
+    fp_limit(120);
+    fp_press_at(1.0, BTN_MENU);
+    fp_press_at(100.0, BTN_A); // resume after a long rest
+    fp_press_at(101.0, BTN_MENU);
+    fp_press_at(101.6, BTN_B);
+    fp_watch_waits(5.0, 99.9);
+    CHECK(session(alpha, &next) == GAME_HOME);
+    CHECK(!strcmp(calls("perf"), "perf_on perf_off perf_on perf_off perf_off"));
+    CHECK(fp()->watched_waits >= 1 && fp()->watched_waits <= 2); // the minute at 55 s
+    ui_set_wall_clock(NULL);
 
     // POWER sleeps (nothing presented, no player running) and POWER wakes it again. The
     // panel goes dark and the sound stops before the save is written, so the press feels

@@ -289,6 +289,8 @@ int icons_pump(int budget)
     return made;
 }
 
+int icons_pending(void) { return !worker_running && Q[0].len + Q[1].len > 0; }
+
 static void *work(void *arg)
 {
     (void)arg;

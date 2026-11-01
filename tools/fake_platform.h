@@ -16,6 +16,9 @@ typedef struct {
     int performance_on;  // platform_performance(1) calls
     int audio_on;        // platform_audio_source(pull) calls
     int audio_off;       // platform_audio_source(NULL) calls
+    int performance_off; // platform_performance(0) calls
+    int waits;           // platform_wait calls
+    int watched_waits;   // of those, the ones begun inside fp_watch_waits' window
     int clicks;
     int brightness, volume;
 } FakePlatform;
@@ -32,6 +35,8 @@ void fp_on_call(void (*hook)(const char *call));
 void fp_press_at(double at, Button b);
 // Buttons platform_held() reports.
 void fp_hold(unsigned mask);
+// Counts the platform_wait calls begun at clock times in [from, to) as watched_waits.
+void fp_watch_waits(double from, double to);
 // Fails (exit 1) instead of letting a stuck loop run past `at`.
 void fp_limit(double at);
 // The next presented canvas from clock time `at` on, as a copy for screenshots.

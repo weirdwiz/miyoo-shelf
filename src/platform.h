@@ -65,7 +65,8 @@ int platform_volume(void);
 int platform_battery(int *charging);
 // Standby: on = backlight and panel off, audio muted, CPU in powersave. off restores.
 void platform_standby(int on);
-// CPU policy: nonzero while a game runs (full speed), zero in menus (on demand).
+// CPU policy: nonzero while a game runs (full speed), zero in menus, the paused in-game
+// menu included (on demand).
 void platform_performance(int game);
 // Hardware probe (SHELF_PROBE, src/probe.c): writes what the platform knows about its
 // display and input to `out` and logs every raw input event there until called with NULL.

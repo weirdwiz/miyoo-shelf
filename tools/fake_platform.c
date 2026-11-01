@@ -21,6 +21,7 @@ static struct {
     int nevents, next;
     unsigned held;
     double limit;
+    double watch_from, watch_to;
     int asleep;
     FakePlatform counts;
     Image *frame, *first; // the last and the first game frame presented
@@ -75,6 +76,7 @@ void fp_press_at(double at, Button b)
 
 void fp_hold(unsigned mask) { F.held = mask; }
 void fp_limit(double at) { F.limit = at; }
+void fp_watch_waits(double from, double to) { F.watch_from = from; F.watch_to = to; }
 void fp_capture_at(double at) { F.capture_at = at; }
 const Image *fp_capture(void) { return F.captured; }
 const Image *fp_frame(void) { return F.frame; }
@@ -101,6 +103,8 @@ void platform_sleep_until(double t)
 
 void platform_wait(double until)
 {
+    F.counts.waits++;
+    if (F.clock >= F.watch_from && F.clock < F.watch_to) F.counts.watched_waits++;
     double t = until;
     if (F.next < F.nevents && F.events[F.next].at < t) t = F.events[F.next].at;
     if (F.limit < t) t = F.limit;
@@ -180,6 +184,7 @@ void platform_standby(int on)
 void platform_performance(int game)
 {
     if (game) F.counts.performance_on++;
+    else F.counts.performance_off++;
     note(game ? "perf_on" : "perf_off");
 }
 
