@@ -39,7 +39,8 @@ What matches the device: `/dev/fb0` is 640x480, 32 bpp, two pages (`yres_virtual
 keyboard (`/dev/input/event1`); POWER (`key.sh power`) arrives as KEY_POWER on `gpio-keys`
 (`event0`), short press only. logind ignores it so Shelf can handle it.
 
-Differences: no vblank wait (pans return at once, so Shelf paces itself by the clock);
+Differences: no vblank wait (pans return at once, so the menus pace themselves by the
+clock, as games always do);
 writes to the framebuffer reach the screen after up to ~100 ms (virtio-gpu flushes
 mapped pages lazily), so wait before a screenshot; a screendump only ever shows page 0
 (the host scanout is one page tall), so `selftest.sh` checks the panned-to page by

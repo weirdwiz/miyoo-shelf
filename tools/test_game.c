@@ -3,6 +3,7 @@
 // Usage: test-game <work dir> <fonts dir> <fake core .so>
 #include <dirent.h>
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -440,6 +441,40 @@ int main(int argc, char **argv)
     fp_press_at(151, BTN_B);
     CHECK(session(beta, &next) == GAME_HOME);
     CHECK(fp()->power_off == 0);
+
+    // Pacing: the game runs at the core's 59.7275 fps on the clock, whatever the panel
+    // refreshes at, whether or not the core dupes a frame (the fake dupes every fourth),
+    // and however long each frame takes to emulate. A panel slower than the game skips a
+    // frame now and then rather than slowing the game down.
+    static const struct { double hz, cost_min, cost_max; int dupes; } PACE[] = {
+        {0, 0, 0, 1},          {60.0, 0, 0, 1},       {60.0, .002, .014, 1}, {59.0, .002, .012, 1},
+        {61.5, .004, .010, 1}, {0, .002, .014, 1},    {0, .002, .014, 0},    {60.0, 0, 0, 0},
+        {60.0, .002, .014, 0}, {59.0, .002, .012, 0}, {57.0, .004, .010, 0}, {55.0, .002, .012, 0},
+    };
+    for (size_t i = 0; i < sizeof PACE / sizeof *PACE; i++) {
+        const double secs = 20.0;
+        if (!PACE[i].dupes) setenv("FAKE_CORE_NO_DUPES", "1", 1);
+        long from = state_counter(beta);
+        fp_reset();
+        fp_limit(secs + 5);
+        fp_vsync(PACE[i].hz);
+        fp_frame_cost(PACE[i].cost_min, PACE[i].cost_max);
+        fp_press_at(secs, BTN_MENU);
+        fp_press_at(secs + .5, BTN_B);
+        CHECK(session(beta, &next) == GAME_HOME);
+        double fps = (double)(state_counter(beta) - from) / secs;
+        int presents = fp()->game_presents;
+        unsetenv("FAKE_CORE_NO_DUPES");
+        // Every new frame is shown unless the panel can't keep up: then nearly all it can.
+        double fresh = secs * 59.7275 * (PACE[i].dupes ? .75 : 1);
+        double can = PACE[i].hz ? PACE[i].hz * secs : fresh;
+        double want = fresh < can ? fresh : can;
+        int bad = fabs(fps - 59.7275) > .15 || presents > can + 2 || presents < want * .97;
+        printf("%spacing: panel %.1f Hz, frame cost %.0f-%.0f ms, %s: %.3f fps, %d frames shown\n",
+               bad ? "FAIL " : "  ", PACE[i].hz, PACE[i].cost_min * 1e3, PACE[i].cost_max * 1e3,
+               PACE[i].dupes ? "dupes" : "no dupes", fps, presents);
+        failures += bad;
+    }
 
     // A missing core fails with a message, and writes nothing.
     char bad[PATH_LEN * 2];

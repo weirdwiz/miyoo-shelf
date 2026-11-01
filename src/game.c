@@ -497,11 +497,26 @@ static void play_resume(Session *s, double *last, double *next)
 
 // Runs frames until the player leaves the game with the menu or POWER, or the power
 // policy ends it.
+//
+// Pacing: emulation runs on the monotonic clock, one frame every 1 / player_fps() seconds
+// against an absolute schedule, whether or not the frame was presented and whether or not
+// presenting waits for vblank. The game's speed is the core's (59.7275 fps for GB and
+// GBA), not the panel's: pacing by vblank would tie it to a refresh rate Shelf has never
+// measured on hardware and that differs between panel revisions. At 60.00 Hz that is
+// 0.46 % fast, all the headroom the audio ring's rate control has (player.c), and any
+// panel further off would overflow or starve it; worse, a frame the core dupes presents
+// nothing, so nothing waited for vblank and the game raced. Instead the newest frame goes
+// to the flipper, which pans at the next vblank: a 60 Hz panel shows one frame in ~220
+// twice (every ~3.7 s), the price of correct speed and sound. Presenting can still wait
+// for the previous pan, so a frame that started over a quarter frame late, or finished
+// only after the next one was due, isn't presented (never two in a row): neither a panel
+// slower than the game nor a slow frame holds the emulation back for long, and the
+// sound each frame makes never waits on the panel.
 static int play(Session *s)
 {
     double last = platform_now(), next = last, flush_at = last + SRAM_SECONDS;
     unsigned shown = 0, held = 0;
-    int redraw = 1;
+    int redraw = 1, skipped = 0;
     s->last_input = last;
     for (;;) {
         Button b;
@@ -537,6 +552,7 @@ static int play(Session *s)
             }
         }
 
+        double begun = platform_now(), frame = 1.0 / player_fps();
         unsigned input = player_input();
         if (input != held) { // holding the same buttons for ten minutes is idle too
             held = input;
@@ -544,11 +560,17 @@ static int play(Session *s)
         }
         player_set_input(input);
         player_run();
+        int on_time = begun - next < frame / 4 && platform_now() < next + frame;
+        next += frame; // when the next frame is due
         const PlayerFrame *f = player_frame();
         if (redraw || f->serial != shown) { // a core that dupes a frame keeps the last one
-            platform_present_game(f->px, f->w, f->h, f->pitch, f->aspect, s->set->scale);
-            shown = f->serial;
-            redraw = 0;
+            if (on_time || skipped) {
+                platform_present_game(f->px, f->w, f->h, f->pitch, f->aspect, s->set->scale);
+                shown = f->serial;
+                redraw = skipped = 0;
+            } else {
+                skipped = 1; // late: the next frame, newer anyway, is shown instead
+            }
         }
         double now = platform_now();
         s->played += now - last;
@@ -566,12 +588,9 @@ static int play(Session *s)
                 redraw = 1;
             }
         }
-        if (!platform_vsync_paced()) { // otherwise presenting already waits for the panel
-            next += 1.0 / player_fps();
-            now = platform_now();
-            if (next > now) platform_sleep_until(next);
-            else if (now - next > .1) next = now; // stalled: resume rather than race to catch up
-        }
+        now = platform_now();
+        if (next > now) platform_sleep_until(next);
+        else if (now - next > .1) next = now; // stalled: resume rather than race to catch up
     }
 }
 

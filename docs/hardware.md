@@ -21,7 +21,10 @@ read of its register 0 means Mini Plus (Onion: `axp 0`). The Plus also has
 
 `/dev/fb0`, 640x480, 32 bpp XRGB, virtual height of at least two pages; pan with
 `FBIOPAN_DISPLAY` (it waits for vblank). The panel is mounted upside down, so frames are
-rotated 180 degrees before scan-out.
+rotated 180 degrees before scan-out. Games run on the clock at the core's frame rate
+(59.7275 fps for GB and GBA), not the panel's: a frame goes to the hidden page and a
+flipper thread pans to it at the next vblank, so at 60 Hz one frame in ~220 stays up for
+two refreshes. *Unverified*: the panel's refresh rate (the probe measures it).
 
 Later units (Mini v4 from late 2023, later Mini Plus) have a 752x560 panel timing with a
 750x559 visible area. Onion reads it from `Current TimingWidth=` in

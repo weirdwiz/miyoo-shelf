@@ -2,7 +2,8 @@
 // pixel formats, a deterministic pattern, audio and 8 KiB of SRAM. No emulation.
 //
 // FAKE_CORE_LEGACY_OPTIONS=1 makes it register options through the deprecated
-// SET_VARIABLES call, so both frontend option paths get exercised.
+// SET_VARIABLES call, so both frontend option paths get exercised. FAKE_CORE_NO_DUPES=1
+// makes every frame a new one.
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -145,7 +146,8 @@ static void draw_frame(void)
     put_bits(5, 0, 2, code);
     put_bits(5, 8, 8, sram[0]);
     // Every fourth frame is a dupe, like a core that skips an idle update.
-    video((frame_counter % 4) == 3 ? NULL : screen, SCREEN_W, SCREEN_H, (size_t)SCREEN_W * pixel_bytes());
+    int dupe = (frame_counter % 4) == 3 && !getenv("FAKE_CORE_NO_DUPES");
+    video(dupe ? NULL : screen, SCREEN_W, SCREEN_H, (size_t)SCREEN_W * pixel_bytes());
 }
 
 static void emit_audio(void)

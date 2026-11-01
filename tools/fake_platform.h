@@ -43,6 +43,14 @@ void fp_battery_at(double at, int percent, int charging);
 void fp_hold(unsigned mask);
 // Counts the platform_wait calls begun at clock times in [from, to) as watched_waits.
 void fp_watch_waits(double from, double to);
+// A panel that refreshes at `hz` (0: off, the default): platform_vsync_paced() is 1 and
+// presenting behaves like the device's flipper, waiting for the previous frame's pan to
+// finish at its vblank before the next frame goes into the hidden page.
+void fp_vsync(double hz);
+// The work of one game frame: every platform_held() call (the play loop makes one per
+// frame, just before running the core) moves the clock on by a pseudo-random amount in
+// [min, max] seconds. 0, 0 (the default) costs nothing.
+void fp_frame_cost(double min, double max);
 // Fails (exit 1) instead of letting a stuck loop run past `at`.
 void fp_limit(double at);
 // The next presented canvas from clock time `at` on, as a copy for screenshots.
