@@ -12,7 +12,7 @@ CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers
 BUILD := build
 
-CORE_SRC := src/main.c src/loop.c src/gfx.c src/text.c src/library.c src/icons.c src/ui.c src/game.c src/settings.c src/scale.c src/player.c third_party/cJSON.c
+CORE_SRC := src/main.c src/loop.c src/gfx.c src/text.c src/library.c src/icons.c src/ui.c src/game.c src/settings.c src/scale.c src/player.c src/probe.c third_party/cJSON.c
 SIM_SRC := $(CORE_SRC) src/platform_sdl2.c
 SDL_CFLAGS = $(shell sdl2-config --cflags)
 SDL_LIBS = $(shell sdl2-config --libs)
@@ -24,9 +24,10 @@ FIXTURE_READY := $(FIXTURE)/.shelf/data/recents.json
 
 .PHONY: sim run fixture clean test shots mm mm-inner
 
-test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUILD)/test-scale \
+test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUILD)/test-scale $(BUILD)/test-fb-geometry \
       $(BUILD)/test-ui-cache $(BUILD)/test-loop $(BUILD)/test-ui-alloc $(BUILD)/test-game $(BUILD)/test-palette $(FIXTURE_READY)
 	$(BUILD)/test-scale
+	$(BUILD)/test-fb-geometry
 	$(BUILD)/test-library
 	$(BUILD)/test-rrect
 	$(BUILD)/test-scaled-blit
@@ -66,6 +67,10 @@ $(BUILD)/test-scaled-blit: tools/test_scaled_blit.c src/gfx.c src/gfx.h
 $(BUILD)/test-scale: tools/test_scale.c src/scale.c src/scale.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tools/test_scale.c src/scale.c -lm
+
+$(BUILD)/test-fb-geometry: tools/test_fb_geometry.c src/fb_geometry.c src/fb_geometry.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tools/test_fb_geometry.c src/fb_geometry.c
 
 $(BUILD)/test-rrect: tools/test_rrect.c src/gfx.c src/gfx.h
 	@mkdir -p $(BUILD)
@@ -131,10 +136,10 @@ shots: sim $(FIXTURE_READY) $(BUILD)/shot-ingame $(BUILD)/fake_core.so
 TOOLCHAIN := docker.io/aemiii91/miyoomini-toolchain:latest
 CONTAINER ?= $(shell command -v podman || command -v docker)
 MM_BUILD := $(BUILD)/mm
-MM_SRC := $(CORE_SRC) src/platform_mm.c src/audio_mm.c src/hw_mm.c
+MM_SRC := $(CORE_SRC) src/platform_mm.c src/audio_mm.c src/hw_mm.c src/fb_geometry.c
 
 mm:
-	$(CONTAINER) run --rm --platform linux/amd64 -v "$(CURDIR)":/root/workspace -w /root/workspace $(TOOLCHAIN) \
+	$(CONTAINER) run --rm --platform linux/amd64 -v "$(CURDIR)":/root/workspace:z -w /root/workspace $(TOOLCHAIN) \
 		/bin/bash -c "source /root/.bashrc && make mm-inner"
 
 mm-inner: $(MM_BUILD)/shelf

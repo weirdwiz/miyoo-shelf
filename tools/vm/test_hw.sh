@@ -8,10 +8,10 @@ vm_running || sh tools/vm/start.sh
 mkdir -p "$PWD/build/mm"
 TOOLCHAIN=docker.io/aemiii91/miyoomini-toolchain:latest
 MM_FLAGS="-O2 -marm -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -std=c11 -D_DEFAULT_SOURCE"
-podman run --rm --platform linux/amd64 -v "$PWD":/root/workspace -w /root/workspace $TOOLCHAIN \
+podman run --rm --platform linux/amd64 -v "$PWD":/root/workspace:z -w /root/workspace $TOOLCHAIN \
 	/bin/bash -c "source /root/.bashrc && \${CROSS_COMPILE}gcc $MM_FLAGS -o build/mm/test-hw-mm tools/test_hw_mm.c src/hw_mm.c -lm"
 # The device build must also be warning-free with shelf's own warning set, as errors.
-podman run --rm --platform linux/amd64 -v "$PWD":/root/workspace -w /root/workspace $TOOLCHAIN \
+podman run --rm --platform linux/amd64 -v "$PWD":/root/workspace:z -w /root/workspace $TOOLCHAIN \
 	/bin/bash -c "source /root/.bashrc && \${CROSS_COMPILE}gcc $MM_FLAGS -Wall -Wno-unused-parameter -Wno-sign-compare -Wno-format-truncation -Werror -fsyntax-only tools/test_hw_mm.c src/hw_mm.c"
 
 echo "== temp root (fake pwm, gpio, cpufreq)"

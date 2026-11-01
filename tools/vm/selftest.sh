@@ -8,7 +8,7 @@ vm_running || sh tools/vm/start.sh
 vm_ssh 'for m in /mnt/repo /mnt/SDCARD; do mountpoint -q $m || { modprobe 9pnet_virtio; mount $m; }; done'
 # A running Shelf reads the same keys, so the self-test would never see them.
 vm_ssh 'pkill -x shelf || true'
-[ -x $VM/fbtest ] || podman run --rm --platform linux/amd64 -v "$PWD":/root/workspace -w /root/workspace docker.io/aemiii91/miyoomini-toolchain:latest /bin/bash -c "source /root/.bashrc && \${CROSS_COMPILE}gcc -O2 -marm -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -o $VM/fbtest tools/vm/fbtest.c"
+[ -x $VM/fbtest ] || podman run --rm --platform linux/amd64 -v "$PWD":/root/workspace:z -w /root/workspace docker.io/aemiii91/miyoomini-toolchain:latest /bin/bash -c "source /root/.bashrc && \${CROSS_COMPILE}gcc -O2 -marm -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -o $VM/fbtest tools/vm/fbtest.c"
 ev=$(vm_ssh 'for d in /sys/class/input/event*; do grep -qi keyboard $d/device/name && echo /dev/input/${d##*/} && break; done')
 [ -n "$ev" ] || { echo "FAIL: no keyboard event device" >&2; exit 1; }
 vm_ssh "/mnt/repo/$VM/fbtest $ev 2 > /tmp/fbtest.out 2>&1 &"

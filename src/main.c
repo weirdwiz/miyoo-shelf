@@ -10,6 +10,7 @@
 #include "library.h"
 #include "loop.h"
 #include "platform.h"
+#include "probe.h"
 #include "settings.h"
 #include "ui.h"
 
@@ -292,6 +293,12 @@ int main(void)
     if (platform_init()) return 1;
     platform_set_brightness(set.brightness);
     platform_set_volume(set.volume);
+    const char *probe = getenv("SHELF_PROBE"); // the boot script sets it for one boot
+    if (probe && *probe) {
+        char path[PATH_LEN];
+        host_path(DATA_DIR "/probe.txt", path, sizeof path);
+        if (probe_run(path)) fprintf(stderr, "shelf: couldn't write %s\n", path);
+    }
     if (icons_start_worker()) fprintf(stderr, "shelf: icon worker unavailable; loading art per frame\n");
     icons_set_notify(platform_wake);
 

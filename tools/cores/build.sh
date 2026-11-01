@@ -56,7 +56,7 @@ checkout gambatte "$GAMBATTE_REPO" "$GAMBATTE_COMMIT"
 echo "building inside $TOOLCHAIN"
 started=$(date +%s)
 "$CONTAINER" run --rm --platform linux/amd64 \
-	-v "$REPO_ROOT":/root/workspace -w /root/workspace \
+	-v "$REPO_ROOT":/root/workspace:z -w /root/workspace \
 	-e MGBA_REPO -e MGBA_COMMIT -e GAMBATTE_REPO -e GAMBATTE_COMMIT \
 	-e TOOLCHAIN="$TOOLCHAIN" \
 	"$TOOLCHAIN" /bin/bash -c "source /root/.bashrc && tools/cores/build-in-container.sh"

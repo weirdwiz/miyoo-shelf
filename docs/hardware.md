@@ -21,8 +21,27 @@ read of its register 0 means Mini Plus (Onion: `axp 0`). The Plus also has
 
 `/dev/fb0`, 640x480, 32 bpp XRGB, virtual height of at least two pages; pan with
 `FBIOPAN_DISPLAY` (it waits for vblank). The panel is mounted upside down, so frames are
-rotated 180 degrees before scan-out. (Some later Mini revisions use a 752x560 panel;
-Shelf currently requires 640x480.)
+rotated 180 degrees before scan-out.
+
+Later units (Mini v4 from late 2023, later Mini Plus) have a 752x560 panel timing with a
+750x559 visible area. Onion reads it from `Current TimingWidth=` in
+`/proc/mi_modules/fb/mi_fb0` and resizes fb0 with `fbset`; MinUI looks for `752x560p` in
+`/sys/class/graphics/fb0/modes`. Shelf takes fb0 as it finds it: at 640x480 the canvas
+fills it, and on anything larger the 640x480 canvas is centred with a black border.
+*Unverified*: which size fb0 has at boot on those units, and whether the 180-degree
+rotation holds for them.
+
+## Hardware probe
+
+For a first boot on a device: create an empty file `.shelf/probe` on the card and boot.
+The boot script removes it (so the probe runs once), writes what the system reports to
+`.shelf/data/probe.txt` (firmware version, CPU and its frequencies, fb0 and its modes,
+input devices, battery tools, mounts), then Shelf adds what it sees and shows a test pattern
+for about 17 seconds: fb0's geometry and timings, how fast frames go out (the panel's
+refresh rate when pans wait for vblank), the battery, and every raw input event. Press
+each button once while the pattern is up. Red should be top left, green top right, blue
+bottom left and yellow bottom right; a photo of the counting squares in the middle times
+the frame rate. Shelf then starts as usual.
 
 Backlight: PWM. `echo 0 > /sys/class/pwm/pwmchip0/export`, then in
 `/sys/class/pwm/pwmchip0/pwm0/`: `period` 800, `duty_cycle` 0-100, `enable` 1.

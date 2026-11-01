@@ -88,6 +88,9 @@ make test-updater # the boot script, on the host
 make shots        # regenerate docs/screenshots (macOS: uses sips)
 ```
 
+On a real device, an empty `.shelf/probe` file on the card makes the next boot write a
+hardware report to `.shelf/data/probe.txt` (see `docs/hardware.md`).
+
 Nothing is validated on hardware by the build. Everything is tested in a full-system QEMU
 ARMv7 VM that stands in for the device — 640x480 two-page fb0, the Miyoo's key codes over
 virtio, POWER on gpio-keys, 9p card share:
