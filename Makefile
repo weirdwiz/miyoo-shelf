@@ -12,7 +12,7 @@ CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers
 BUILD := build
 
-CORE_SRC := src/main.c src/loop.c src/gfx.c src/text.c src/library.c src/icons.c src/ui.c src/game.c src/settings.c src/scale.c src/player.c src/probe.c third_party/cJSON.c
+CORE_SRC := src/main.c src/loop.c src/gfx.c src/text.c src/library.c src/icons.c src/ui.c src/game.c src/settings.c src/scale.c src/player.c src/probe.c src/power.c third_party/cJSON.c
 SIM_SRC := $(CORE_SRC) src/platform_sdl2.c
 SDL_CFLAGS = $(shell sdl2-config --cflags)
 SDL_LIBS = $(shell sdl2-config --libs)
@@ -25,9 +25,10 @@ FIXTURE_READY := $(FIXTURE)/.shelf/data/recents.json
 .PHONY: sim run fixture clean test shots mm mm-inner
 
 test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUILD)/test-scale $(BUILD)/test-fb-geometry \
-      $(BUILD)/test-ui-cache $(BUILD)/test-loop $(BUILD)/test-ui-alloc $(BUILD)/test-game $(BUILD)/test-palette $(FIXTURE_READY)
+      $(BUILD)/test-ui-cache $(BUILD)/test-loop $(BUILD)/test-ui-alloc $(BUILD)/test-game $(BUILD)/test-palette $(BUILD)/test-power $(FIXTURE_READY)
 	$(BUILD)/test-scale
 	$(BUILD)/test-fb-geometry
+	$(BUILD)/test-power
 	$(BUILD)/test-library
 	$(BUILD)/test-rrect
 	$(BUILD)/test-scaled-blit
@@ -71,6 +72,10 @@ $(BUILD)/test-scale: tools/test_scale.c src/scale.c src/scale.h
 $(BUILD)/test-fb-geometry: tools/test_fb_geometry.c src/fb_geometry.c src/fb_geometry.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tools/test_fb_geometry.c src/fb_geometry.c
+
+$(BUILD)/test-power: tools/test_power.c src/power.c src/power.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tools/test_power.c src/power.c
 
 $(BUILD)/test-rrect: tools/test_rrect.c src/gfx.c src/gfx.h
 	@mkdir -p $(BUILD)
