@@ -16,7 +16,8 @@ int hw_duty(int level);
 int hw_volume_db(int level);
 int hw_volume_muted(int level);
 int hw_adc_percent(int adc);
-int hw_mini_percent(int adc, int charging);
+int hw_mini_percent(int adc, int charging, double now);
+void hw_battery_reset(void);
 int hw_parse_axp(const char *json, int *charging);
 
 static char root[512];
@@ -179,11 +180,31 @@ static void test_mappings(void)
     CHECK(hw_adc_percent(554) == 90);  // 4.06 V
     CHECK(hw_adc_percent(557) == 92);  // interpolated between 4.06 and 4.13
     CHECK(hw_adc_percent(400) == 0);
-    CHECK(hw_mini_percent(561, 1) == 95); // charging resets discharge state
-    CHECK(hw_mini_percent(554, 0) == 90); // transition clears charge history
-    CHECK(hw_mini_percent(568, 0) == 90); // sticky minimum while discharging
-    CHECK(hw_mini_percent(568, 1) == 100); // charging transition clears minimum
-    CHECK(hw_mini_percent(561, 0) == 95); // discharging transition resets sample history
+    CHECK(hw_adc_percent(600) == 100); // above the curve
+
+    // Averaging: one dip among steady readings barely moves the figure...
+    hw_battery_reset();
+    CHECK(hw_mini_percent(554, 0, 0) == 90);
+    CHECK(hw_mini_percent(554, 0, 30) == 90);
+    CHECK(hw_mini_percent(524, 0, 60) == 76); // 3.76 V alone would read 47%
+    // ...and a rebound doesn't raise it at once, only after three readings above it.
+    CHECK(hw_mini_percent(554, 0, 90) == 76);
+    CHECK(hw_mini_percent(554, 0, 120) == 76);
+    CHECK(hw_mini_percent(554, 0, 150) == 80); // third reading above: it rises
+    CHECK(hw_mini_percent(554, 0, 180) == 80);
+    CHECK(hw_mini_percent(554, 0, 210) == 80);
+    CHECK(hw_mini_percent(554, 0, 240) == 90); // the dip has left the 90 s window
+    // Old readings age out, so a real drop shows within the window, not minutes later.
+    hw_battery_reset();
+    for (int t = 0; t <= 270; t += 30) CHECK(hw_mini_percent(554, 0, t) == 90);
+    hw_mini_percent(460, 0, 300);
+    hw_mini_percent(460, 0, 330);
+    hw_mini_percent(460, 0, 360);
+    CHECK(hw_mini_percent(460, 0, 390) == 4); // 3.12 V: only the last 90 s count
+    // Plugging in or out starts afresh; charging readings are shown as they come.
+    CHECK(hw_mini_percent(568, 1, 400) == 100);
+    CHECK(hw_mini_percent(561, 2, 430) == 97); // any non-zero is charging: still averaged with 568
+    CHECK(hw_mini_percent(554, 0, 460) == 90);
 
     int charging = 7;
     CHECK(hw_parse_axp("{\"battery\":73, \"voltage\":3900, \"charging\":1}", &charging) == 73);

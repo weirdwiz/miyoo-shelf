@@ -148,23 +148,55 @@ int hw_adc_percent(int adc)
     return 0;
 }
 
-int hw_mini_percent(int adc, int charging)
+// The percentage shown on a Mini. The ADC wobbles by about 80 mV under load (Onion PR
+// #1712), so readings are averaged, but only over the last BATTERY_WINDOW seconds: callers
+// poll every 30 s or so, and a low-battery shutdown can't wait minutes for an average to
+// catch up. While discharging the figure never goes up on a brief rebound; it does once the
+// average has stayed above it for BATTERY_RISE readings in a row (a sag under load that
+// has passed). Plugging in or out starts afresh. `now` is in seconds.
+#define BATTERY_SAMPLES 10
+#define BATTERY_WINDOW 90.0
+#define BATTERY_RISE 3
+static struct {
+    int adc[BATTERY_SAMPLES];
+    double at[BATTERY_SAMPLES];
+    int n, next, shown, above, charging;
+} bat = { .shown = -1 };
+
+void hw_battery_reset(void)
 {
-    static int samples[10], count, next, minimum = 101, was_charging;
-    if (charging != was_charging) {
-        count = next = 0;
-        minimum = 101;
-        was_charging = charging;
+    memset(&bat, 0, sizeof bat);
+    bat.shown = -1;
+}
+
+int hw_mini_percent(int adc, int charging, double now)
+{
+    charging = charging != 0;
+    if (charging != bat.charging) {
+        hw_battery_reset();
+        bat.charging = charging;
     }
-    if (charging) return hw_adc_percent(adc);
-    samples[next] = adc;
-    next = (next + 1) % 10;
-    if (count < 10) count++;
-    int sum = 0;
-    for (int i = 0; i < count; i++) sum += samples[i];
-    int pct = hw_adc_percent(sum / count);
-    if (pct < minimum) minimum = pct;
-    return minimum;
+    bat.adc[bat.next] = adc;
+    bat.at[bat.next] = now;
+    bat.next = (bat.next + 1) % BATTERY_SAMPLES;
+    if (bat.n < BATTERY_SAMPLES) bat.n++;
+    int sum = 0, used = 0;
+    for (int i = 0; i < bat.n; i++)
+        if (now - bat.at[i] <= BATTERY_WINDOW) {
+            sum += bat.adc[i];
+            used++;
+        }
+    int pct = hw_adc_percent((sum + used / 2) / used); // used >= 1: this sample is in it
+    if (charging || bat.shown < 0 || pct < bat.shown) {
+        bat.shown = pct;
+        bat.above = 0;
+    } else if (pct > bat.shown && ++bat.above >= BATTERY_RISE) {
+        bat.shown = pct;
+        bat.above = 0;
+    } else if (pct == bat.shown) {
+        bat.above = 0;
+    }
+    return bat.shown;
 }
 
 // One "key":<int> field of axp_test's single-line JSON.
@@ -407,8 +439,10 @@ static int battery_mini(int *charging)
             int channel, adc;
         } sample = { 0, 0 };
         if (ioctl(fd, SAR_READ, &sample) == 0) {
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
             *charging = charge_gpio();
-            return hw_mini_percent(sample.adc, *charging);
+            return hw_mini_percent(sample.adc, *charging, (double)ts.tv_sec + ts.tv_nsec / 1e9);
         }
     }
 #else
