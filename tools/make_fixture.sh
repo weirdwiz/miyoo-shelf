@@ -33,7 +33,8 @@ art() { # system-dir libretro-repo "No-Intro name"
             rm -f "$img"
             return 1
         fi
-        sips -Z 250 "$img" >/dev/null 2>&1 || true
+        # Shrink to 250 px if a tool for it exists (sips on macOS, else ImageMagick).
+        sips -Z 250 "$img" >/dev/null 2>&1 || magick "$img" -resize '250x250>' "$img" >/dev/null 2>&1 || true
     fi
 }
 

@@ -85,7 +85,7 @@ Tab = SELECT, O = START, M = MENU, P = POWER (tap sleeps, hold powers off), Esc 
 make test         # library, UI, loop, graphics and full play-session tests
 make test-player  # libretro host against a fake core (make test-player-asan for sanitizers)
 make test-updater # the boot script, on the host
-make shots        # regenerate docs/screenshots (macOS: uses sips)
+make shots        # regenerate docs/screenshots (no dependencies)
 ```
 
 On a real device, an empty `.shelf/probe` file on the card makes the next boot write a

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Boots the VM in the background (headless): framebuffer /dev/fb0 640x480x32 with two
 # pages, a virtio keyboard on /dev/input/event*, /mnt/SDCARD and /mnt/repo shared over 9p.
-# VM_DISPLAY=cocoa opens the screen in a window whose keyboard drives Shelf (see README).
+# VM_DISPLAY=cocoa (macOS) or gtk/sdl (Linux) opens the screen in a window whose keyboard
+# drives Shelf (see README).
 set -eu
 . "$(dirname "$0")/common.sh"
 if vm_running; then echo "vm: already running"; exit 0; fi
@@ -9,8 +10,8 @@ if vm_running; then echo "vm: already running"; exit 0; fi
 mkdir -p "$SDCARD"
 rm -f $MON $VM/monitor-rec.sock
 t0=$(date +%s)
-# A window can't survive QEMU's -daemonize fork on macOS, so a windowed VM runs as a plain
-# background process instead.
+# A window can't survive QEMU's -daemonize fork (on macOS at least), so a windowed VM runs
+# as a plain background process instead.
 display=${VM_DISPLAY:-none}
 detach=-daemonize
 [ "$display" = none ] || detach=

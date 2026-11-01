@@ -123,13 +123,13 @@ shots: sim $(FIXTURE_READY) $(BUILD)/shot-ingame $(BUILD)/fake_core.so
 		cp $(BUILD)/shots/recents.bak $(FIXTURE_READY); \
 		SHELF_THEME=$$theme SHELF_ROOT=$(CURDIR)/$(FIXTURE) SHELF_FONTS=$(CURDIR)/assets/fonts \
 		SHELF_SHOT=$(BUILD)/shots/$$name.ppm SHELF_KEYS="$$keys" $(BUILD)/shelf-sim 2>/dev/null; \
-		sips -s format png $(BUILD)/shots/$$name.ppm --out docs/screenshots/$$name.png >/dev/null; \
+		python3 -I tools/img.py $(BUILD)/shots/$$name.ppm docs/screenshots/$$name.png; \
 	done
 	@cp $(BUILD)/shots/recents.bak $(FIXTURE_READY)
 	@SHELF_ROOT=$(CURDIR)/$(FIXTURE) SHELF_FONTS=$(CURDIR)/assets/fonts $(BUILD)/shot-ingame \
 		$(CURDIR)/$(FIXTURE) $(CURDIR)/assets/fonts $(CURDIR)/$(BUILD)/fake_core.so \
 		$(BUILD)/shots/7-ingame-menu.ppm
-	@sips -s format png $(BUILD)/shots/7-ingame-menu.ppm --out docs/screenshots/7-ingame-menu.png >/dev/null
+	@python3 -I tools/img.py $(BUILD)/shots/7-ingame-menu.ppm docs/screenshots/7-ingame-menu.png
 	@ls docs/screenshots
 
 # ---------- Miyoo Mini Plus ----------
