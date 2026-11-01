@@ -1,0 +1,35 @@
+# Runs on every push to main and every pull request: the host tests, the simulator build,
+# and the device build in the Miyoo toolchain container. Nothing here needs hardware.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  host:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsdl2-dev shellcheck
+      - name: Box art cache
+        uses: actions/cache@v4
+        with:
+          path: fixture
+          key: fixture-${{ hashFiles('tools/make_fixture.sh') }}
+      - run: make test
+      - run: make test-player
+      - run: make test-player-asan
+      - run: make test-updater
+      - run: make sim
+
+  device:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cross-compile for the Miyoo, with no warnings
+        run: |
+          set -o pipefail
+          make mm CONTAINER=docker 2>&1 | tee build.log
+          ! grep -E 'warning:' build.log
