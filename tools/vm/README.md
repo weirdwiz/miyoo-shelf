@@ -29,6 +29,11 @@ Right Ctrl = SELECT, Esc = MENU. Ctrl-Alt-G releases a grabbed mouse/keyboard.
 Shares (9p): `build/vm/sdcard` (or `VM_SDCARD`) is the guest's `/mnt/SDCARD`; the repo is
 `/mnt/repo`, read-only.
 
+`VM_PANEL=752x560 make vm-start` boots with the panel of a Mini v4 or a later Mini Plus
+(default 640x480), for checking Shelf's centred canvas. `shot.sh` reads the page on screen
+from inside the guest whenever Shelf has flipped to its second page, which the host's
+screendump can't see (`fbpage.py`).
+
 What matches the device: `/dev/fb0` is 640x480, 32 bpp, two pages (`yres_virtual` 960) and
 `FBIOPAN_DISPLAY` flips between them. Keys arrive as the Miyoo's codes on the virtio
 keyboard (`/dev/input/event1`); POWER (`key.sh power`) arrives as KEY_POWER on `gpio-keys`
