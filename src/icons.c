@@ -195,7 +195,8 @@ static void cache_path(const Game *g, int size, char *out, int n)
 {
     uint32_t h = 2166136261u;
     for (const char *c = g->path; *c; c++) h = (h ^ (unsigned char)*c) * 16777619u;
-    snprintf(out, n, "%s/%08x-%d-v%d.raw", cache_dir, h, size, CACHE_VERSION);
+    if (snprintf(out, n, "%s/%08x-%d-v%d.raw", cache_dir, h, size, CACHE_VERSION) >= n)
+        out[0] = 0; // a cut path could name another game's file: no cache instead
 }
 
 static int newer(const char *a, const char *b) // a modified after b, or b missing

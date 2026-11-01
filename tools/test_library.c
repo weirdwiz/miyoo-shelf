@@ -13,7 +13,10 @@ static int failures;
 
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); failures++; } } while (0)
 
-static void host(const char *rel, char *out, int n) { snprintf(out, n, "%s/%s", root, rel); }
+static void host(const char *rel, char *out, int n)
+{
+    if (snprintf(out, n, "%s/%s", root, rel) >= n) out[0] = 0;
+}
 
 // mkdir -p for a host path.
 static void mkdirs(const char *path)

@@ -110,10 +110,7 @@ static void make_title(const char *stem, char *out, int n)
         if (!a) continue;
         char *after = a + strlen(ARTICLES[i]);
         if (*after && *after != ' ') continue;
-        char head[256], rest[256];
-        snprintf(head, sizeof head, "%.*s", (int)(a - t), t);
-        snprintf(rest, sizeof rest, "%s", after);
-        snprintf(out, n, "%s %s%s", ARTICLES[i] + 2, head, rest);
+        snprintf(out, n, "%s %.*s%s", ARTICLES[i] + 2, (int)(a - t), t, after); // may cut a long title
         return;
     }
     snprintf(out, n, "%s", t);
@@ -445,7 +442,7 @@ int lib_load(Library *lib)
         snprintf(s->core, sizeof s->core, "%s", SYSTEMS[i].core);
         s->color = SYSTEMS[i].color;
         snprintf(s->rom_dir, sizeof s->rom_dir, SD_PREFIX "/Roms/%s", SYSTEMS[i].dir);
-        snprintf(s->img_dir, sizeof s->img_dir, "%s/Imgs", s->rom_dir);
+        snprintf(s->img_dir, sizeof s->img_dir, SD_PREFIX "/Roms/%s/Imgs", SYSTEMS[i].dir);
     }
 
     char roms[PATH_LEN];
@@ -468,7 +465,8 @@ int lib_load(Library *lib)
         if (!have_dir[sys]) { // the first matching folder names the system's own art folder
             have_dir[sys] = 1;
             snprintf(lib->sys[sys].rom_dir, PATH_LEN, "%s", dev);
-            snprintf(lib->sys[sys].img_dir, PATH_LEN, "%s/Imgs", dev);
+            if (snprintf(lib->sys[sys].img_dir, PATH_LEN, "%s/Imgs", dev) >= PATH_LEN)
+                lib->sys[sys].img_dir[0] = 0; // too long to hold: no art folder rather than a wrong one
         }
         scan_directory(lib, &cap, sys, dev);
     }
@@ -507,6 +505,8 @@ int lib_img_path(const Library *lib, const Game *g, char *out, int n)
             if (beside)
                 len = snprintf(dev, sizeof dev, "%.*s/Imgs/%s.%s", (int)(slash - g->path),
                                g->path, g->stem, EXTS[i]);
+            else if (!s->img_dir[0])
+                continue; // its folder's path was too long to hold
             else
                 len = snprintf(dev, sizeof dev, "%s/%s.%s", s->img_dir, g->stem, EXTS[i]);
             if (len < 0 || len >= (int)sizeof dev) continue;

@@ -1850,7 +1850,7 @@ static void sw_draw_chrome(Image *c)
 {
     Library *L = S.lib;
     int resume = S.sel == 0 && W.running;
-    char key[256], status[200];
+    char key[320], status[200]; // room for all of it: a cut key would hide a change
     status_key(status, sizeof status);
     snprintf(key, sizeof key, "%s|%d|%d|%s", status, S.sel, resume, W.notice);
     Image *b = band_begin(&W.top, SW_TOP_H, key);
