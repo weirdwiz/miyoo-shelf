@@ -145,6 +145,28 @@ static void test_standby(void)
     check_file("sys/devices/system/cpu/cpufreq/policy0/scaling_governor", "ondemand");
 }
 
+static void test_dim(void)
+{
+    platform_set_brightness(7);
+    check_file("sys/class/pwm/pwmchip0/pwm0/duty_cycle", "35");
+    platform_dim(1);
+    check_file("sys/class/pwm/pwmchip0/pwm0/duty_cycle", "3");
+    platform_dim(0);
+    check_file("sys/class/pwm/pwmchip0/pwm0/duty_cycle", "35");
+
+    // Asleep while dimmed: waking restores the brightness, and the dim is over.
+    platform_dim(1);
+    platform_standby(1);
+    platform_standby(0);
+    check_file("sys/class/pwm/pwmchip0/pwm0/duty_cycle", "35");
+    platform_dim(1);
+    check_file("sys/class/pwm/pwmchip0/pwm0/duty_cycle", "3");
+    platform_set_brightness(10); // a new level ends the dim too
+    check_file("sys/class/pwm/pwmchip0/pwm0/duty_cycle", "100");
+    platform_dim(0);
+    check_file("sys/class/pwm/pwmchip0/pwm0/duty_cycle", "100");
+}
+
 static void test_performance(void)
 {
     platform_performance(1);
@@ -249,6 +271,8 @@ static int real_root(void)
     CHECK(charging == 0);
     platform_standby(1);
     platform_standby(0);
+    platform_dim(1);
+    platform_dim(0);
     platform_performance(1);
     platform_performance(0);
     if (failures) return 1;
@@ -271,6 +295,7 @@ int main(int argc, char **argv)
     test_volume_state();
     test_brightness();
     test_standby();
+    test_dim();
     test_performance();
     test_battery_absent();
     test_mappings();
@@ -280,6 +305,6 @@ int main(int argc, char **argv)
         printf("FAIL test-hw-mm: %d check(s) failed\n", failures);
         return 1;
     }
-    printf("PASS test-hw-mm: brightness, standby, governor, battery, mappings, power off\n");
+    printf("PASS test-hw-mm: brightness, standby, dimming, governor, battery, mappings, power off\n");
     return 0;
 }

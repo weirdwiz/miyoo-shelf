@@ -231,6 +231,8 @@ int hw_parse_axp(const char *json, int *charging)
 // ---------------------------------------------------------------- backlight
 
 static int brightness = 5;
+static int dimmed;        // see platform_dim
+static int standby_active; // see platform_standby
 
 static void pwm_duty(int duty)
 {
@@ -253,8 +255,19 @@ void platform_set_brightness(int level)
     if (level < 0) level = 0;
     if (level > 10) level = 10;
     brightness = level;
+    dimmed = 0;
     pwm_duty(hw_duty(level));
     pwm_enable(1);
+}
+
+// The lowest duty the brightness scale uses, not 0: the screen stays readable.
+void platform_dim(int on)
+{
+    on = on != 0;
+    if (on == dimmed) return;
+    dimmed = on;
+    if (standby_active) return; // the backlight is off; waking restores the brightness
+    pwm_duty(hw_duty(on ? 0 : brightness));
 }
 
 // ---------------------------------------------------------------- panel power
@@ -484,7 +497,6 @@ int platform_battery(int *charging)
 // The governor a standby replaced, so leaving it restores what was running.
 static char standby_governor[32];
 static int standby_governor_valid;
-static int standby_active;
 
 void platform_standby(int on)
 {
@@ -502,6 +514,7 @@ void platform_standby(int on)
     } else {
         if (!standby_active) return;
         standby_active = 0;
+        dimmed = 0;
         panel_power(1);
         pwm_enable(0); // the panel needs the PWM restarted, not just its duty restored
         pwm_enable(1);

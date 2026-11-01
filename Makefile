@@ -25,10 +25,11 @@ FIXTURE_READY := $(FIXTURE)/.shelf/data/recents.json
 .PHONY: sim run fixture clean test shots mm mm-inner
 
 test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUILD)/test-scale $(BUILD)/test-fb-geometry \
-      $(BUILD)/test-ui-cache $(BUILD)/test-loop $(BUILD)/test-ui-alloc $(BUILD)/test-game $(BUILD)/test-palette $(BUILD)/test-power $(FIXTURE_READY)
+      $(BUILD)/test-ui-cache $(BUILD)/test-loop $(BUILD)/test-ui-alloc $(BUILD)/test-game $(BUILD)/test-palette $(BUILD)/test-power $(BUILD)/test-hw-mm $(BUILD)/test-main $(FIXTURE_READY)
 	$(BUILD)/test-scale
 	$(BUILD)/test-fb-geometry
 	$(BUILD)/test-power
+	$(BUILD)/test-hw-mm
 	$(BUILD)/test-library
 	$(BUILD)/test-rrect
 	$(BUILD)/test-scaled-blit
@@ -37,6 +38,7 @@ test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUIL
 	$(BUILD)/test-loop "$(CURDIR)/$(FIXTURE)" "$(CURDIR)/assets/fonts"
 	$(BUILD)/test-ui-alloc "$(CURDIR)/$(FIXTURE)" "$(CURDIR)/assets/fonts"
 	$(BUILD)/test-game "$(CURDIR)/$(BUILD)/test-game-work" "$(CURDIR)/assets/fonts" "$(CURDIR)/$(BUILD)/fake_core.so"
+	$(BUILD)/test-main "$(CURDIR)/$(BUILD)/test-main-work" "$(CURDIR)/assets/fonts" "$(CURDIR)/$(BUILD)/fake_core.so"
 
 $(BUILD)/test-library: tools/test_library.c src/library.c src/library.h third_party/cJSON.c third_party/cJSON.h
 	@mkdir -p $(BUILD)
@@ -77,6 +79,11 @@ $(BUILD)/test-power: tools/test_power.c src/power.c src/power.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tools/test_power.c src/power.c
 
+# The device's hardware settings against a throwaway sysfs tree (also run in the VM).
+$(BUILD)/test-hw-mm: tools/test_hw_mm.c src/hw_mm.c src/platform.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -Wno-format-truncation -o $@ tools/test_hw_mm.c src/hw_mm.c -lm
+
 $(BUILD)/test-rrect: tools/test_rrect.c src/gfx.c src/gfx.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tools/test_rrect.c -lm
@@ -84,12 +91,18 @@ $(BUILD)/test-rrect: tools/test_rrect.c src/gfx.c src/gfx.h
 # One play session end to end: the real player, game loop and UI drive the fake core
 # through a fake platform, so the in-game menu, standby and saving can be scripted.
 SESSION_SRC := src/game.c src/player.c src/loop.c src/scale.c src/ui.c src/icons.c src/text.c \
-               src/gfx.c src/library.c src/settings.c third_party/cJSON.c tools/fake_platform.c
+               src/gfx.c src/library.c src/settings.c src/power.c third_party/cJSON.c tools/fake_platform.c
 SESSION_DEPS := $(wildcard src/*.h) tools/fake_platform.h
 
 $(BUILD)/test-game: tools/test_game.c $(SESSION_SRC) $(SESSION_DEPS) $(BUILD)/fake_core.so
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tools/test_game.c $(SESSION_SRC) -lm -lpthread -ldl
+
+# Shelf from boot: main.c on the fake platform, with the session's sources.
+$(BUILD)/test-main: tools/test_main.c src/main.c $(SESSION_SRC) $(SESSION_DEPS) $(BUILD)/fake_core.so
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -Dmain=shelf_main -c -o $(BUILD)/test-main-shelf.o src/main.c
+	$(CC) $(CFLAGS) -o $@ tools/test_main.c $(BUILD)/test-main-shelf.o $(SESSION_SRC) -lm -lpthread -ldl
 
 # The in-game menu over a running fake-core game, headless, for docs/screenshots.
 $(BUILD)/shot-ingame: tools/shot_ingame.c $(SESSION_SRC) $(SESSION_DEPS)

@@ -24,10 +24,10 @@
 #include "loop.h"
 #include "player.h"
 #include "platform.h"
+#include "power.h"
 #include "ui.h"
 
-#define SRAM_SECONDS 30.0               // how often the battery-backed save is written
-#define STANDBY_SECONDS (30.0 * 60.0)   // asleep this long and Shelf powers off
+#define SRAM_SECONDS 30.0 // how often the battery-backed save is written
 
 typedef struct {
     Library *lib;
@@ -171,16 +171,19 @@ static int standby(Session *s)
     player_audio_flush();
     platform_standby(1);
     save_session(s);
-    double until = platform_now() + STANDBY_SECONDS;
+    PowerState asleep;
+    power_init(&asleep);
+    double since = platform_now();
     int off = 0;
     for (;;) {
-        platform_wait(until); // no polling: the next input, or the limit, ends the sleep
+        PowerDecision d = power_step(&asleep, platform_now(), since, POWER_ASLEEP, (PowerBattery){0});
+        if (d.action == POWER_OFF_RESUMABLE) { off = 1; break; }
+        platform_wait(d.next); // no polling: the next input, or the limit, ends the sleep
         Button b;
         while ((b = platform_poll()) != BTN_NONE) {
             if (b == BTN_POWER) goto woke;
             if (b == BTN_POWER_OFF || b == BTN_QUIT) { off = 1; goto woke; }
         }
-        if (platform_now() >= until) { off = 1; goto woke; }
     }
 woke:
     platform_standby(0);

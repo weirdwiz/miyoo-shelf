@@ -45,7 +45,8 @@ the frame rate. Shelf then starts as usual.
 
 Backlight: PWM. `echo 0 > /sys/class/pwm/pwmchip0/export`, then in
 `/sys/class/pwm/pwmchip0/pwm0/`: `period` 800, `duty_cycle` 0-100, `enable` 1.
-Brightness level 0-10 maps to duty `round(3 * exp(0.350656 * level))` (3..100).
+Brightness level 0-10 maps to duty `round(3 * exp(0.350656 * level))` (3..100). Idle
+dimming sets level 0's duty, 3, and puts the level back on the next press.
 
 Panel power: GPIO 4 (`/sys/class/gpio/export` "4", `gpio4/direction` "out",
 `gpio4/value` 0 off / 1 on). After turning it on, re-enable the PWM (write `enable` 0

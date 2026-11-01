@@ -30,7 +30,9 @@ commits: gambatte for GB and GBC, mGBA for GBA (`make cores`).
   games, each card showing its screenshot. A resumes the selected card, A on another card
   switches to that game, B goes back to Shelf, SELECT restarts (and asks first).
 - **POWER** sleeps and wakes. Holding it for two seconds saves everything and powers off;
-  Shelf also powers off after 30 minutes asleep. Options → Power off asks for a second press.
+  Shelf also powers off after 10 minutes asleep. Options → Power off asks for a second press.
+- **Idle**: the home screen dims after 45 seconds without a press and sleeps after 3
+  minutes. The press that wakes a dimmed screen does nothing else.
 - **Options** (START, or MENU outside a game): brightness, volume, screen scaling, dark mode,
   power off. Changes are applied at once and saved to `.shelf/data/settings.json`.
   Screen scaling is Sharp (sharp-bilinear fill), Smooth (bilinear fill) or Integer (whole

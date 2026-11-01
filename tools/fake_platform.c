@@ -15,6 +15,11 @@ typedef struct {
     Button button;
 } Event;
 
+typedef struct {
+    double at;
+    int percent, charging;
+} Battery;
+
 static struct {
     double clock;
     Event events[FP_MAX_EVENTS];
@@ -22,6 +27,8 @@ static struct {
     unsigned held;
     double limit;
     double watch_from, watch_to;
+    Battery battery[FP_MAX_EVENTS];
+    int nbattery;
     int asleep;
     FakePlatform counts;
     Image *frame, *first; // the last and the first game frame presented
@@ -72,6 +79,20 @@ void fp_press_at(double at, Button b)
     F.events[at_i].at = at;
     F.events[at_i].button = b;
     F.nevents++;
+}
+
+void fp_battery_at(double at, int percent, int charging)
+{
+    if (F.nbattery == FP_MAX_EVENTS) {
+        fprintf(stderr, "fake platform: the battery script is full\n");
+        exit(2);
+    }
+    int i = F.nbattery++;
+    while (i > 0 && F.battery[i - 1].at > at) { // in time order, like the presses
+        F.battery[i] = F.battery[i - 1];
+        i--;
+    }
+    F.battery[i] = (Battery){at, percent, charging};
 }
 
 void fp_hold(unsigned mask) { F.held = mask; }
@@ -169,13 +190,27 @@ int platform_volume(void) { return F.counts.volume; }
 
 int platform_battery(int *charging)
 {
-    if (charging) *charging = 0;
-    return 76;
+    int percent = 76, plugged = 0;
+    for (int i = 0; i < F.nbattery && F.battery[i].at <= F.clock; i++) {
+        percent = F.battery[i].percent;
+        plugged = F.battery[i].charging;
+    }
+    F.counts.battery_reads++;
+    if (charging) *charging = plugged;
+    return percent;
+}
+
+void platform_dim(int on)
+{
+    if (on) F.counts.dims++;
+    F.counts.dimmed = on != 0;
+    note(on ? "dim_on" : "dim_off");
 }
 
 void platform_standby(int on)
 {
     F.asleep = on != 0;
+    if (!F.asleep) F.counts.dimmed = 0;
     if (F.asleep) F.counts.standby_on++;
     else F.counts.standby_off++;
     note(F.asleep ? "standby_on" : "standby_off");
