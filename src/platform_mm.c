@@ -37,6 +37,7 @@
 
 #include "platform.h"
 #include "settings.h"
+#include "fb_geometry.h"
 
 /* ---------- display ---------- */
 
@@ -48,6 +49,8 @@ static int fb_pitch;  // bytes per row
 static int fb_dpitch; // pixels per row
 static int fb_pages;  // 2 when the driver gives us a hidden page, 1 while drawing on screen
 static int fb_back;   // the page the next frame is drawn into
+static int fb_h;      // rows per page: the panel's height, which can exceed the canvas's
+static int fb_ox, fb_oy; // where the 640x480 canvas sits on a larger panel (centred)
 static int vsync_paced;
 
 static pthread_t flipper;
@@ -72,7 +75,7 @@ static void *flip_main(void *ud)
         if (!flip_pending) break;
         int page = flip_target;
         pthread_mutex_unlock(&flip_lock);
-        fb_pan((unsigned)SCREEN_H * page);
+        fb_pan((unsigned)fb_h * page);
         pthread_mutex_lock(&flip_lock);
         flip_pending = 0;
         pthread_cond_broadcast(&flip_cond);
@@ -102,17 +105,20 @@ static void flip_request(void)
     fb_back ^= 1;
 }
 
-// The pixels of the page the next frame goes into, or NULL without a usable panel.
+// The canvas area of the page the next frame goes into, or NULL without a usable panel.
+// On a panel larger than the canvas the border around it stays black: it is painted once
+// in fb_init and never drawn over.
 static uint32_t *fb_page(void)
 {
     if (fb < 0) return NULL;
-    return (uint32_t *)(fb_mem + (size_t)fb_pitch * SCREEN_H * fb_back);
+    return (uint32_t *)(fb_mem + (size_t)fb_pitch * fb_h * fb_back) + (size_t)fb_oy * fb_dpitch + fb_ox;
 }
 
-// Whole page in black; rotation makes no difference to a solid colour.
+// The canvas area in black; rotation makes no difference to a solid colour.
 static void page_black(uint32_t *page)
 {
-    for (size_t i = 0; i < (size_t)fb_dpitch * SCREEN_H; i++) page[i] = 0xff000000;
+    for (int y = 0; y < SCREEN_H; y++)
+        for (int x = 0; x < SCREEN_W; x++) page[(size_t)y * fb_dpitch + x] = 0xff000000;
 }
 
 // The device's FBIOPAN_DISPLAY waits for vblank, so it takes up to a frame time; the test
@@ -123,7 +129,7 @@ static void fb_measure_pacing(void)
     double total = 0;
     for (int i = 0; i < 3; i++) {
         clock_gettime(CLOCK_MONOTONIC, &a);
-        if (fb_pan(SCREEN_H * (unsigned)(i % 2 ? 0 : 1))) return;
+        if (fb_pan((unsigned)fb_h * (i % 2 ? 0 : 1))) return;
         clock_gettime(CLOCK_MONOTONIC, &b);
         total += (double)(b.tv_sec - a.tv_sec) + (double)(b.tv_nsec - a.tv_nsec) / 1e9;
     }
@@ -138,11 +144,21 @@ static int fb_init(void)
     int two;
     if ((fb = open("/dev/fb0", O_RDWR)) < 0) return -1;
     if (ioctl(fb, FBIOGET_VSCREENINFO, &fb_var) || ioctl(fb, FBIOGET_FSCREENINFO, &fix)) goto fail;
-    if (fb_var.xres != SCREEN_W || fb_var.yres != SCREEN_H || fb_var.bits_per_pixel != 32) goto fail;
+    // The original Mini and Mini Plus panels are 640x480. Later units (Mini v4, newer Plus)
+    // have a 752x560 panel, which may come up at either size: a larger one gets the canvas
+    // centred, so Shelf runs everywhere instead of refusing to start.
+    if (fb_var.bits_per_pixel != 32 || fb_canvas_origin((int)fb_var.xres, (int)fb_var.yres, &fb_ox, &fb_oy)) {
+        fprintf(stderr, "shelf: fb0 is %ux%u at %u bpp; Shelf needs at least 640x480 at 32\n",
+                fb_var.xres, fb_var.yres, fb_var.bits_per_pixel);
+        goto fail;
+    }
+    fb_h = (int)fb_var.yres;
+    if (fb_ox || fb_oy)
+        fprintf(stderr, "shelf: fb0 is %ux%u; canvas centred at %d,%d\n", fb_var.xres, fb_var.yres, fb_ox, fb_oy);
     // Ask for the hidden page when the driver did not hand one out, then believe whatever
     // geometry it reports back (some kernels keep the visible page only).
-    if (fb_var.yres_virtual < 2u * SCREEN_H) {
-        fb_var.yres_virtual = 2 * SCREEN_H;
+    if (fb_var.yres_virtual < 2u * fb_h) {
+        fb_var.yres_virtual = 2 * fb_h;
         ioctl(fb, FBIOPUT_VSCREENINFO, &fb_var);
         if (ioctl(fb, FBIOGET_VSCREENINFO, &fb_var) || ioctl(fb, FBIOGET_FSCREENINFO, &fix))
             goto fail;
@@ -159,6 +175,7 @@ static int fb_init(void)
     }
     fb_mem = mmap(NULL, fb_len, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
     if (fb_mem == MAP_FAILED) { fb_mem = NULL; goto fail; }
+    for (size_t i = 0; i < fb_len / 4; i++) ((uint32_t *)fb_mem)[i] = 0xff000000; // border included
     fb_pages = 1;
     fb_back = 0;
     if (!two) {
@@ -198,7 +215,7 @@ static void fb_quit(void)
     }
     // Leave the last frame on page 0 for whatever runs next.
     if (fb_pages > 1 && !fb_back)
-        memcpy(fb_mem, fb_mem + (size_t)fb_pitch * SCREEN_H, (size_t)fb_pitch * SCREEN_H);
+        memcpy(fb_mem, fb_mem + (size_t)fb_pitch * fb_h, (size_t)fb_pitch * fb_h);
     if (fb_pages > 1) fb_pan(0);
     munmap(fb_mem, fb_len);
     fb_mem = NULL;
