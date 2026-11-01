@@ -590,7 +590,10 @@ static int play(Session *s)
         }
         now = platform_now();
         if (next > now) platform_sleep_until(next);
-        else if (now - next > .1) next = now; // stalled: resume rather than race to catch up
+        // Behind by a frame or two (a slow frame, a late wake): run on at once and catch up,
+        // which refills the short audio ring. Further behind (a stall, a slow card write):
+        // drop the lost time and carry on from now, rather than a visible burst of frames.
+        else if (now - next > 2 * frame) next = now;
     }
 }
 
