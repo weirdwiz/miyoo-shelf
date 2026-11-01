@@ -13,6 +13,7 @@
 #include "../src/game.h"
 #include "../src/icons.h"
 #include "../src/library.h"
+#include "../src/player.h"
 #include "../src/text.h"
 #include "../src/ui.h"
 #include "fake_platform.h"
@@ -176,6 +177,19 @@ static void watch_saves(const char *call)
     if (!strcmp(call, "power_off")) at_off = state_counter(watched);
 }
 
+// Each CPU clock change in a session: whether the player was open and what the saved
+// state held at that moment.
+static struct { int on, open; long state; } perf[16];
+static int nperf;
+static void watch_perf(const char *call)
+{
+    if (strncmp(call, "perf_", 5) || nperf == 16) return;
+    perf[nperf].on = !strcmp(call, "perf_on");
+    perf[nperf].open = player_is_open();
+    perf[nperf].state = state_counter(watched);
+    nperf++;
+}
+
 // The fake log's entries that start with `prefix`, space separated.
 static const char *calls(const char *prefix)
 {
@@ -295,9 +309,15 @@ int main(int argc, char **argv)
     // The paused menu runs on the menu's CPU governor and gives the game back full speed
     // when it resumes. Settled, it sleeps until the status clock's minute turns instead of
     // waking every second. Left alone it dims 45 s after MENU, and the press that wakes it
-    // does nothing else.
+    // does nothing else. Loading the game, and saving it on the way out of the menu, run
+    // at full speed too: the clock goes up before the player opens, and back down only
+    // once the state is written.
     ui_set_wall_clock(fake_wall);
+    long alpha_before = state_counter(alpha);
+    watched = alpha;
+    nperf = 0;
     fp_reset();
+    fp_on_call(watch_perf);
     fp_limit(120);
     fp_press_at(1.0, BTN_MENU);
     fp_press_at(100.0, BTN_A); // wakes the screen
@@ -306,7 +326,10 @@ int main(int argc, char **argv)
     fp_press_at(102.1, BTN_B);
     fp_watch_waits(5.0, 99.9);
     CHECK(session(alpha, &next) == GAME_HOME);
-    CHECK(!strcmp(calls("perf"), "perf_on perf_off perf_on perf_off perf_off"));
+    CHECK(!strcmp(calls("perf"), "perf_on perf_off perf_on perf_off perf_on perf_off"));
+    CHECK(nperf == 6 && perf[0].on && !perf[0].open);                   // before loading
+    CHECK(nperf == 6 && perf[4].on && perf[4].state == alpha_before);   // before saving
+    CHECK(nperf == 6 && !perf[5].on && perf[5].state != alpha_before);  // after it
     CHECK(!strcmp(calls("dim"), "dim_on dim_off"));
     // Battery reads at 30, 60 and 90 s, the dim at 46 s and the clock's minute at 55 s
     // (it used to be ~95: one a second).
@@ -488,6 +511,7 @@ int main(int argc, char **argv)
     fp_reset();
     fp_limit(5);
     CHECK(session(gamma, &next) == GAME_FAILED);
+    CHECK(!strcmp(calls("perf"), "perf_on perf_off")); // loading at speed, then back down
     CHECK(game_error()[0] != 0);
     CHECK(!exists(gamma, ".state") && !exists(gamma, ".srm") && !exists(gamma, ".png"));
     setenv("SHELF_CORE", core, 1);

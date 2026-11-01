@@ -626,11 +626,14 @@ int game_play(Library *lib, int game, const GameSettings *set, int *switch_to)
     PlayerConfig cfg = {s.core, s.rom, bios, s.save_dir, s.stem, options, PLATFORM_AUDIO_RATE,
                         PLATFORM_AUDIO_RING_MS};
     char err[160];
+    // Full speed from here to the save on the way out: reading the ROM, loading the core
+    // and restoring the state are part of the wait for the game to start.
+    platform_performance(1);
     if (player_open(&cfg, err, sizeof err)) {
         report("%s", err);
+        platform_performance(0);
         return GAME_FAILED;
     }
-    platform_performance(1);
     // No state yet is a first start; a broken one must never keep the game from running.
     if (access(s.state, F_OK) == 0 && player_load_state(s.state)) {
         fprintf(stderr, "shelf: couldn't restore %s; starting it fresh\n", s.state);
@@ -644,6 +647,9 @@ int game_play(Library *lib, int game, const GameSettings *set, int *switch_to)
     // Powering off: dark and silent first, like standby, so the press feels instant and
     // a slow card doesn't leave the screen lit while the save is written.
     if (result == GAME_POWER_OFF) platform_standby(1);
+    // The menu lowered the clock and standby lowered it further; the save is the last
+    // wait before home (or the power going), so it runs at full speed again.
+    platform_performance(1);
     save_session(&s);
     // Powering off from a game: the next boot comes straight back to it. Not when the save
     // failed; then home, with the previous state still there to resume by hand.

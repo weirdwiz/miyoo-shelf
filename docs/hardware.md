@@ -101,6 +101,8 @@ There's no kernel suspend (`/sys/power/state` offers none). Standby is a softwar
 pause emulation, mute audio, backlight 0, panel off (GPIO 4), CPU governor `powersave`
 (`/sys/devices/system/cpu/cpufreq/policy0/scaling_governor`), then wait for POWER. Shelf
 saves the game after the panel is off, and powers off after 10 minutes asleep. Games run
-on `performance`; the home screen and the paused in-game menu on `ondemand`.
+on `performance`, from before the core and ROM load until the save on the way out is
+written (also when leaving from the menu, or powering off with the panel already dark);
+the home screen and the paused in-game menu on `ondemand`.
 Power off: `sync`, then `poweroff` (*unverified* on the Plus, where Onion uses its own
 `shutdown` script). Every save, and the resume marker, is written and `fsync`ed before.
