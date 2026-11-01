@@ -21,9 +21,10 @@
 
 #define PLAYER_PATH_LEN 512
 #define FILE_MAX (64u << 20)  // ROM and save state cap
-#define AUDIO_MS 150          // ring capacity in output milliseconds
+#define AUDIO_MS 32           // buffered output when the caller sets no buffer_ms
 #define DRC_MAX 0.005         // resample ratio swing at full correction
-#define DRC_SPAN 0.25         // ring fraction from the target that gives full swing
+#define DRC_KP 2.0            // full correction at half a target from it
+#define DRC_SMOOTH 0.15       // seconds the fill is averaged over
 
 typedef struct {
     void *dl;
@@ -95,11 +96,12 @@ static enum retro_pixel_format pixel_format = RETRO_PIXEL_FORMAT_0RGB1555;
 static unsigned input_mask;
 
 static int16_t *ring;
-static uint32_t ring_cap;
+static uint32_t ring_cap, ring_target;
 static _Atomic uint32_t ring_head, ring_tail;
+static _Atomic int primed; // the reader has had ring_target frames to start from
 static int out_rate;
 static double core_rate;
-static double drc, step_cur;
+static double drc_err, drc_sum, step_cur;
 static unsigned step_since;
 static double phase;
 static int16_t prev_l, prev_r;
@@ -334,8 +336,10 @@ static int set_core_options_v2(const struct retro_core_options_v2 *v2)
 // --- audio --------------------------------------------------------------------
 
 // Linear resampling into a single-producer/single-consumer ring. The producer adjusts
-// its ratio by up to DRC_MAX so a consumer with its own clock never starves the ring or
-// overflows it over minutes of play.
+// its ratio by up to DRC_MAX to keep the ring around ring_target frames, so a consumer
+// with its own clock never starves the ring or overflows it over minutes of play, and
+// sound is no later than it needs to be. The ring holds three targets; it fills past one
+// only when the consumer stalls, and then drops the oldest sound.
 static void audio_push(int16_t l, int16_t r)
 {
     uint32_t mask = ring_cap - 1;
@@ -349,20 +353,33 @@ static void audio_push(int16_t l, int16_t r)
     atomic_store_explicit(&ring_head, h + 1, memory_order_release);
 }
 
-static double drc_step(void)
+// A PI controller on the fill, as a fraction of the target away from it. The integral
+// learns the steady clock difference between the producer and the consumer, so the fill
+// settles on the target whatever that difference is (up to DRC_MAX): with a proportional
+// term alone it would settle short of the target by an amount that grows with the skew,
+// which a ring of a few frames can't spare. Its gain is set for critical damping, from
+// how fast full correction moves the fill (out_rate * DRC_MAX against the target).
+static double drc_step(double dt)
 {
-    double fill, err, want, step;
+    double fill, err, u, step, k;
 
     if (!ring_cap) return 1.0;
     fill = (double)(atomic_load_explicit(&ring_head, memory_order_relaxed) -
-                    atomic_load_explicit(&ring_tail, memory_order_relaxed)) /
-           (double)ring_cap;
-    err = (fill - 0.5) / DRC_SPAN;
+                    atomic_load_explicit(&ring_tail, memory_order_relaxed));
+    err = (fill - (double)ring_target) / (double)ring_target;
     if (err > 1.0) err = 1.0;
     if (err < -1.0) err = -1.0;
-    want = 1.0 + DRC_MAX * err;
-    drc += (want - drc) * 0.05;
-    step = core_rate / (double)out_rate * drc;
+    // The fill saws up with each frame's burst of sound and down with each read: average
+    // that out first (over ~0.15 s), so the controller doesn't clip on it.
+    drc_err += (err - drc_err) * (dt / (dt + DRC_SMOOTH));
+    k = (double)out_rate * DRC_MAX / (double)ring_target; // per second
+    drc_sum += drc_err * k * DRC_KP * DRC_KP / 4.0 * dt;
+    if (drc_sum > 1.0) drc_sum = 1.0;
+    if (drc_sum < -1.0) drc_sum = -1.0;
+    u = DRC_KP * drc_err + drc_sum;
+    if (u > 1.0) u = 1.0;
+    if (u < -1.0) u = -1.0;
+    step = core_rate / (double)out_rate * (1.0 + DRC_MAX * u);
     if (!(step > 0.01) || step > 100.0) step = 1.0;  // never spin on a broken rate
     return step;
 }
@@ -373,8 +390,8 @@ static double resample_step(size_t frames)
 {
     step_since += (unsigned)frames;
     if (step_since < 256) return step_cur;
+    step_cur = drc_step(core_rate > 0 ? step_since / core_rate : 0);
     step_since = 0;
-    step_cur = drc_step();
     return step_cur;
 }
 
@@ -414,21 +431,25 @@ static size_t RETRO_CALLCONV audio_batch_cb(const int16_t *data, size_t frames)
     return frames;
 }
 
-static int audio_open(int rate, double core_hz)
+static int audio_open(int rate, double core_hz, int ms)
 {
-    unsigned want, cap = 1024;
+    unsigned cap = 1024;
 
     if (rate < 8000 || rate > 192000) rate = 48000;
+    if (ms <= 0 || ms > 1000) ms = AUDIO_MS;
     out_rate = rate;
     core_rate = core_hz > 0 ? core_hz : (double)rate;
-    want = (unsigned)rate * AUDIO_MS / 1000;
-    while (cap < want) cap <<= 1;
+    ring_target = (unsigned)rate * (unsigned)ms / 1000;
+    if (ring_target < 1) ring_target = 1;
+    while (cap < 3 * ring_target) cap <<= 1;
     ring = malloc((size_t)cap * 2 * sizeof *ring);
     if (!ring) return -1;
     ring_cap = cap;
     atomic_store(&ring_head, 0);
     atomic_store(&ring_tail, 0);
-    drc = step_cur = 1.0;
+    atomic_store(&primed, 0);
+    step_cur = 1.0;
+    drc_err = drc_sum = 0.0;
     step_since = 0;
     phase = 0.0;
     prev_l = prev_r = 0;
@@ -771,10 +792,11 @@ static void reset_state(void)
     pixel_format = RETRO_PIXEL_FORMAT_0RGB1555;
     input_mask = 0;
     ring = NULL;
-    ring_cap = 0;
+    ring_cap = ring_target = 0;
     out_rate = 0;
     core_rate = 0.0;
-    drc = step_cur = 1.0;
+    step_cur = 1.0;
+    drc_err = drc_sum = 0.0;
     step_since = 0;
     phase = 0.0;
     have_prev = 0;
@@ -917,7 +939,7 @@ int player_open(const PlayerConfig *cfg, char *err, int errlen)
     }
     frame.px = fb;
     frame.aspect = default_aspect();
-    if (audio_open(cfg->sample_rate, timing.sample_rate) != 0) {
+    if (audio_open(cfg->sample_rate, timing.sample_rate, cfg->buffer_ms) != 0) {
         fail(err, errlen, "out of memory for the audio buffer");
         goto fail;
     }
@@ -1011,6 +1033,10 @@ int player_audio_read(int16_t *out, int frames)
     t = atomic_load_explicit(&ring_tail, memory_order_relaxed);
     h = atomic_load_explicit(&ring_head, memory_order_acquire);
     n = h - t;
+    if (!atomic_load_explicit(&primed, memory_order_relaxed)) {
+        if ((uint32_t)n < ring_target) n = 0; // not yet: silence, and nothing taken
+        else atomic_store_explicit(&primed, 1, memory_order_relaxed);
+    }
     if (n > frames) n = frames;
     for (int i = 0; i < n; i++) {
         uint32_t at = (t + (uint32_t)i) & mask;
@@ -1026,6 +1052,7 @@ int player_audio_read(int16_t *out, int frames)
 void player_audio_flush(void)
 {
     if (!ring) return;
+    atomic_store_explicit(&primed, 0, memory_order_relaxed);
     atomic_store_explicit(&ring_tail,
                           atomic_load_explicit(&ring_head, memory_order_acquire),
                           memory_order_release);

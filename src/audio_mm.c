@@ -127,7 +127,7 @@ typedef struct MI_AUDIO_Frame_s
 // ---------------------------------------------------------------------------------------
 #define MI_AO_DEV 0
 #define MI_AO_CHN 0
-#define MI_FRAMES 1024        // samples per SendFrame (~21 ms at 48 kHz)
+#define MI_FRAMES PLATFORM_AUDIO_PERIOD // samples per SendFrame (platform.h's latency budget)
 #define MI_SEND_TIMEOUT_MS 30 // SendFrame blocks until the AO buffer has room: that is the clock
 #define MI_ERRORS_MAX 10      // consecutive failed sends before giving up on the hardware
 
@@ -213,8 +213,10 @@ static int mi_start(void)
     // (MSB, no MCLK: the codec clocks itself), the SendFrame timeout (longer than one
     // frame, so a send only fails when the device is really stuck) and the volume dB
     // mapping. They are config-time constants, so a wrong one shows up as silence or as an
-    // error from MI_AO_SetPubAttr, not as corrupted audio.
-    attr.u32FrmNum = 4;
+    // error from MI_AO_SetPubAttr, not as corrupted audio. Also unverified: that the
+    // device plays PLATFORM_AUDIO_PERIODS frames of PLATFORM_AUDIO_PERIOD samples
+    // (platform.h) without underruns; crackle would mean a period or the depth must grow.
+    attr.u32FrmNum = PLATFORM_AUDIO_PERIODS;
     attr.u32PtNumPerFrm = MI_FRAMES;
     attr.u32CodecChnCnt = 2;
     attr.u32ChnCnt = 1;
@@ -279,7 +281,7 @@ static void sleep_until(double t)
 #define CLICK_WAV "/mnt/SDCARD/.shelf/sound/click.wav"
 #define CLICK_SYNTH_FRAMES 720 // 15 ms at 48 kHz
 #define IDLE_AFTER 2.0         // seconds of nothing to play before the thread blocks
-#define SINK_FRAMES 480        // 10 ms per dump/null write
+#define SINK_FRAMES PLATFORM_AUDIO_PERIOD // per dump/null write, the same pull as MI_AO's
 #define PACE_LAG_MAX 0.25      // catch up at most this much after a stall, then re-sync
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;

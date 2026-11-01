@@ -22,6 +22,8 @@ typedef struct {
     int dimmed;          // dimmed now (standby ends it, as on the device)
     int waits;           // platform_wait calls
     int watched_waits;   // of those, the ones begun inside fp_watch_waits' window
+    int audio_frames;    // sound the fake device read from the game's source (see below)
+    int audio_underruns; // reads it came up short on, once sound had started
     int clicks;
     int brightness, volume;
 } FakePlatform;
@@ -51,6 +53,9 @@ void fp_vsync(double hz);
 // frame, just before running the core) moves the clock on by a pseudo-random amount in
 // [min, max] seconds. 0, 0 (the default) costs nothing.
 void fp_frame_cost(double min, double max);
+// While platform_audio_source has a source, the fake device reads PLATFORM_AUDIO_PERIOD
+// frames from it every PLATFORM_AUDIO_PERIOD / PLATFORM_AUDIO_RATE seconds of the clock,
+// as the device's audio thread does, and counts what it got.
 // Fails (exit 1) instead of letting a stuck loop run past `at`.
 void fp_limit(double at);
 // The next presented canvas from clock time `at` on, as a copy for screenshots.

@@ -445,7 +445,8 @@ int main(int argc, char **argv)
     // Pacing: the game runs at the core's 59.7275 fps on the clock, whatever the panel
     // refreshes at, whether or not the core dupes a frame (the fake dupes every fourth),
     // and however long each frame takes to emulate. A panel slower than the game skips a
-    // frame now and then rather than slowing the game down.
+    // frame now and then rather than slowing the game down. The fake device reads the
+    // game's sound in periods all along, and never runs short once it has started.
     static const struct { double hz, cost_min, cost_max; int dupes; } PACE[] = {
         {0, 0, 0, 1},          {60.0, 0, 0, 1},       {60.0, .002, .014, 1}, {59.0, .002, .012, 1},
         {61.5, .004, .010, 1}, {0, .002, .014, 1},    {0, .002, .014, 0},    {60.0, 0, 0, 0},
@@ -469,10 +470,13 @@ int main(int argc, char **argv)
         double fresh = secs * 59.7275 * (PACE[i].dupes ? .75 : 1);
         double can = PACE[i].hz ? PACE[i].hz * secs : fresh;
         double want = fresh < can ? fresh : can;
-        int bad = fabs(fps - 59.7275) > .15 || presents > can + 2 || presents < want * .97;
-        printf("%spacing: panel %.1f Hz, frame cost %.0f-%.0f ms, %s: %.3f fps, %d frames shown\n",
+        double heard = fp()->audio_frames / (double)PLATFORM_AUDIO_RATE;
+        int bad = fabs(fps - 59.7275) > .15 || presents > can + 2 || presents < want * .97 ||
+                  fp()->audio_underruns || heard < secs - .1;
+        printf("%spacing: panel %.1f Hz, frame cost %.0f-%.0f ms, %s: %.3f fps, %d frames shown, "
+               "%.2f s of sound, %d underruns\n",
                bad ? "FAIL " : "  ", PACE[i].hz, PACE[i].cost_min * 1e3, PACE[i].cost_max * 1e3,
-               PACE[i].dupes ? "dupes" : "no dupes", fps, presents);
+               PACE[i].dupes ? "dupes" : "no dupes", fps, presents, heard, fp()->audio_underruns);
         failures += bad;
     }
 

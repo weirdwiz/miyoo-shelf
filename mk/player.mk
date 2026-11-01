@@ -9,7 +9,7 @@
 PLAYER_LIBS := -ldl -lpthread -lm
 PLAYER_ASAN := -fsanitize=address,undefined -fno-omit-frame-pointer -g
 PLAYER_MM_CFLAGS := -O2 -marm -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -std=c11 -D_DEFAULT_SOURCE
-PLAYER_DEPS := src/player.c src/player.h third_party/libretro.h
+PLAYER_DEPS := src/player.c src/player.h src/platform.h third_party/libretro.h
 
 $(BUILD)/fake_core.so: tools/fake_core.c third_party/libretro.h
 	@mkdir -p $(BUILD)

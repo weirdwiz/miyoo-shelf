@@ -70,6 +70,12 @@ SigmaStar MI_AO through `libmi_sys.so` and `libmi_ao.so`: `MI_SYS_Init`,
 `MI_AO_SendFrame(0, 0, &frame, timeout_ms)` with interleaved s16 stereo. Shelf loads these
 with `dlopen` so the same binary also runs where they are absent (the VM).
 
+Latency: Shelf sends 512-sample periods into a 3-period AO buffer (`u32PtNumPerFrm` 512,
+`u32FrmNum` 3) behind a game ring kept around 24 ms, ~60 ms from the game to the speaker;
+the constants are together in `src/platform.h`. *Unverified*: that MI_AO takes buffers
+that small and plays them without underruns. Crackle in games would mean a longer period
+or a deeper buffer there.
+
 Volume in dB, -60..+30: `MI_AO_SetVolume(0, db)`, or the `/dev/mi_ao` ioctls
 `MI_AO_SETVOLUME 0x4008690b`, `MI_AO_GETVOLUME 0xc008690c`, `MI_AO_SETMUTE 0x4008690d` with
 `uint64_t arg[2] = {sizeof(int[2]), (uintptr_t)int[2]{0, value}}`. Level 0-20 maps to

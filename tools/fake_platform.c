@@ -31,6 +31,9 @@ static struct {
     double vsync_hz, flip_done; // the panel, and when the pending pan finishes
     double cost_min, cost_max;  // per game frame, charged in platform_held
     unsigned rng;
+    int (*source)(int16_t *out, int frames); // the game's sound, read by the fake device
+    double audio_at;                         // its next read
+    int audio_started;                       // a read since the source was set got sound
     Battery battery[FP_MAX_EVENTS];
     int nbattery;
     int asleep;
@@ -117,16 +120,34 @@ static void fp_check_limit(void)
     exit(1);
 }
 
+// Moves the clock on to `t`, with the fake audio device reading the periods due by then.
+static void advance(double t)
+{
+    const double period = (double)PLATFORM_AUDIO_PERIOD / PLATFORM_AUDIO_RATE;
+    if (t > F.clock) {
+        while (F.audio_at <= t) {
+            if (F.source) {
+                static int16_t buf[PLATFORM_AUDIO_PERIOD * 2];
+                int real = F.source(buf, PLATFORM_AUDIO_PERIOD);
+                if (real > 0) F.audio_started = 1;
+                if (F.audio_started && real < PLATFORM_AUDIO_PERIOD) F.counts.audio_underruns++;
+                F.counts.audio_frames += real;
+                F.audio_at += period;
+            } else { // nothing to read: skip ahead
+                F.audio_at += ceil((t - F.audio_at) / period + 1e-9) * period;
+            }
+        }
+        F.clock = t;
+    }
+    fp_check_limit();
+}
+
 int platform_init(void) { return 0; }
 void platform_quit(void) {}
 
 double platform_now(void) { return F.clock; }
 
-void platform_sleep_until(double t)
-{
-    if (t > F.clock) F.clock = t;
-    fp_check_limit();
-}
+void platform_sleep_until(double t) { advance(t); }
 
 void platform_wait(double until)
 {
@@ -135,8 +156,7 @@ void platform_wait(double until)
     double t = until;
     if (F.next < F.nevents && F.events[F.next].at < t) t = F.events[F.next].at;
     if (F.limit < t) t = F.limit;
-    if (t > F.clock) F.clock = t;
-    fp_check_limit();
+    advance(t);
 }
 
 void platform_wake(void) {}
@@ -152,8 +172,7 @@ unsigned platform_held(void)
     if (F.cost_max > 0) {
         F.rng = F.rng * 1103515245u + 12345u; // the same jitter every run
         double r = (double)((F.rng >> 8) & 0xffff) / 65535.0;
-        F.clock += F.cost_min + (F.cost_max - F.cost_min) * r;
-        fp_check_limit();
+        advance(F.clock + F.cost_min + (F.cost_max - F.cost_min) * r);
     }
     return F.held;
 }
@@ -162,9 +181,8 @@ unsigned platform_held(void)
 static void flip(void)
 {
     if (!F.vsync_hz) return;
-    if (F.clock < F.flip_done) F.clock = F.flip_done;
+    advance(F.flip_done);
     F.flip_done = (floor(F.clock * F.vsync_hz + 1e-6) + 1) / F.vsync_hz; // strictly after now
-    fp_check_limit();
 }
 
 static void copy(Image **dst, const uint32_t *px, int w, int h, int pitch)
@@ -207,6 +225,8 @@ void platform_audio_source(int (*pull)(int16_t *out, int frames))
 {
     if (pull) F.counts.audio_on++;
     else F.counts.audio_off++;
+    F.source = pull;
+    F.audio_started = 0;
     note(pull ? "audio_on" : "audio_off");
 }
 

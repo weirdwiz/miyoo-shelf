@@ -490,8 +490,8 @@ static int run_menu(Session *s)
 // Back from the menu or standby: sound on, and the time away isn't idle or play time.
 static void play_resume(Session *s, double *last, double *next)
 {
+    player_audio_flush(); // stale sound out; reading starts once the ring is full again
     platform_audio_source(player_audio_read);
-    player_audio_flush();
     *last = *next = s->last_input = platform_now();
 }
 
@@ -623,7 +623,8 @@ int game_play(Library *lib, int game, const GameSettings *set, int *switch_to)
     snprintf(dev, sizeof dev, SD_PREFIX "/.shelf/data/%s.opt", core);
     host_path(dev, options, sizeof options);
 
-    PlayerConfig cfg = {s.core, s.rom, bios, s.save_dir, s.stem, options, PLATFORM_AUDIO_RATE};
+    PlayerConfig cfg = {s.core, s.rom, bios, s.save_dir, s.stem, options, PLATFORM_AUDIO_RATE,
+                        PLATFORM_AUDIO_RING_MS};
     char err[160];
     if (player_open(&cfg, err, sizeof err)) {
         report("%s", err);
