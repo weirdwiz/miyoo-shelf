@@ -8,7 +8,22 @@
 #include "platform.h"
 #include "settings.h"
 
+// The UI is loaded once and then entered and left, so coming home or opening the in-game
+// menu doesn't read the fonts again or lose the glyphs, background and sprites drawn so far.
+//   ui_init / ui_init_switcher  load what stays (fonts, frame buffers, background) unless
+//                               already loaded, then enter the home screen / the switcher
+//   ui_enter_home / _switcher   enter a view of the loaded UI: this visit's state starts
+//                               blank (selection, springs, toast, options), the folders are
+//                               rebuilt, the settings, theme and battery carry over
+//   ui_leave                    a visit ends: drops what it borrowed (the switcher's hooks
+//                               and screenshots); everything loaded stays
+//   ui_free                     the process is done with the UI: frees it all
+// The enter functions need a loaded UI (ui_loaded) and fail with -1 otherwise. A failing
+// init or enter frees the UI (and so needs a new ui_init); nothing is left half built.
 int ui_init(Library *lib, const char *font_dir);
+int ui_loaded(void);
+int ui_enter_home(void);
+void ui_leave(void);
 void ui_free(void);
 void ui_button(Button b);
 void ui_update(float dt);
@@ -37,7 +52,7 @@ enum {
     UI_SW_HOME,    // back to Shelf
 };
 int ui_take_action(void);
-void ui_set_dark(int dark); // may be called before ui_init
+void ui_set_dark(int dark); // may be called before ui_init; a no-op when the theme is unchanged
 int ui_dark(void);
 // The Options panel's values. Always call ui_set_settings after ui_init: the panel edits
 // its copy and asks for UI_SETTINGS, so main stays the one that applies and saves them.
@@ -54,6 +69,7 @@ void ui_set_toast(const char *text);
 // Actions: UI_SW_RESUME (back to the paused game), UI_SW_PLAY (start ui_switch_target()),
 // UI_SW_HOME (to Shelf). Each is taken once its animation ends.
 int ui_init_switcher(Library *lib, const char *font_dir, int from_game, int running);
+int ui_enter_switcher(int from_game, int running);
 // Where screenshots come from: a card-size and a full-size image per recent (NULL while
 // loading or missing), the selection to load first, and a counter that changes with them.
 // ui_switch_card_size() is the size cards must be.

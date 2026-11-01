@@ -11,6 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 
 #include "../src/icons.h"
 #include "../src/ui.h"
@@ -33,6 +36,16 @@ FILE *__wrap_fopen(const char *path, const char *mode)
 {
     if (strstr(path, ".ttf")) font_opens++;
     return __real_fopen(path, mode);
+}
+
+// Heap in use now, in KiB (glibc only; 0 elsewhere).
+static long heap_kib(void)
+{
+#ifdef __GLIBC__
+    return (long)(mallinfo2().uordblks / 1024);
+#else
+    return 0;
+#endif
 }
 
 static double fixed_wall(void) { return 1767225605.0; }
@@ -141,6 +154,23 @@ int main(int argc, char **argv)
                median(mi, cycles), median(mf, cycles), median(ms, cycles));
     }
     ui_free();
+    long after = heap_kib();
+    long icons0 = (long)(icons_bytes() / 1024);
+    printf("heap in use with the UI freed: %ld KiB\n", after);
+#ifdef BENCH_RESIDENT
+    // What stays allocated while a game runs: the UI after a home visit and a menu visit.
+    ui_init(&lib, fonts);
+    ui_button(BTN_R);
+    settle(60);
+    ui_leave();
+    ui_switch_hooks(hook_card, hook_full, hook_select, hook_rev);
+    ui_init_switcher(&lib, fonts, 1, 1);
+    settle(90);
+    ui_leave();
+    printf("resident UI while a game runs: %ld KiB of heap (icon cache %ld KiB aside, which was resident before too)\n",
+           heap_kib() - after - ((long)(icons_bytes() / 1024) - icons0), (long)(icons_bytes() / 1024));
+    ui_free();
+#endif
     icons_free();
     lib_free(&lib);
     return 0;
