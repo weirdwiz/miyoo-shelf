@@ -125,17 +125,78 @@ int hw_volume_db(int level)
 
 int hw_volume_muted(int level) { return level <= 0; }
 
-// Mini SAR ADC counts to battery percent, per docs/hardware.md.
+// Onion's measured Mini Li-ion curve and ADC conversion: https://github.com/OnionUI/Onion/blob/main/src/batmon/batmon.c
+static const struct { double v, pct; } battery_curve[] = {
+    {4.20,100},{4.13,95},{4.06,90},{4.02,85},{3.99,80},{3.95,75},
+    {3.92,70},{3.88,65},{3.85,60},{3.81,55},{3.78,50},{3.74,45},
+    {3.71,40},{3.67,35},{3.64,30},{3.56,25},{3.49,20},{3.42,15},
+    {3.30,10},{3.14,5},{3.00,0}
+};
+
 int hw_adc_percent(int adc)
 {
-    double pct;
-    if (adc >= 578) return 100;
-    if (adc >= 528) pct = adc - 478.0;
-    else if (adc >= 512) pct = adc * 2.125 - 1068.0;
-    else if (adc >= 480) pct = adc * 0.51613 - 243.742;
-    else return 0;
-    int p = (int)lround(pct);
-    return p < 0 ? 0 : (p > 100 ? 100 : p);
+    double v = (adc - 148) * 0.01;
+    if (v >= battery_curve[0].v) return 100;
+    for (size_t i = 0; i + 1 < sizeof battery_curve / sizeof battery_curve[0]; i++) {
+        if (v <= battery_curve[i].v && v > battery_curve[i + 1].v) {
+            double pct = battery_curve[i + 1].pct +
+                (v - battery_curve[i + 1].v) * (battery_curve[i].pct - battery_curve[i + 1].pct) /
+                (battery_curve[i].v - battery_curve[i + 1].v);
+            return (int)pct;
+        }
+    }
+    return 0;
+}
+
+// The percentage shown on a Mini. The ADC wobbles by about 80 mV under load (Onion PR
+// #1712), so readings are averaged, but only over the last BATTERY_WINDOW seconds: callers
+// poll every 30 s or so, and a low-battery shutdown can't wait minutes for an average to
+// catch up. While discharging the figure never goes up on a brief rebound; it does once the
+// average has stayed above it for BATTERY_RISE readings in a row (a sag under load that
+// has passed). Plugging in or out starts afresh. `now` is in seconds.
+#define BATTERY_SAMPLES 10
+#define BATTERY_WINDOW 90.0
+#define BATTERY_RISE 3
+static struct {
+    int adc[BATTERY_SAMPLES];
+    double at[BATTERY_SAMPLES];
+    int n, next, shown, above, charging;
+} bat = { .shown = -1 };
+
+void hw_battery_reset(void)
+{
+    memset(&bat, 0, sizeof bat);
+    bat.shown = -1;
+}
+
+int hw_mini_percent(int adc, int charging, double now)
+{
+    charging = charging != 0;
+    if (charging != bat.charging) {
+        hw_battery_reset();
+        bat.charging = charging;
+    }
+    bat.adc[bat.next] = adc;
+    bat.at[bat.next] = now;
+    bat.next = (bat.next + 1) % BATTERY_SAMPLES;
+    if (bat.n < BATTERY_SAMPLES) bat.n++;
+    int sum = 0, used = 0;
+    for (int i = 0; i < bat.n; i++)
+        if (now - bat.at[i] <= BATTERY_WINDOW) {
+            sum += bat.adc[i];
+            used++;
+        }
+    int pct = hw_adc_percent((sum + used / 2) / used); // used >= 1: this sample is in it
+    if (charging || bat.shown < 0 || pct < bat.shown) {
+        bat.shown = pct;
+        bat.above = 0;
+    } else if (pct > bat.shown && ++bat.above >= BATTERY_RISE) {
+        bat.shown = pct;
+        bat.above = 0;
+    } else if (pct == bat.shown) {
+        bat.above = 0;
+    }
+    return bat.shown;
 }
 
 // One "key":<int> field of axp_test's single-line JSON.
@@ -163,7 +224,7 @@ int hw_parse_axp(const char *json, int *charging)
     int pct, ch = 0;
     if (!json || !json_field(json, "battery", &pct)) return -1;
     json_field(json, "charging", &ch);
-    if (charging) *charging = ch != 0;
+    if (charging) *charging = ch == 3;
     return pct < 0 ? 0 : (pct > 100 ? 100 : pct);
 }
 
@@ -378,8 +439,10 @@ static int battery_mini(int *charging)
             int channel, adc;
         } sample = { 0, 0 };
         if (ioctl(fd, SAR_READ, &sample) == 0) {
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
             *charging = charge_gpio();
-            return hw_adc_percent(sample.adc);
+            return hw_mini_percent(sample.adc, *charging, (double)ts.tv_sec + ts.tv_nsec / 1e9);
         }
     }
 #else

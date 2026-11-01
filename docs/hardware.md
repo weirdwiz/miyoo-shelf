@@ -55,12 +55,16 @@ Volume in dB, -60..+30: `MI_AO_SetVolume(0, db)`, or the `/dev/mi_ao` ioctls
 ## Battery
 
 - Mini: SAR ADC `/dev/sar`: `ioctl(fd, _IO('a', 0))` once to init, then
-  `ioctl(fd, _IO('a', 1), &(struct {int channel; int adc;}){0})`. Percent from the ADC
-  value: >= 578: 100; >= 528: v - 478; >= 512: v * 2.125 - 1068; >= 480:
-  v * 0.51613 - 243.742; else 0. Charging: GPIO 59 (export, direction "in"), value 1.
+  `ioctl(fd, _IO('a', 1), &(struct {int channel; int adc;}){0})`. Voltage is
+  `(adc - 148) * 0.01`; percentage linearly interpolates Onion's measured Li-ion curve
+  (4.20 V = 100%, 4.13 V = 95%, through 3.00 V = 0%). Readings from the last 90 s are
+  averaged; while discharging the shown percentage only rises once the average has stayed
+  above it for three readings, and plugging in or out starts afresh.
+  Charging: GPIO 59 (export, direction "in"), value 1. *Unverified on hardware.*
 - Mini Plus: AXP223 over i2c (`I2C_RDWR`): charging is register 0x00 bit 2; battery percent
-  is register 0xB9 bits 0-6 (*unverified*: Onion runs `/customer/app/axp_test`, which prints
-  `{"battery":N, "voltage":mV, "charging":N}`; Shelf uses it as the fallback).
+  is register 0xB9 bits 0-6. The `/customer/app/axp_test` fallback marks charging only when
+  its `charging` field is 3 (Onion's `battery_isCharging`; that is axp_test's own value, not
+  the register bit). *Unverified on hardware.*
 
 ## Power
 
