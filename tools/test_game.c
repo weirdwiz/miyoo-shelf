@@ -349,13 +349,17 @@ int main(int argc, char **argv)
     CHECK(marked_at_off && resumes_game(beta));
     unlink(resume_path);
 
-    // POWER held: everything is saved before Shelf powers off.
+    // POWER held: the panel goes dark first, then everything is saved before Shelf
+    // powers off.
     long beta_before = state_counter(beta);
     fp_reset();
     fp_limit(20);
+    at_blank = -2;
+    fp_on_call(watch_saves);
     fp_press_at(0.6, BTN_POWER_OFF);
     CHECK(session(beta, &next) == GAME_POWER_OFF);
     CHECK(fp()->power_off == 1);
+    CHECK(at_blank == beta_before);
     CHECK(state_counter(beta) > beta_before && exists(beta, ".png"));
     CHECK(resumes_game(beta));
     unlink(resume_path);
@@ -375,7 +379,7 @@ int main(int argc, char **argv)
     CHECK(resumes_game(beta));
     unlink(resume_path);
     CHECK(fp()->battery_reads >= 30); // 0, 30, ... 870 s
-    CHECK(fp()->standby_off == 1 && fp()->power_off == 1);
+    CHECK(fp()->standby_off == 0 && fp()->power_off == 1); // dark from standby to off
     fp_hold(0);
 
     // The paused menu left alone: dim at 45 s, standby at 3 minutes, off 10 minutes later.
@@ -401,7 +405,8 @@ int main(int argc, char **argv)
     fp_battery_at(10, 3, 0);
     CHECK(session(beta, &next) == GAME_POWER_OFF);
     CHECK(off_at > 89.9 && off_at < 90.1); // read at 30, 60 and 90 s
-    CHECK(fp()->standby_on == 0 && fp()->power_off == 1);
+    CHECK(fp()->standby_on == 1 && fp()->power_off == 1);
+    CHECK(at_blank == beta_low); // dark and silent before the save, as for standby
     CHECK(at_off > beta_low);
     CHECK(marked_at_off);
     unlink(resume_path);

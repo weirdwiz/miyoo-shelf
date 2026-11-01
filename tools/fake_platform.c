@@ -209,6 +209,7 @@ void platform_dim(int on)
 
 void platform_standby(int on)
 {
+    if ((on != 0) == F.asleep) return; // as on the device: already in that state
     F.asleep = on != 0;
     if (!F.asleep) F.counts.dimmed = 0;
     if (F.asleep) F.counts.standby_on++;

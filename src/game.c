@@ -190,7 +190,7 @@ static int standby(Session *s)
         }
     }
 woke:
-    platform_standby(0);
+    if (!off) platform_standby(0); // powering off: the panel stays dark to the end
     return off;
 }
 
@@ -621,6 +621,9 @@ int game_play(Library *lib, int game, const GameSettings *set, int *switch_to)
     int result = play(&s);
 
     platform_audio_source(NULL);
+    // Powering off: dark and silent first, like standby, so the press feels instant and
+    // a slow card doesn't leave the screen lit while the save is written.
+    if (result == GAME_POWER_OFF) platform_standby(1);
     save_session(&s);
     // Powering off from a game: the next boot comes straight back to it. Not when the save
     // failed; then home, with the previous state still there to resume by hand.
