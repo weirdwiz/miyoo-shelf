@@ -151,6 +151,33 @@ case_no_killall() {
 	check "no killall" "no error output" "$(wc -c <"$dir/stderr" | tr -d ' ')" 0
 }
 
+case_no_stock_ui() {
+	dir=$TMP/no-stock-ui
+	build_card "$dir"
+	rm -f "$dir/stock-ui"
+	printf '1 0\n1 0\n1 0\n0 0\n' >"$dir/plan"
+	run_updater "$dir"
+	check "no stock UI" "shelf started three times" "$(starts "$dir")" 3
+	check "no stock UI" "powered off instead" "$(calls "$dir/poweroff.calls")" 1
+	check "no stock UI" "log says why" "$(grep -c 'no stock UI' "$dir/SDCARD/.shelf/data/shelf.log")" 1
+}
+
+case_probe() {
+	dir=$TMP/probe
+	build_card "$dir"
+	touch "$dir/SDCARD/.shelf/probe"
+	# The fake shelf records whether it was asked to probe.
+	sed -i.bak 's|^echo "fake shelf: start".*|echo "fake shelf: start probe=${SHELF_PROBE:-}" >>"$SHELF_TEST_LOG"|' \
+		"$dir/SDCARD/.shelf/bin/shelf"
+	printf '1 0\n0 0\n' >"$dir/plan"
+	run_updater "$dir"
+	check "probe" "request removed" "$([ -f "$dir/SDCARD/.shelf/probe" ] && echo kept || echo removed)" removed
+	check "probe" "system report written" "$(grep -c '^== system' "$dir/SDCARD/.shelf/data/probe.txt")" 1
+	check "probe" "first start probes" "$(sed -n 1p "$dir/shelf.runs")" "fake shelf: start probe=1"
+	check "probe" "restart does not" "$(sed -n 2p "$dir/shelf.runs")" "fake shelf: start probe="
+	check "probe" "boots on as usual" "$(calls "$dir/poweroff.calls")" 1
+}
+
 case_static_checks() {
 	if "$SH" -n "$UPDATER" 2>"$TMP/sh-n.err"; then
 		pass "sh -n"
@@ -174,6 +201,8 @@ case_three_quick_crashes
 case_long_run_resets
 case_log_rotation
 case_no_killall
+case_no_stock_ui
+case_probe
 case_static_checks
 
 if [ "$failures" -ne 0 ]; then

@@ -52,6 +52,8 @@ static int fb_back;   // the page the next frame is drawn into
 static int fb_h;      // rows per page: the panel's height, which can exceed the canvas's
 static int fb_ox, fb_oy; // where the 640x480 canvas sits on a larger panel (centred)
 static int vsync_paced;
+static size_t fb_smem;  // what the driver can map, for the probe
+static FILE *probe_out; // raw input events go here while the probe runs
 
 static pthread_t flipper;
 static pthread_mutex_t flip_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -164,13 +166,14 @@ static int fb_init(void)
             goto fail;
     }
     fb_pitch = (int)fix.line_length;
-    if (fb_pitch < SCREEN_W * 4 || fb_pitch % 4) goto fail;
+    fb_smem = fix.smem_len;
+    if (fb_pitch < (int)fb_var.xres * 4 || fb_pitch % 4) goto fail;
     fb_dpitch = fb_pitch / 4;
-    two = fb_var.yres_virtual >= 2u * SCREEN_H;
-    fb_len = (size_t)fb_pitch * SCREEN_H * (two ? 2 : 1);
+    two = fb_var.yres_virtual >= 2u * fb_h;
+    fb_len = (size_t)fb_pitch * fb_h * (two ? 2 : 1);
     if (fb_len > fix.smem_len) { // what we can map, not the geometry, is the real limit
         two = 0;
-        fb_len = (size_t)fb_pitch * SCREEN_H;
+        fb_len = (size_t)fb_pitch * fb_h;
         if (fb_len > fix.smem_len) goto fail;
     }
     fb_mem = mmap(NULL, fb_len, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
@@ -463,8 +466,12 @@ static void input_read(void)
             ssize_t n = read(in_fd[i], buf, sizeof buf);
             if (n < 0 && errno == EINTR) continue;
             if (n <= 0) break;
-            for (ssize_t j = 0; j < n / (ssize_t)sizeof buf[0]; j++)
+            for (ssize_t j = 0; j < n / (ssize_t)sizeof buf[0]; j++) {
+                if (probe_out && buf[j].type != EV_SYN)
+                    fprintf(probe_out, "%8.3f input %d type %u code %u value %d\n", platform_now(), i,
+                            buf[j].type, buf[j].code, buf[j].value);
                 if (buf[j].type == EV_KEY) key_event(buf[j].code, buf[j].value);
+            }
         }
     }
 }
@@ -536,6 +543,31 @@ void platform_wait(double until)
         while (read(wake_pipe[0], drain, sizeof drain) > 0) {}
     }
     // Input readiness is left to platform_poll, which reads and decodes it.
+}
+
+/* ---------- probe ---------- */
+
+void platform_probe(FILE *out)
+{
+    probe_out = out;
+    if (!out) return;
+    if (fb < 0) {
+        fprintf(out, "fb0: not open\n");
+    } else {
+        fprintf(out, "fb0: %ux%u, virtual %ux%u, %u bpp, line %d bytes, smem %zu, canvas at %d,%d, "
+                     "%d page(s), vsync paced %d\n",
+                fb_var.xres, fb_var.yres, fb_var.xres_virtual, fb_var.yres_virtual, fb_var.bits_per_pixel,
+                fb_pitch, fb_smem, fb_ox, fb_oy, fb_pages, vsync_paced);
+        fprintf(out, "fb0 timing: pixclock %u, margins %u %u %u %u, sync %u %u\n", fb_var.pixclock,
+                fb_var.left_margin, fb_var.right_margin, fb_var.upper_margin, fb_var.lower_margin,
+                fb_var.hsync_len, fb_var.vsync_len);
+    }
+    for (int i = 0; i < in_n; i++) {
+        char name[128] = "?";
+        ioctl(in_fd[i], EVIOCGNAME(sizeof name), name);
+        fprintf(out, "input %d: %s\n", i, name);
+    }
+    if (!in_n) fprintf(out, "input: none with the panel's keys\n");
 }
 
 /* ---------- lifetime ---------- */

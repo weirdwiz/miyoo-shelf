@@ -12,7 +12,7 @@ CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers
 BUILD := build
 
-CORE_SRC := src/main.c src/loop.c src/gfx.c src/text.c src/library.c src/icons.c src/ui.c src/game.c src/settings.c src/scale.c src/player.c third_party/cJSON.c
+CORE_SRC := src/main.c src/loop.c src/gfx.c src/text.c src/library.c src/icons.c src/ui.c src/game.c src/settings.c src/scale.c src/player.c src/probe.c third_party/cJSON.c
 SIM_SRC := $(CORE_SRC) src/platform_sdl2.c
 SDL_CFLAGS = $(shell sdl2-config --cflags)
 SDL_LIBS = $(shell sdl2-config --libs)

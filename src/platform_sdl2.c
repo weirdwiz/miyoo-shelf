@@ -335,6 +335,15 @@ void platform_standby(int on)
     }
 }
 
+void platform_probe(FILE *out)
+{
+    if (!out) return;
+    int w = 0, h = 0;
+    if (win) SDL_GetWindowSize(win, &w, &h);
+    fprintf(out, "platform: SDL2 simulator, video driver %s, window %dx%d, vsync paced %d\n",
+            SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "none", w, h, platform_vsync_paced());
+}
+
 // Nothing to ask of a desktop CPU; kept for parity with the device's governor.
 void platform_performance(int game) { (void)game; }
 

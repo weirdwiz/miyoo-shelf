@@ -4,6 +4,7 @@
 #define SHELF_PLATFORM_H
 
 #include <stdint.h>
+#include <stdio.h>
 
 #include "gfx.h"
 #include "scale.h"
@@ -66,6 +67,9 @@ int platform_battery(int *charging);
 void platform_standby(int on);
 // CPU policy: nonzero while a game runs (full speed), zero in menus (on demand).
 void platform_performance(int game);
+// Hardware probe (SHELF_PROBE, src/probe.c): writes what the platform knows about its
+// display and input to `out` and logs every raw input event there until called with NULL.
+void platform_probe(FILE *out);
 // Syncs and powers the device off. Returns only if that failed (simulator: quits).
 void platform_power_off(void);
 
