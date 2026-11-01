@@ -65,24 +65,47 @@ int main(int argc, char **argv)
     ui_update(1.f / 60); ui_draw(canvas);
     assert(S.scene_builds == builds);
 
-    // Options: dark mode repaints with the dark palette and asks to be saved; the
-    // panel stays retained while open; MENU and the boot row hand actions to main.
+    // Options: the panel edits brightness, volume, screen and the theme, and asks for
+    // UI_SETTINGS so main applies and saves it. The panel stays retained while open.
     uint32_t light_bg = S.scene->px[SCREEN_W * 2 + 2];
     ui_button(BTN_START); ui_draw(canvas);
     assert(S.options && ui_take_action() == UI_NONE);
+    int bright = ui_settings().brightness;
+    ui_button(BTN_A); // brightness + 1 from the first row
+    assert(ui_settings().brightness == bright + 1 && ui_take_action() == UI_SETTINGS);
+    for (int i = 0; i < O_DARK; i++) ui_button(BTN_DOWN);
     ui_button(BTN_A); ui_draw(canvas);
-    assert(ui_dark() && ui_take_action() == UI_THEME);
+    assert(ui_dark() && ui_take_action() == UI_SETTINGS);
     for (int i = 0; i < 5; i++) { ui_update(1.f / 60); ui_draw(canvas); }
     assert(S.scene->px[SCREEN_W * 2 + 2] != light_bg);
     builds = S.scene_builds;
     ui_update(1.f / 60); ui_draw(canvas);
     assert(S.scene_builds == builds);
-    ui_set_boot(1);
-    ui_button(BTN_DOWN); ui_button(BTN_A);
-    assert(!S.options && ui_take_action() == UI_BOOT_ONION);
-    ui_button(BTN_MENU);
-    assert(ui_take_action() == UI_EXIT);
+    // MENU opens the same sheet as START; B closes it without handing main an action.
+    ui_button(BTN_B); // close the sheet opened above
+    assert(!S.options);
+    ui_button(BTN_MENU); ui_draw(canvas);
+    assert(S.options && S.osel == 0 && ui_take_action() == UI_NONE);
+    ui_button(BTN_B);
+    assert(!S.options && ui_take_action() == UI_NONE);
     ui_set_dark(0);
+
+    // X favorites the selected game and redraws the detail panel; pressing it again puts
+    // the card back the way the fixture had it.
+    ui_button(BTN_R); ui_button(BTN_A);
+    assert(S.view == V_FOLDER && S.nfg > 0);
+    int fg = S.fgames[S.fsel], fav = lib.games[fg].fav;
+    ui_button(BTN_X);
+    assert(lib.games[fg].fav == !fav);
+    if (!fav) { // the Favorites folder now lists it too
+        int listed = 0;
+        for (int k = 0; k < S.folders[1].ngames; k++) listed |= S.folders[1].games[k] == fg;
+        assert(S.folders[1].kind == F_FAV && listed);
+    }
+    ui_button(BTN_X);
+    assert(lib.games[fg].fav == fav);
+    ui_button(BTN_B);
+    assert(S.view == V_HOME);
 
     // Decoded icons stay within budget across a long browse: everything in "All games",
     // trimmed between frames as the loop does, without dangling sprites or lost art.

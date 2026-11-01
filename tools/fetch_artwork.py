@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch explicitly mapped artwork into an Onion card (never touches ROMs)."""
+"""Fetch explicitly mapped artwork into an SD card (never touches ROMs)."""
 import argparse
 import json
 from pathlib import Path
@@ -8,7 +8,7 @@ from urllib.request import Request, urlopen
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("manifest", type=Path)
-parser.add_argument("root", type=Path, help="SD card root or local artwork staging folder")
+parser.add_argument("root", type=Path, help="SD card root or artwork staging folder")
 args = parser.parse_args()
 failed = False
 for entry in json.loads(args.manifest.read_text()):

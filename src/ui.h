@@ -1,10 +1,12 @@
-// Home row (Recent, then Library folders) and the folder grid.
+// Home row (Recent, then Library folders), the folder grid, Options and the in-game
+// switcher view.
 #ifndef SHELF_UI_H
 #define SHELF_UI_H
 
 #include "gfx.h"
 #include "library.h"
 #include "platform.h"
+#include "settings.h"
 
 int ui_init(Library *lib, const char *font_dir);
 void ui_free(void);
@@ -25,29 +27,41 @@ int ui_take_sound(void);
 // Call after the library's recents changed: rebuilds the home row with the first item selected.
 void ui_reset_home(void);
 
-// Requests from the Options panel (START) and MENU, taken once each.
-enum { UI_NONE, UI_EXIT, UI_THEME, UI_BOOT_ONION, UI_BOOT_SHELF,
-       UI_SW_RESUME, UI_SW_PLAY, UI_SW_HOME };
+// Requests from the Options panel and the switcher view, taken once each.
+enum {
+    UI_NONE,
+    UI_SETTINGS,   // brightness, volume, screen or theme changed: apply and save
+    UI_POWER_OFF,  // power off was confirmed in Options
+    UI_SW_RESUME,  // back to the paused game
+    UI_SW_PLAY,    // start ui_switch_target()
+    UI_SW_HOME,    // back to Shelf
+};
 int ui_take_action(void);
-void ui_set_dark(int dark);   // may be called before ui_init
+void ui_set_dark(int dark); // may be called before ui_init
 int ui_dark(void);
-// Whether Shelf is Onion's home screen; picks the Options row that switches it.
-void ui_set_boot(int on);
-// Status bar: battery percent (-1 hides it), charging, Wi-Fi bars 1..3 (0 = on but not
-// connected, -1 = off, hidden).
-void ui_set_status(int battery, int charging, int wifi);
+// The Options panel's values. Always call ui_set_settings after ui_init: the panel edits
+// its copy and asks for UI_SETTINGS, so main stays the one that applies and saves them.
+void ui_set_settings(const Settings *s);
+Settings ui_settings(void);
+// Status bar: battery percent (-1 hides it) and whether it is charging.
+void ui_set_status(int battery, int charging);
+// A one-line message over the home screen ("Couldn't start …"), shown for a few seconds.
+void ui_set_toast(const char *text);
 
-// Game switcher view (see switcher.h): recents as screenshot cards. With `overlay` and
-// `running`, recents[0] is the paused game and the view opens by shrinking it from full
-// screen. Actions: UI_SW_RESUME (back to the paused game), UI_SW_PLAY (start
-// ui_switch_target()), UI_SW_HOME (to Shelf). Each is taken once its animation ends.
-int ui_init_switcher(Library *lib, const char *font_dir, int overlay, int running);
+// The in-game menu: the paused game and the recents as screenshot cards. With `running`,
+// recents[0] is the paused game and the view opens by shrinking it from full screen.
+// Actions: UI_SW_RESUME (back to the paused game), UI_SW_PLAY (start ui_switch_target()),
+// UI_SW_HOME (to Shelf). Each is taken once its animation ends.
+int ui_init_switcher(Library *lib, const char *font_dir, int from_game, int running);
 // Where screenshots come from: a card-size and a full-size image per recent (NULL while
 // loading or missing), the selection to load first, and a counter that changes with them.
+// ui_switch_card_size() is the size cards must be.
 void ui_switch_hooks(const Image *(*card)(int), const Image *(*full)(int), void (*select)(int),
                      unsigned (*revision)(void));
-enum { SW_TOAST_NONE, SW_TOAST_SAVING, SW_TOAST_SAVED, SW_TOAST_FAILED, SW_TOAST_ON_EXIT };
-void ui_switch_saving(int toast);
+void ui_switch_card_size(int *w, int *h);
+// A question over the switcher ("Restart the game?"): the footer then answers A yes, B no.
+// NULL clears it.
+void ui_switch_notice(const char *text);
 int ui_switch_target(void);
 // Benchmark: play the opening zoom again, from full screen into the row.
 void ui_switch_reopen(void);

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Rebuilds assets/fonts/Shelf-*.ttf: M PLUS Rounded 1c cut down to Latin (about 105 KB each
-# instead of 3.5 MB), which keeps pushes over the Miyoo's slow Wi-Fi quick.
+# instead of 3.5 MB), which keeps the copy on the SD card small.
 # Needs fonttools (pip install fonttools).
 set -eu
 cd "$(dirname "$0")/../assets/fonts"

@@ -1,56 +1,67 @@
-// Miyoo Mini / Mini Plus: SDL 1.2 with explicit 180-degree panel rotation.
-// Launcher: SDL keys; paused overlay: raw evdev without taking RetroArch's VT.
-#include <SDL/SDL.h>
+// Miyoo Mini / Mini Plus: /dev/fb0 page flipping, evdev input and CLOCK_MONOTONIC timing,
+// with no SDL. Audio lives in audio_mm.c, the hardware settings in hw_mm.c.
+//
+// The panel is mounted upside down, so frames are rotated 180 degrees on the way out. When
+// presenting waits for vblank, a frame goes into the hidden fb page and a flipper thread
+// issues FBIOPAN_DISPLAY once it is complete: the pan blocks until vblank, so the main
+// thread renders the next frame meanwhile and waits only before touching that page again.
+// Without vblank pacing there is nothing to hide a flip behind, so frames go to the page on
+// screen.
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <linux/fb.h>
 #include <linux/input.h>
-// Linux mouse/gamepad button macros collide with Shelf's logical Button enum.
-#undef BTN_LEFT
-#undef BTN_RIGHT
-#undef BTN_A
-#undef BTN_B
-#undef BTN_X
-#undef BTN_Y
-#undef BTN_START
-#undef BTN_SELECT
+#include <linux/kd.h>
+#include <math.h>
 #include <poll.h>
 #include <pthread.h>
-#include <signal.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
 
-#include "../third_party/cJSON.h"
+// linux/input.h names the gamepad and mouse codes BTN_*, the names platform.h gives the
+// panel's buttons; the panel sends only KEY_* codes, so those macros go before the
+// interface is read.
+#undef BTN_A
+#undef BTN_B
+#undef BTN_X
+#undef BTN_Y
+#undef BTN_LEFT
+#undef BTN_RIGHT
+#undef BTN_START
+#undef BTN_SELECT
+
 #include "platform.h"
-#include "evdev_keys.h"
-#include "fb_snapshot.h"
+#include "settings.h"
 
-static SDL_Surface *video;
-static int input_fd = -1; // overlays must not switch away from RetroArch's locked VT
+/* ---------- display ---------- */
 
-// Page flipping straight on /dev/fb0, whose virtual height holds two screens. SDL 1.2
-// here only offers the visible page, so drawing there tore mid-scanout; instead each
-// frame goes to the hidden page and FBIOPAN_DISPLAY shows it. Overlay input is evdev.
-// The pan blocks until vblank, so a flipper thread issues it: the main thread renders
-// the next frame meanwhile and waits only before writing into the page being replaced.
 static int fb = -1;
 static struct fb_var_screeninfo fb_var;
 static unsigned char *fb_mem;
 static size_t fb_len;
-static int fb_pitch, fb_back;
-static FbSnapshot game_page;
-static FbSnapshot grabbed; // the visible page as platform_grab read it, raw (overlay only)
-static volatile sig_atomic_t overlay_resumed;
-static void (*previous_cont)(int);
+static int fb_pitch;  // bytes per row
+static int fb_dpitch; // pixels per row
+static int fb_pages;  // 2 when the driver gives us a hidden page, 1 while drawing on screen
+static int fb_back;   // the page the next frame is drawn into
+static int vsync_paced;
+
 static pthread_t flipper;
 static pthread_mutex_t flip_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t flip_cond = PTHREAD_COND_INITIALIZER;
-static int flip_pending, flip_quit;
+static int flip_pending, flip_quit, flip_target;
+
+// Pans the panel to the page at `yoffset`. On the device this blocks until the next vblank.
+static int fb_pan(unsigned yoffset)
+{
+    struct fb_var_screeninfo var = fb_var;
+    var.yoffset = yoffset;
+    return ioctl(fb, FBIOPAN_DISPLAY, &var);
+}
 
 static void *flip_main(void *ud)
 {
@@ -59,9 +70,9 @@ static void *flip_main(void *ud)
     for (;;) {
         while (!flip_pending && !flip_quit) pthread_cond_wait(&flip_cond, &flip_lock);
         if (!flip_pending) break;
-        struct fb_var_screeninfo var = fb_var;
+        int page = flip_target;
         pthread_mutex_unlock(&flip_lock);
-        ioctl(fb, FBIOPAN_DISPLAY, &var);
+        fb_pan((unsigned)SCREEN_H * page);
         pthread_mutex_lock(&flip_lock);
         flip_pending = 0;
         pthread_cond_broadcast(&flip_cond);
@@ -70,237 +81,417 @@ static void *flip_main(void *ud)
     return NULL;
 }
 
-// Once this returns the previous flip is on screen and the back page is free.
+// Once this returns the previous pan is done and the page about to be written is off screen.
 static void flip_wait(void)
 {
+    if (fb_pages < 2) return;
     pthread_mutex_lock(&flip_lock);
     while (flip_pending) pthread_cond_wait(&flip_cond, &flip_lock);
     pthread_mutex_unlock(&flip_lock);
 }
 
-static void fb_init(int overlay)
+// Shows the page just drawn and makes the other one the drawing target.
+static void flip_request(void)
+{
+    if (fb_pages < 2) return; // drawing straight to the page that is on screen
+    pthread_mutex_lock(&flip_lock);
+    flip_target = fb_back;
+    flip_pending = 1;
+    pthread_cond_signal(&flip_cond);
+    pthread_mutex_unlock(&flip_lock);
+    fb_back ^= 1;
+}
+
+// The pixels of the page the next frame goes into, or NULL without a usable panel.
+static uint32_t *fb_page(void)
+{
+    if (fb < 0) return NULL;
+    return (uint32_t *)(fb_mem + (size_t)fb_pitch * SCREEN_H * fb_back);
+}
+
+// Whole page in black; rotation makes no difference to a solid colour.
+static void page_black(uint32_t *page)
+{
+    for (size_t i = 0; i < (size_t)fb_dpitch * SCREEN_H; i++) page[i] = 0xff000000;
+}
+
+// The device's FBIOPAN_DISPLAY waits for vblank, so it takes up to a frame time; the test
+// VM's returns at once. Three pans tell the two apart.
+static void fb_measure_pacing(void)
+{
+    struct timespec a, b;
+    double total = 0;
+    for (int i = 0; i < 3; i++) {
+        clock_gettime(CLOCK_MONOTONIC, &a);
+        if (fb_pan(SCREEN_H * (unsigned)(i % 2 ? 0 : 1))) return;
+        clock_gettime(CLOCK_MONOTONIC, &b);
+        total += (double)(b.tv_sec - a.tv_sec) + (double)(b.tv_nsec - a.tv_nsec) / 1e9;
+    }
+    vsync_paced = total / 3 >= .005;
+    fb_pan(0); // start from page 0
+}
+
+// Returns 0 with page 0 on screen.
+static int fb_init(void)
 {
     struct fb_fix_screeninfo fix;
-    if (getenv("SHELF_NO_FLIP")) return;
-    if ((fb = open("/dev/fb0", O_RDWR)) < 0) return;
-    if (ioctl(fb, FBIOGET_VSCREENINFO, &fb_var) || ioctl(fb, FBIOGET_FSCREENINFO, &fix) ||
-        fb_var.xres != SCREEN_W || fb_var.yres != SCREEN_H || fb_var.bits_per_pixel != 32 ||
-        fix.line_length < SCREEN_W * 4) goto fail;
-    fb_pitch = fix.line_length;
-    fb_len = fb_map_len(fb_pitch, SCREEN_H, fb_var.yres_virtual, fb_var.yoffset, fix.smem_len);
-    if (!fb_len) goto fail;
+    int two;
+    if ((fb = open("/dev/fb0", O_RDWR)) < 0) return -1;
+    if (ioctl(fb, FBIOGET_VSCREENINFO, &fb_var) || ioctl(fb, FBIOGET_FSCREENINFO, &fix)) goto fail;
+    if (fb_var.xres != SCREEN_W || fb_var.yres != SCREEN_H || fb_var.bits_per_pixel != 32) goto fail;
+    // Ask for the hidden page when the driver did not hand one out, then believe whatever
+    // geometry it reports back (some kernels keep the visible page only).
+    if (fb_var.yres_virtual < 2u * SCREEN_H) {
+        fb_var.yres_virtual = 2 * SCREEN_H;
+        ioctl(fb, FBIOPUT_VSCREENINFO, &fb_var);
+        if (ioctl(fb, FBIOGET_VSCREENINFO, &fb_var) || ioctl(fb, FBIOGET_FSCREENINFO, &fix))
+            goto fail;
+    }
+    fb_pitch = (int)fix.line_length;
+    if (fb_pitch < SCREEN_W * 4 || fb_pitch % 4) goto fail;
+    fb_dpitch = fb_pitch / 4;
+    two = fb_var.yres_virtual >= 2u * SCREEN_H;
+    fb_len = (size_t)fb_pitch * SCREEN_H * (two ? 2 : 1);
+    if (fb_len > fix.smem_len) { // what we can map, not the geometry, is the real limit
+        two = 0;
+        fb_len = (size_t)fb_pitch * SCREEN_H;
+        if (fb_len > fix.smem_len) goto fail;
+    }
     fb_mem = mmap(NULL, fb_len, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
     if (fb_mem == MAP_FAILED) { fb_mem = NULL; goto fail; }
-    fb_back = fb_var.yoffset >= SCREEN_H ? 0 : 1;
-    // Every page, not just the visible one: RA cycles through all of them after resuming
-    // and only redraws its viewport, so any page Shelf drew on would show stale borders.
-    // Reading video memory is slow (~18 MB/s), so reuse the page platform_grab already
-    // read when there is one (all pages took ~200 ms); fb_quit copies it over the pages
-    // Shelf draws on.
-    if (overlay && grabbed.pixels && grabbed.bytes == (size_t)fb_pitch * SCREEN_H) {
-        game_page = grabbed;
-        grabbed = (FbSnapshot){0};
-    } else if (overlay && fb_snapshot_take(&game_page, fb_mem, fb_len, fb_pitch, (int)(fb_len / fb_pitch), 0)) {
-        goto unmap;
+    fb_pages = 1;
+    fb_back = 0;
+    if (!two) {
+        fprintf(stderr, "shelf: one fb page only; drawing to the visible page\n");
+        return 0;
     }
-    if (overlay) game_page.yoffset = fb_var.yoffset; // panned back to on exit
-    flip_quit = flip_pending = 0;
-    if (!pthread_create(&flipper, NULL, flip_main, NULL)) return;
-unmap:
-    fb_snapshot_free(&game_page);
-    munmap(fb_mem, fb_len);
-    fb_mem = NULL;
+    fb_measure_pacing(); // leaves page 0 on screen
+    if (!vsync_paced) {
+        // Nothing to hide a flip behind, and a framebuffer that is a lazily copied shadow
+        // (a virtual GPU) keeps showing the page that was on screen.
+        fprintf(stderr, "shelf: no vblank to flip behind; drawing to the visible page\n");
+    } else if (pthread_create(&flipper, NULL, flip_main, NULL)) {
+        fprintf(stderr, "shelf: no flipper thread; drawing to the visible page\n");
+    } else {
+        fb_pages = 2;
+        fb_back = 1;
+        return 0;
+    }
+    // Drawing straight to the page on screen, so there is no vblank wait in presenting.
+    vsync_paced = 0;
+    return 0;
 fail:
-    fprintf(stderr, "shelf: no fb page flip; drawing to the visible page\n");
-    close(fb);
+    if (fb >= 0) close(fb);
     fb = -1;
+    return -1;
 }
 
 static void fb_quit(void)
 {
     if (fb < 0) return;
-    pthread_mutex_lock(&flip_lock);
-    flip_quit = 1;
-    pthread_cond_broadcast(&flip_cond);
-    pthread_mutex_unlock(&flip_lock);
-    pthread_join(flipper, NULL); // finishes a pending flip first
-    if (game_page.pixels) {
-        // RA does not redraw its letterbox borders every frame. Restore the original
-        // game page, not the menu, or those borders retain switcher artifacts.
-        if (game_page.bytes == (size_t)fb_pitch * SCREEN_H) {
-            // Shelf draws on pages 0 and 1; the page RA showed last may be a third.
-            int last = (int)(game_page.yoffset / SCREEN_H);
-            fb_snapshot_restore_pages(&game_page, fb_mem, fb_len, last > 1 ? last + 1 : 2);
-        } else {
-            fb_snapshot_restore(&game_page, fb_mem, fb_len);
-        }
-        fb_var.yoffset = game_page.yoffset;
-    } else {
-        int shown = !fb_back;
-        if (shown) memcpy(fb_mem, fb_mem + (size_t)fb_pitch * SCREEN_H, (size_t)fb_pitch * SCREEN_H);
-        fb_var.yoffset = 0;
+    if (fb_pages > 1) {
+        pthread_mutex_lock(&flip_lock);
+        flip_quit = 1;
+        pthread_cond_broadcast(&flip_cond);
+        pthread_mutex_unlock(&flip_lock);
+        pthread_join(flipper, NULL); // finishes a pending pan first
     }
-    ioctl(fb, FBIOPAN_DISPLAY, &fb_var);
-    fb_snapshot_free(&game_page);
+    // Leave the last frame on page 0 for whatever runs next.
+    if (fb_pages > 1 && !fb_back)
+        memcpy(fb_mem, fb_mem + (size_t)fb_pitch * SCREEN_H, (size_t)fb_pitch * SCREEN_H);
+    if (fb_pages > 1) fb_pan(0);
     munmap(fb_mem, fb_len);
     fb_mem = NULL;
     close(fb);
     fb = -1;
 }
 
-static Button held = BTN_NONE;
-static double held_next;
-#define REPEAT_DELAY 0.28
-#define REPEAT_RATE 0.075
-
-// UI click: the active Onion theme's change.wav (what MainUI plays), else Onion's default.
-// Audio goes through Onion's audioserver via libpadsp.so, preloaded by launch.sh.
-// SDL 1.2 keeps writing silence while paused, which keeps the audioserver busy too, so
-// the device is closed once a click has drained and reopened for the next one.
-static Uint8 *click;
-static Uint32 click_len, click_pos;
-static int audio_ok, audio_open;
-static SDL_AudioSpec audio_want, audio_got;
-static double audio_close_at;
-#define AUDIO_LINGER 2.0 // seconds open after a click: rapid scrolling doesn't reopen it
-
-static void audio_cb(void *ud, Uint8 *out, int len)
+// The Miyoo panel is mounted upside down. Rotate only presentation, not input or the shared
+// canvas. Respect the row pitch rather than assuming packed rows.
+static void rotate_into(uint32_t *dst, int dpitch, const Image *frame)
 {
-    (void)ud;
-    memset(out, 0, len);
-    if (click_pos >= click_len) return;
-    Uint32 n = click_len - click_pos < (Uint32)len ? click_len - click_pos : (Uint32)len;
-    memcpy(out, click + click_pos, n);
-    click_pos += n;
-}
-
-static int theme_sound(char *out, size_t n)
-{
-    FILE *f = fopen("/appconfigs/system.json", "rb");
-    if (!f) return -1;
-    char buf[4096];
-    size_t len = fread(buf, 1, sizeof buf - 1, f);
-    fclose(f);
-    buf[len] = 0;
-    cJSON *j = cJSON_Parse(buf);
-    const char *theme = cJSON_GetStringValue(cJSON_GetObjectItem(j, "theme"));
-    int r = theme ? (snprintf(out, n, "%s/sound/change.wav", theme), 0) : -1;
-    cJSON_Delete(j);
-    return r;
-}
-
-// Opens the device in the format the click was converted to. Returns 0 on success.
-static int audio_reopen(void)
-{
-    SDL_AudioSpec got;
-    if (SDL_OpenAudio(&audio_want, &got)) return -1;
-    if (got.format != audio_got.format || got.channels != audio_got.channels || got.freq != audio_got.freq) {
-        SDL_CloseAudio();
-        return -1;
+    for (int y = 0; y < frame->h; y++) {
+        uint32_t *row = dst + (size_t)y * dpitch;
+        const uint32_t *src = frame->px + (size_t)(frame->h - 1 - y) * frame->w;
+        for (int x = 0; x < frame->w; x++) row[x] = src[frame->w - 1 - x];
     }
-    audio_open = 1;
+}
+
+// What each page was last given, so a game frame only repaints the border when the game's
+// rectangle changes (the usual case is the same rect every frame).
+static ScaleRect page_rect[2];
+static int page_rect_set[2];
+
+void platform_present(const Image *frame)
+{
+    uint32_t *page = fb_page();
+    if (!page) return;
+    flip_wait();
+    rotate_into(page, fb_dpitch, frame);
+    page_rect_set[fb_back] = 0; // a whole-page draw: the game's border has to be repainted
+    flip_request();
+}
+
+void platform_present_game(const uint32_t *px, int w, int h, int pitch, float aspect, ScaleMode mode)
+{
+    uint32_t *page = fb_page();
+    if (!page) return;
+    ScaleRect r = scale_rect(w, h, aspect, SCREEN_W, SCREEN_H, mode);
+    flip_wait();
+    if (!page_rect_set[fb_back] || memcmp(&page_rect[fb_back], &r, sizeof r)) {
+        scale_clear_outside(page, fb_dpitch, SCREEN_W, SCREEN_H, r, 0xff000000, 1);
+        page_rect[fb_back] = r;
+        page_rect_set[fb_back] = 1;
+    }
+    if (scale_blit(page, fb_dpitch, SCREEN_W, SCREEN_H, px, w, h, pitch, r, mode, 1)) {
+        page_black(page);
+        page_rect_set[fb_back] = 0;
+    }
+    flip_request();
+}
+
+int platform_vsync_paced(void) { return vsync_paced; }
+
+/* ---------- console ---------- */
+
+// The kernel console would draw its text over Shelf; graphics mode stops it. tty1 is the
+// fallback when tty0 is not there (the device's console has moved between the two).
+static int tty_fd = -1;
+
+static void console_mode(int mode)
+{
+    if (tty_fd >= 0) ioctl(tty_fd, KDSETMODE, mode);
+}
+
+static void console_graphics(void)
+{
+    static const char *const TTY[] = {"/dev/tty0", "/dev/tty1"};
+    for (int i = 0; i < 2 && tty_fd < 0; i++) {
+        int fd = open(TTY[i], O_RDWR);
+        if (fd < 0) continue;
+        if (ioctl(fd, KDSETMODE, KD_GRAPHICS)) {
+            close(fd);
+            continue;
+        }
+        tty_fd = fd;
+    }
+    if (tty_fd < 0) fprintf(stderr, "shelf: no console to put in graphics mode\n");
+}
+
+static void console_quit(void)
+{
+    if (tty_fd < 0) return;
+    console_mode(KD_TEXT);
+    close(tty_fd);
+    tty_fd = -1;
+}
+
+/* ---------- input ---------- */
+
+#define INPUT_MAX 8
+static int in_fd[INPUT_MAX];
+static int in_n;
+
+// The panel's keys are the PC ones (docs/hardware.md); POWER and the volume keys come from
+// a second device on the Mini Plus.
+static const struct {
+    unsigned short code;
+    Button button;
+} KEYMAP[] = {
+    {KEY_UP, BTN_UP},        {KEY_DOWN, BTN_DOWN},
+    {KEY_LEFT, BTN_LEFT},    {KEY_RIGHT, BTN_RIGHT},
+    {KEY_SPACE, BTN_A},      {KEY_LEFTCTRL, BTN_B},
+    {KEY_LEFTSHIFT, BTN_X},  {KEY_LEFTALT, BTN_Y},
+    {KEY_E, BTN_L},          {KEY_T, BTN_R},
+    {KEY_TAB, BTN_L2},       {KEY_BACKSPACE, BTN_R2},
+    {KEY_ENTER, BTN_START},  {KEY_RIGHTCTRL, BTN_SELECT},
+    {KEY_ESC, BTN_MENU},
+    {KEY_POWER, BTN_POWER},
+    {KEY_VOLUMEUP, BTN_VOLUME}, {KEY_VOLUMEDOWN, BTN_VOLUME},
+};
+
+static Button map_code(unsigned short code)
+{
+    for (size_t i = 0; i < sizeof KEYMAP / sizeof *KEYMAP; i++)
+        if (KEYMAP[i].code == code) return KEYMAP[i].button;
+    return BTN_NONE;
+}
+
+// Does this device report any of the panel's keys? (POWER and volume are on their own
+// device, and so is anything else the kernel exposes.)
+static int has_panel_keys(int fd)
+{
+    unsigned long bits[(KEY_CNT + 8 * sizeof(long) - 1) / (8 * sizeof(long))] = {0};
+    if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof bits), bits) < 0) return 0;
+    for (size_t i = 0; i < sizeof KEYMAP / sizeof *KEYMAP; i++) {
+        unsigned long code = KEYMAP[i].code;
+        if (bits[code / (8 * sizeof(long))] & (1ul << (code % (8 * sizeof(long))))) return 1;
+    }
     return 0;
 }
 
-static void audio_init(void)
+static void input_open(void)
 {
-    if (getenv("SHELF_MUTE") || SDL_InitSubSystem(SDL_INIT_AUDIO)) return;
-    char themed[512];
-    const char *paths[] = {themed, "/mnt/SDCARD/miyoo/app/sound/change.wav",
-                           "/customer/app/sound/change.wav"};
-    if (theme_sound(themed, sizeof themed)) paths[0] = paths[1];
-    SDL_AudioSpec wav;
-    Uint8 *buf = NULL;
-    Uint32 len = 0;
-    for (size_t i = 0; i < sizeof paths / sizeof *paths && !buf; i++)
-        if (!SDL_LoadWAV(paths[i], &wav, &buf, &len)) buf = NULL;
-    if (!buf) { fprintf(stderr, "shelf: no click sound\n"); return; }
-    audio_want = wav;
-    audio_want.samples = 512; // ~12 ms at 44.1 kHz: the click lands with the frame
-    audio_want.callback = audio_cb;
-    audio_want.userdata = NULL;
-    if (SDL_OpenAudio(&audio_want, &audio_got)) { SDL_FreeWAV(buf); return; }
-    SDL_AudioCVT cvt;
-    if (SDL_BuildAudioCVT(&cvt, wav.format, wav.channels, wav.freq, audio_got.format, audio_got.channels,
-                          audio_got.freq) < 0) {
-        SDL_CloseAudio(); SDL_FreeWAV(buf); return;
-    }
-    cvt.len = (int)len;
-    cvt.buf = malloc((size_t)len * (cvt.len_mult > 0 ? cvt.len_mult : 1));
-    if (!cvt.buf) { SDL_CloseAudio(); SDL_FreeWAV(buf); return; }
-    memcpy(cvt.buf, buf, len);
-    SDL_FreeWAV(buf);
-    if (cvt.needed) SDL_ConvertAudio(&cvt);
-    click = cvt.buf;
-    click_len = cvt.needed ? (Uint32)cvt.len_cvt : len;
-    click_pos = click_len;
-    audio_ok = 1;
-    SDL_CloseAudio(); // silent until the first click
-}
-
-void platform_click(void)
-{
-    if (!audio_ok) return;
-    if (!audio_open && audio_reopen()) return;
-    SDL_LockAudio();
-    click_pos = 0; // restart: rapid scrolling retriggers rather than queueing
-    SDL_UnlockAudio();
-    SDL_PauseAudio(0);
-    audio_close_at = platform_now() + AUDIO_LINGER;
-}
-
-// Closes the device once the last click has played and lingered.
-static void audio_idle(double now)
-{
-    if (!audio_open || now < audio_close_at) return;
-    SDL_LockAudio();
-    int drained = click_pos >= click_len;
-    SDL_UnlockAudio();
-    if (!drained) { audio_close_at = now + .1; return; }
-    SDL_CloseAudio();
-    audio_open = 0;
-}
-
-/* ---------- waiting for input ---------- */
-
-// SDL 1.2 reads the keys from the console tty (fbcon keyboard). Waiting polls that same
-// descriptor without reading it, so SDL still gets every byte; a pipe carries wakeups
-// from background threads.
-static int tty_fd = -1, wake_pipe[2] = {-1, -1};
-
-static int find_tty_fd(void)
-{
-    DIR *d = opendir("/proc/self/fd");
-    if (!d) return -1;
-    int found = -1;
-    for (struct dirent *e; found < 0 && (e = readdir(d));) {
-        char link[64], target[64];
-        snprintf(link, sizeof link, "/proc/self/fd/%s", e->d_name);
-        ssize_t n = readlink(link, target, sizeof target - 1);
-        if (n <= 0) continue;
-        target[n] = 0;
-        if (!strncmp(target, "/dev/tty", 8) && strcmp(target, "/dev/tty")) found = atoi(e->d_name);
+    DIR *d = opendir("/dev/input");
+    if (!d) return;
+    for (struct dirent *e; in_n < INPUT_MAX && (e = readdir(d));) {
+        char path[64];
+        if (strncmp(e->d_name, "event", 5)) continue;
+        snprintf(path, sizeof path, "/dev/input/%s", e->d_name);
+        int fd = open(path, O_RDONLY | O_NONBLOCK);
+        // Grab it so the kernel console and anything else behind us never see these keys.
+        if (fd < 0 || !has_panel_keys(fd) || ioctl(fd, EVIOCGRAB, 1)) {
+            if (fd >= 0) close(fd);
+            continue;
+        }
+        in_fd[in_n++] = fd;
     }
     closedir(d);
-    return found;
+    if (!in_n) fprintf(stderr, "shelf: no input device with the panel's keys\n");
 }
 
-static void wait_init(void)
+static void input_close(void)
 {
-    tty_fd = input_fd >= 0 ? input_fd : find_tty_fd();
-    if (pipe(wake_pipe)) wake_pipe[0] = wake_pipe[1] = -1;
-    for (int i = 0; i < 2; i++)
-        if (wake_pipe[i] >= 0) fcntl(wake_pipe[i], F_SETFL, fcntl(wake_pipe[i], F_GETFL) | O_NONBLOCK);
-    if (tty_fd < 0) fprintf(stderr, "shelf: no input tty to wait on; idling in 10 ms steps\n");
+    for (int i = 0; i < in_n; i++) {
+        ioctl(in_fd[i], EVIOCGRAB, 0);
+        close(in_fd[i]);
+    }
+    in_n = 0;
 }
 
-static void wait_quit(void)
+// Buttons held right now, for gameplay input.
+static unsigned held_mask;
+
+// D-pad auto-repeat: the kernel's own repeat (value 2) is ignored so the timing is ours.
+static Button repeat_button = BTN_NONE;
+static double repeat_next;
+#define REPEAT_DELAY 0.28
+#define REPEAT_RATE 0.075
+
+// POWER is a tap (standby) unless it is held: then it is a power-off, sent once.
+#define POWER_HOLD 2.0
+static int power_down, power_off_sent;
+static double power_down_at;
+
+// Decoded events wait here for platform_poll; one read can produce several.
+#define QUEUE_LEN 16
+static Button queue[QUEUE_LEN];
+static int q_head, q_tail;
+
+static void queue_push(Button b)
 {
-    int fds[2] = {wake_pipe[0], wake_pipe[1]};
-    wake_pipe[0] = wake_pipe[1] = -1;
-    for (int i = 0; i < 2; i++) if (fds[i] >= 0) close(fds[i]);
-    tty_fd = -1;
+    int next = (q_head + 1) % QUEUE_LEN;
+    if (next == q_tail) return; // full: input outran the frame loop, drop the oldest news
+    queue[q_head] = b;
+    q_head = next;
 }
+
+static Button queue_pop(void)
+{
+    if (q_head == q_tail) return BTN_NONE;
+    Button b = queue[q_tail];
+    q_tail = (q_tail + 1) % QUEUE_LEN;
+    return b;
+}
+
+// The hardware keys move the volume themselves; the UI is only told to remember it.
+static void volume_step(int delta)
+{
+    int level = platform_volume() + delta;
+    if (level < 0) level = 0;
+    if (level > VOLUME_MAX) level = VOLUME_MAX;
+    platform_set_volume(level);
+}
+
+static int is_dpad(Button b) { return b >= BTN_UP && b <= BTN_RIGHT; }
+
+static void key_event(unsigned short code, int value)
+{
+    Button b = map_code(code);
+    if (b == BTN_NONE) return;
+    if (value == 2) return; // kernel autorepeat
+    if (value == 0) held_mask &= ~(1u << b);
+    else held_mask |= 1u << b;
+
+    if (b == BTN_POWER) {
+        if (value == 1) {
+            power_down = 1;
+            power_down_at = platform_now();
+            power_off_sent = 0;
+        } else {
+            power_down = 0;
+            if (!power_off_sent) queue_push(BTN_POWER); // a long hold already powered off
+        }
+    } else if (b == BTN_VOLUME) {
+        if (value == 1) {
+            volume_step(code == KEY_VOLUMEUP ? 1 : -1);
+            queue_push(BTN_VOLUME);
+        }
+    } else if (value == 0) {
+        if (b == repeat_button) repeat_button = BTN_NONE;
+    } else {
+        if (is_dpad(b)) {
+            repeat_button = b;
+            repeat_next = platform_now() + REPEAT_DELAY;
+        }
+        queue_push(b);
+    }
+}
+
+static void input_read(void)
+{
+    struct input_event buf[32];
+    for (int i = 0; i < in_n; i++) {
+        for (;;) {
+            ssize_t n = read(in_fd[i], buf, sizeof buf);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) break;
+            for (ssize_t j = 0; j < n / (ssize_t)sizeof buf[0]; j++)
+                if (buf[j].type == EV_KEY) key_event(buf[j].code, buf[j].value);
+        }
+    }
+}
+
+unsigned platform_held(void) { return held_mask; }
+
+Button platform_poll(void)
+{
+    if (q_head == q_tail) input_read();
+    Button b = queue_pop();
+    if (b != BTN_NONE) return b;
+    double now = platform_now();
+    if (power_down && !power_off_sent && now - power_down_at >= POWER_HOLD) {
+        power_off_sent = 1;
+        return BTN_POWER_OFF; // once, while still held
+    }
+    if (repeat_button != BTN_NONE && now >= repeat_next) {
+        repeat_next += REPEAT_RATE;
+        return repeat_button;
+    }
+    return BTN_NONE;
+}
+
+/* ---------- time ---------- */
+
+double platform_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+void platform_sleep_until(double t)
+{
+    double d = t - platform_now();
+    if (d <= 0) return;
+    struct timespec ts = {(time_t)d, (long)((d - (double)(time_t)d) * 1e9)};
+    while (nanosleep(&ts, &ts) && errno == EINTR) {}
+}
+
+/* ---------- waiting ---------- */
+
+// Background threads (the icon loader) end a wait through this pipe.
+static int wake_pipe[2] = {-1, -1};
 
 void platform_wake(void)
 {
@@ -308,211 +499,52 @@ void platform_wake(void)
     if (fd >= 0 && write(fd, "w", 1) < 0) {} // full pipe: a wakeup is pending anyway
 }
 
-static void overlay_continue(int sig)
+void platform_wait(double until)
 {
-    overlay_resumed = 1;
-    platform_wake();
+    if (q_head != q_tail) return; // platform_poll has events to hand out first
+    double now = platform_now();
+    if (repeat_button != BTN_NONE && repeat_next < until) until = repeat_next;
+    if (power_down && !power_off_sent && power_down_at + POWER_HOLD < until)
+        until = power_down_at + POWER_HOLD;
+    if (until <= now) return;
+
+    struct pollfd fds[1 + INPUT_MAX];
+    int n = 0;
+    fds[n++] = (struct pollfd){wake_pipe[0], POLLIN, 0}; // -1 when there is no pipe: ignored
+    for (int i = 0; i < in_n; i++) fds[n++] = (struct pollfd){in_fd[i], POLLIN, 0};
+    int ms = (int)ceil((until - now) * 1000); // round up: waking early would spin
+    if (poll(fds, (nfds_t)n, ms) <= 0) return;
+    if (fds[0].revents & POLLIN) {
+        char drain[64];
+        while (read(wake_pipe[0], drain, sizeof drain) > 0) {}
+    }
+    // Input readiness is left to platform_poll, which reads and decodes it.
 }
 
-int platform_init(int overlay)
+/* ---------- lifetime ---------- */
+
+int platform_init(void)
 {
-    if (overlay) {
-        input_fd = open("/dev/input/event0", O_RDONLY | O_NONBLOCK);
-        if (input_fd < 0) { perror("overlay input"); return -1; }
-        fb_init(1);
-        if (fb < 0) { close(input_fd); input_fd = -1; return -1; }
-        wait_init();
-        overlay_resumed = 0;
-        previous_cont = signal(SIGCONT, overlay_continue);
-        return 0;
+    if (fb_init()) {
+        fprintf(stderr, "shelf: /dev/fb0 unusable\n");
+        return -1;
     }
-    if (SDL_Init(SDL_INIT_VIDEO)) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return -1; }
-    SDL_ShowCursor(SDL_DISABLE);
-    video = SDL_SetVideoMode(SCREEN_W, SCREEN_H, 32, SDL_HWSURFACE);
-    if (!video) { fprintf(stderr, "SDL_SetVideoMode: %s\n", SDL_GetError()); return -1; }
-    fb_init(0);
-    audio_init();
-    wait_init();
+    console_graphics();
+    if (pipe(wake_pipe)) wake_pipe[0] = wake_pipe[1] = -1;
+    for (int i = 0; i < 2; i++)
+        if (wake_pipe[i] >= 0) fcntl(wake_pipe[i], F_SETFL, fcntl(wake_pipe[i], F_GETFL) | O_NONBLOCK);
+    input_open();
     return 0;
 }
 
 void platform_quit(void)
 {
-    if (audio_open) SDL_CloseAudio();
-    audio_open = audio_ok = 0;
-    free(click);
-    click = NULL;
-    wait_quit();
+    input_close();
+    for (int i = 0; i < 2; i++)
+        if (wake_pipe[i] >= 0) {
+            close(wake_pipe[i]);
+            wake_pipe[i] = -1;
+        }
     fb_quit();
-    fb_snapshot_free(&grabbed);
-    if (input_fd >= 0) {
-        if (previous_cont != SIG_ERR) signal(SIGCONT, previous_cont);
-        close(input_fd); input_fd = -1;
-    } else SDL_Quit();
-}
-
-static Button map_key(SDLKey k)
-{
-    switch (k) {
-    case SDLK_UP: return BTN_UP;
-    case SDLK_DOWN: return BTN_DOWN;
-    case SDLK_LEFT: return BTN_LEFT;
-    case SDLK_RIGHT: return BTN_RIGHT;
-    case SDLK_SPACE: return BTN_A;
-    case SDLK_LCTRL: return BTN_B;
-    case SDLK_LSHIFT: return BTN_X;
-    case SDLK_LALT: return BTN_Y;
-    case SDLK_e: return BTN_L;
-    case SDLK_t: return BTN_R;
-    case SDLK_RETURN: return BTN_START;
-    case SDLK_RCTRL: return BTN_SELECT;
-    case SDLK_ESCAPE: return BTN_MENU;
-    default: return BTN_NONE;
-    }
-}
-
-static int is_dpad(Button b) { return b >= BTN_UP && b <= BTN_RIGHT; }
-
-Button platform_poll(void)
-{
-    if (input_fd >= 0 && overlay_resumed) {
-        overlay_resumed = 0;
-        flip_wait();
-        struct fb_var_screeninfo current;
-        if (!ioctl(fb, FBIOGET_VSCREENINFO, &current))
-            fb_back = current.yoffset >= SCREEN_H ? 0 : 1;
-        return BTN_REDRAW; // keymon saved/cleared/restored the display during sleep
-    }
-    // Each evdev reader has its own queue. Keymon keeps power/shortcut ownership;
-    // overlay input never grabs the device or changes RetroArch's console state.
-    struct input_event raw;
-    while (input_fd >= 0 && read(input_fd, &raw, sizeof raw) == sizeof raw) {
-        if (raw.type != EV_KEY) continue;
-        Button b = evdev_button(raw.code);
-        if (raw.value == 1) {
-            if (is_dpad(b)) { held = b; held_next = platform_now() + REPEAT_DELAY; }
-            if (b != BTN_NONE) return b;
-        }
-        if (raw.value == 0 && b == held) held = BTN_NONE;
-    }
-    SDL_Event e;
-    while (input_fd < 0 && SDL_PollEvent(&e)) {
-        if (e.type == SDL_QUIT) return BTN_QUIT;
-        if (e.type == SDL_KEYDOWN) {
-            Button b = map_key(e.key.keysym.sym);
-            if (is_dpad(b)) { held = b; held_next = platform_now() + REPEAT_DELAY; }
-            if (b != BTN_NONE) return b;
-        }
-        if (e.type == SDL_KEYUP && map_key(e.key.keysym.sym) == held) held = BTN_NONE;
-    }
-    if (held != BTN_NONE && platform_now() >= held_next) {
-        held_next += REPEAT_RATE;
-        return held;
-    }
-    return BTN_NONE;
-}
-
-// The Miyoo panel is mounted upside down. Rotate only presentation, not input
-// or the shared canvas. Respect the row pitch rather than assuming packed rows.
-static void rotate_into(unsigned char *pixels, int pitch, const Image *frame)
-{
-    for (int y = 0; y < frame->h; y++) {
-        uint32_t *dst = (uint32_t *)(pixels + y * pitch);
-        const uint32_t *src = frame->px + (frame->h - 1 - y) * frame->w;
-        for (int x = 0; x < frame->w; x++)
-            dst[x] = src[frame->w - 1 - x];
-    }
-}
-
-void platform_present(const Image *frame)
-{
-    if (fb >= 0) {
-        flip_wait();
-        rotate_into(fb_mem + (size_t)fb_pitch * SCREEN_H * fb_back, fb_pitch, frame);
-        pthread_mutex_lock(&flip_lock);
-        fb_var.yoffset = SCREEN_H * fb_back;
-        flip_pending = 1;
-        pthread_cond_signal(&flip_cond);
-        pthread_mutex_unlock(&flip_lock);
-        fb_back = !fb_back;
-        return;
-    }
-    if (SDL_MUSTLOCK(video) && SDL_LockSurface(video) < 0) return;
-    rotate_into(video->pixels, video->pitch, frame);
-    if (SDL_MUSTLOCK(video)) SDL_UnlockSurface(video);
-    SDL_Flip(video);
-}
-
-int platform_grab(Image *out)
-{
-    struct fb_var_screeninfo var;
-    struct fb_fix_screeninfo fix;
-    int fd = open("/dev/fb0", O_RDONLY);
-    if (fd < 0) return -1;
-    int rc = -1;
-    if (!ioctl(fd, FBIOGET_VSCREENINFO, &var) && !ioctl(fd, FBIOGET_FSCREENINFO, &fix) &&
-        var.xres == SCREEN_W && var.yres == SCREEN_H && var.bits_per_pixel == 32 &&
-        (size_t)fix.line_length * (var.yoffset + SCREEN_H) <= fix.smem_len) {
-        unsigned char *mem = mmap(NULL, fix.smem_len, PROT_READ, MAP_SHARED, fd, 0);
-        if (mem != MAP_FAILED) {
-            // Read the visible page from video memory once; fb_init reuses the copy.
-            fb_snapshot_free(&grabbed);
-            const unsigned char *page = mem + (size_t)fix.line_length * var.yoffset;
-            if (!fb_snapshot_take(&grabbed, mem, fix.smem_len, fix.line_length, SCREEN_H, var.yoffset))
-                page = grabbed.pixels;
-            // The visible page, turned the right way up (the panel is mounted rotated).
-            for (int y = 0; y < SCREEN_H; y++) {
-                const uint32_t *src = (const uint32_t *)(page + (size_t)(SCREEN_H - 1 - y) * fix.line_length);
-                uint32_t *dst = out->px + y * SCREEN_W;
-                for (int x = 0; x < SCREEN_W; x++) dst[x] = src[SCREEN_W - 1 - x] | 0xff000000u;
-            }
-            munmap(mem, fix.smem_len);
-            rc = 0;
-        }
-    }
-    close(fd);
-    return rc;
-}
-
-void platform_keep_last_frame(void) { fb_snapshot_free(&game_page); }
-
-int platform_vsync_paced(void) { return fb >= 0; }
-
-double platform_now(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec + ts.tv_nsec / 1e9;
-}
-
-void platform_sleep_until(double t)
-{
-    double d = t - platform_now();
-    if (d <= 0) return;
-    struct timespec ts = {(time_t)d, (long)((d - (time_t)d) * 1e9)};
-    nanosleep(&ts, NULL);
-}
-
-void platform_wait(double until)
-{
-    double now = platform_now();
-    audio_idle(now);
-    if (audio_open && audio_close_at < until) until = audio_close_at;
-    if (held != BTN_NONE && held_next < until) until = held_next;
-    if (until <= now) return;
-    if (wake_pipe[0] < 0) { platform_sleep_until(until); return; }
-    struct pollfd fds[2] = {{wake_pipe[0], POLLIN, 0}, {tty_fd, POLLIN, 0}};
-    int nfds = tty_fd >= 0 ? 2 : 1;
-    // Bytes SDL left unread would keep the tty readable; don't spin on them.
-    if (tty_fd >= 0 && poll(fds + 1, 1, 0) > 0) {
-        platform_sleep_until(now + .005 < until ? now + .005 : until);
-        return;
-    }
-    double step = tty_fd >= 0 ? until - now : .01; // without the tty, check input every 10 ms
-    if (step > until - now) step = until - now;
-    int ms = (int)(step * 1000) + 1;
-    if (poll(fds, nfds, ms) > 0 && (fds[0].revents & POLLIN)) {
-        char drain[64];
-        while (read(wake_pipe[0], drain, sizeof drain) > 0) {}
-    }
+    console_quit();
 }

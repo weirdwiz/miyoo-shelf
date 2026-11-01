@@ -1,128 +1,129 @@
 # Shelf
 
-A DSi/3DS-style home screen for the Miyoo Mini and Mini Plus, running on top of
-[Onion OS](https://github.com/OnionUI/Onion). Your games as square icons; press A to play.
+Shelf turns the SD card of a Miyoo Mini or Mini Plus into a standalone console. It plays
+Game Boy, Game Boy Color and Game Boy Advance games, and nothing else. There is no Onion
+and no RetroArch: the stock firmware runs the card's `.tmp_update/updater` at boot instead
+of its own UI, so the card holds the whole system — games, saves, box art and settings.
+Remove the `.tmp_update` folder and the device boots the stock firmware again.
 
-| Home | Folder | Dark mode |
+Games run inside Shelf, through libretro cores cross-built for the device at pinned
+commits: gambatte for GB and GBC, mGBA for GBA (`make cores`).
+
+[Watch the demo, recorded in the test VM](docs/shelf-demo.mp4): home, a game, the card
+switcher, the library and options.
+
+| Home | Folders | Folder |
 |---|---|---|
-| ![](docs/screenshots/1-home.png) | ![](docs/screenshots/3-folder.png) | ![](docs/screenshots/5-dark.png) |
+| ![](docs/screenshots/1-home.png) | ![](docs/screenshots/2-library.png) | ![](docs/screenshots/3-folder.png) |
 
-| Game switcher (MENU in a game) | Switching |
-|---|---|
-| ![](docs/screenshots/7-switcher.png) | ![](docs/screenshots/8-switcher-next.png) |
+| Dark mode | In-game menu (MENU) | Options (START) |
+|---|---|---|
+| ![](docs/screenshots/5-dark.png) | ![](docs/screenshots/7-ingame-menu.png) | ![](docs/screenshots/8-options.png) |
 
-## What it does
+## Using it
 
-- **Home row:** recent games, then folders for All games, Favorites and each console, with
-  springy DS-style scrolling.
-- **Folders:** a grid beside a detail panel showing the selected game's art, play time
-  (from Onion's play activity), last played and favorite. Y cycles the sort.
-- **Plays through Onion:** games launch via Onion's runtime, so saves, play time and the
-  game switcher work as usual, and every game returns to Shelf.
-- **Replaces Onion's menu (optional):** boot straight into Shelf. Hold SELECT at boot, or
-  use Options, to get stock Onion back. No Onion files are modified.
-- **Experimental game switcher:** the custom overlay is **not stable** across game
-  switching and sleep/wake. Keep stock Onion GameSwitcher enabled (see Install).
-  When experimenting with the custom overlay, MENU opens Shelf's switcher. The
-  paused game shrinks into a card among your recent games, each showing where you left it.
-  A resumes or switches, B goes to Shelf. On legacy RetroArch, switching/exiting writes
-  the normal exit autosave; resuming keeps the same live game.
-- **Status bar, sound, dark mode:** clock, Wi-Fi and battery; the Onion theme's click sound;
-  a dark palette under START → Options.
-- Uses your existing box art and Onion's recents and favorites files.
-
-Status: early; the game switcher is new and still being tested on the device. MENU in
-Shelf opens Onion's menu.
+- **Home** is one row: recent games first, then the folders. L1 jumps to the recents, R1 to
+  the folders.
+- **Folders** (All games, Favorites, GB, GBC, GBA) are a grid beside a detail panel with the
+  selected game's art, play time, sessions, last played date and favorite state. Y cycles the
+  sort (A–Z, recent first, favorites first); X toggles the favorite.
+- **A plays.** A game resumes exactly where you left it: leaving one writes a save state, and
+  starting it again loads that state.
+- **MENU** in a game opens the card switcher. The paused game shrinks into the row of recent
+  games, each card showing its screenshot. A resumes the selected card, A on another card
+  switches to that game, B goes back to Shelf, SELECT restarts (and asks first).
+- **POWER** sleeps and wakes. Holding it for two seconds saves everything and powers off;
+  Shelf also powers off after 30 minutes asleep. Options → Power off asks for a second press.
+- **Options** (START, or MENU outside a game): brightness, volume, screen scaling, dark mode,
+  power off. Changes are applied at once and saved to `.shelf/data/settings.json`.
+  Screen scaling is Sharp (sharp-bilinear fill), Smooth (bilinear fill) or Integer (whole
+  multiples, nearest neighbour).
+- The status bar shows the clock, battery level and charging; navigation plays a click.
 
 ## Controls
 
-D-pad moves · A play/open · B back · Y sort · L1/R1 jump · START options · MENU Onion's menu
+D-pad moves · A play/open · B back · X favorite · Y sort · L1/R1 first/last · START options ·
+MENU switcher in a game, options elsewhere · POWER sleep, hold to power off.
+
+## Card layout
+
+```
+Roms/GB/            *.gb *.gbc *.dmg *.sgb
+Roms/GBC/           *.gb *.gbc *.dmg *.sgb
+Roms/GBA/           *.gba
+Roms/<SYS>/Imgs/    <game name>.png box art, game name = ROM file name without extension
+Saves/<SYS>/        <game>.srm battery save (.rtc for clock games), <game>.state save state,
+                    <game>.png screenshot of the state
+BIOS/               optional gba_bios.bin; mGBA's built-in HLE BIOS works without one
+.shelf/             Shelf itself: bin, cores, fonts, sound, LICENSES and data/
+```
+
+Subfolders are scanned, extensions are case-insensitive, and MinUI-style system folder names
+such as `Roms/Game Boy Advance (GBA)` work too. Box art is also found in an `Imgs` folder
+beside the ROM. Shelf's own files are `.shelf/data/settings.json`, `recents.json`,
+`favorites.json`, `playtime.json` and `shelf.log`.
 
 ## Install
 
 ```sh
-make mm                            # build for the device (podman or docker)
-MM_HOST=<device-ip> make push      # copy to App/Shelf over SSH (enable SSH in Onion's Tweaks)
-MM_HOST=<device-ip> make switcher-off # retain stock switcher/keymon; custom overlay is unstable
-MM_HOST=<device-ip> make boot-on   # optional: boot into Shelf (make boot-off undoes it)
+make mm cores dist   # device binary, cores and the SD card image (podman or docker)
+make dist-zip        # build/shelf-<git describe>.zip with the same contents
 ```
 
-Without SSH, copy `build/mm/shelf`, `assets/app/*` and `assets/fonts/` to `App/Shelf/` on
-the SD card, then open **Apps → Shelf**.
-
-On **Onion 4.3.1-1**, stock keymon exits the game before opening GameSwitcher. `make push`
-uses Python 3.12+ to download checksum-pinned Onion sources, builds a minimal overlay
-handoff backport, and installs `App/Shelf/keymon-overlay`. Boot mode bind-mounts it without
-changing Onion's original file; `make boot-off` unmounts it and restarts stock keymon.
-`make switcher-off` persistently disables both custom switcher and keymon mounts while
-leaving Shelf's home hook intact; reboot and `make push` respect that choice. This is the
-recommended mode until switching, sleep/wake and real display ownership are validated.
-Newer Onion versions retain their own keymon. For offline installation, run `make keymon`
-and also copy `build/mm/keymon-overlay` and `assets/compat/LICENSE` (as
-`keymon-overlay-LICENSE`) to `App/Shelf/`.
-
-Legacy RetroArch 1.15 uses `PAUSE_TOGGLE` and has no acknowledged overlay autosave command.
-Shelf displays **Saves on exit**; keep RetroArch's `savestate_auto_save` enabled. It does
-not overwrite user state slots or force-kill an exit save. Overlay mode renders directly
-to fb0 and reads evdev without switching RetroArch's locked console. After saving,
-Shelf suspends RetroArch's renderer so it cannot overwrite the paused menu, and resumes
-the process before unpausing or exiting the game.
-
-For device trials, explicitly re-enable the overlay with
-`MM_HOST=<device-ip> tools/mm.sh 'sh /mnt/SDCARD/App/Shelf/boot.sh switcher-on'`.
-Use `make switcher-off` to restore stock behavior.
-
-For overlay development only, with a game already running, test pause/resume via:
-`MM_HOST=<device-ip> sh tools/test_device_overlay.sh` (after `make mm` and `make push`).
-This checks process state and sampled framebuffer memory, not the actual panel or full
-switch/sleep lifecycle; passing it does **not** establish that the overlay is safe.
-`MM_HOST=<device-ip> sh tools/test_device_switch_sleep.sh` additionally switches between
-Apotris and Lazarus and operates the real POWER button in-game and inside the overlay.
-Do not interrupt this test during sleep: the SSH processes are temporarily suspended.
-
-## Power / standby
-
-On the tested Mini Plus (Onion 4.3.1-1), short POWER stops foreground processes and
-selects the CPU's powersave governor, but `/sys/power/state` exposes no kernel suspend
-mode. This is standby, not power-off; it can still drain the battery. A sleep timer of
-**Never** leaves standby running indefinitely.
-
-For longer breaks, use Onion's **Apps → Tweaks → Button shortcuts → Power single press
-→ Shutdown**. This uses Onion's normal save/shutdown path; power on again to resume.
-Shelf does not change this preference during installation.
-
-To check process suspension and the CPU governor on-device (not temperature or battery
-consumption): `MM_HOST=<ip> tools/mm.sh '/tmp/shelf-device-probe standby $(pidof shelf)'`
-after copying `build/mm/device-probe` to `/tmp/shelf-device-probe`. The probe wakes the
-device after three seconds and refuses to run when single-press shutdown is enabled.
+Copy everything inside `build/dist/SDCARD/` to the root of a FAT32 microSD card and boot
+with it in the device. Nothing else on the card is touched; all Shelf needs is `.tmp_update/`
+and `.shelf/`. Its boot script restarts Shelf if it crashes and, after three crashes in a
+row that each lasted less than 30 seconds, starts the stock firmware's own UI so a broken
+build on the card cannot leave the device unusable. Games, saves and art folders already on
+the card keep working, since Shelf reads the plain folder layout above.
 
 ## Develop
 
-Needs SDL2 (`brew install sdl2`).
+Plain C with a software renderer. `make sim` builds the SDL2 simulator (`brew install sdl2`),
+`make run` starts it against the sample card in `fixture/`. Simulator keys are documented at
+the top of `src/platform_sdl2.c`: arrows, Z = A, X = B, A = X, S/Y = Y, Q/W = L1/R1,
+Tab = SELECT, O = START, M = MENU, P = POWER (tap sleeps, hold powers off), Esc closes.
 
 ```sh
-make run     # simulator against a sample SD card in fixture/
-make test    # library, UI cache and graphics tests
-make shots   # headless screenshots into docs/screenshots
+make test         # library, UI, loop, graphics and full play-session tests
+make test-player  # libretro host against a fake core (make test-player-asan for sanitizers)
+make test-updater # the boot script, on the host
+make shots        # regenerate docs/screenshots (macOS: uses sips)
 ```
 
-Simulator keys: arrows, `Z` = A, `X` = B, `S` = Y, `Q`/`W` = L1/R1, `O` = START, `M` = MENU.
+Nothing is validated on hardware by the build. Everything is tested in a full-system QEMU
+ARMv7 VM that stands in for the device — 640x480 two-page fb0, the Miyoo's key codes over
+virtio, POWER on gpio-keys, 9p card share:
 
-Everything is plain C with a software renderer: `src/ui.c` (screens), `src/library.c` (reads
-Onion's SD card), `src/icons.c` (art cache), `src/switcher.c` (game switcher: RetroArch,
-screenshots), `src/platform_*.c` (device vs simulator).
+```sh
+make vm-image vm-start   # build the image once, then boot headless
+make vm-selftest         # the device binary runs, fb0 pans to its second page, keys arrive
+make vm-test             # self-test, scaler, audio, hardware and cores, all in the VM
+make vm-test-cores       # cores plus pinned test ROMs against the device build
+make vm-stop
+```
 
-The switcher in the simulator: `SHELF_SWITCHER=overlay SHELF_FRAME=<picture of the paused
-game>` with the usual `SHELF_ROOT`/`SHELF_FONTS`.
+`tools/vm/README.md` covers the VM and its helpers (`ssh.sh`, `key.sh`, `shot.sh`,
+`pixel.py`), and what it does not emulate: no audio device, battery, backlight or GPIO, and
+an emulated CPU. `docs/hardware.md` lists what Shelf touches on the real device; the parts
+marked *unverified* there — battery percentage on the Mini Plus, power off, and the audio
+setup — have not been checked on hardware yet.
+
+Code: `src/main.c` orchestration, `ui.c` screens, `game.c` play session and in-game menu,
+`player.c` libretro host, `scale.c` game scaling, `library.c` card scan plus recents,
+favorites and play time, `icons.c` art cache, `platform_mm.c` the device (fb0, evdev, SDL 1.2
+audio, sysfs), `platform_sdl2.c` the simulator.
 
 ## Credits
 
-[Onion OS](https://github.com/OnionUI/Onion), [Allium](https://github.com/goweiwen/Allium)
-for the simulator-first idea, [stb](https://github.com/nothings/stb),
+[Allium](https://github.com/goweiwen/Allium) and MinUI for the folder layout and the
+simulator-first approach, [stb](https://github.com/nothings/stb),
 [cJSON](https://github.com/DaveGamble/cJSON) (MIT), M PLUS Rounded 1c (SIL OFL 1.1,
-`assets/fonts/OFL.txt`), sample box art and game
-snaps from [libretro-thumbnails](https://github.com/libretro-thumbnails).
+`assets/fonts/OFL.txt`), and sample box art from
+[libretro-thumbnails](https://github.com/libretro-thumbnails).
 
-MIT licensed (see `LICENSE`); bundled code and fonts keep their own licenses.
-The optional Onion keymon backport is GPL-3.0 (see `assets/compat/LICENSE`); its complete
-source is reproducibly prepared by `tools/prepare_keymon.py` plus `assets/compat/keymon-overlay.h`.
+Games are emulated by [gambatte](https://github.com/libretro/gambatte-libretro) (GPL-2.0)
+and [mGBA](https://github.com/libretro/mgba) (MPL-2.0). `build/dist` ships their license
+texts plus `VERSIONS` (the pinned commits) and `SOURCES.txt` in `.shelf/LICENSES`.
+
+Shelf is MIT licensed (see `LICENSE`); bundled code and fonts keep their own licenses.

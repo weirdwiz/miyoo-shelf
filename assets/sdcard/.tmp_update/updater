@@ -1,0 +1,67 @@
+#!/bin/sh
+# Shelf boot script. The stock firmware runs this instead of its own MainUI when
+# /mnt/SDCARD/.tmp_update/updater exists (see docs/hardware.md), and removing the
+# .tmp_update folder puts the stock firmware back.
+#
+# Runs Shelf from the card. Shelf exiting 0 means the user asked to power off; any other
+# exit status is a crash, so Shelf is restarted. Three crashes in a row that each lasted
+# less than SHELF_CRASH_WINDOW seconds give up and start the stock UI, so a broken build
+# on the card can never leave the device unusable.
+#
+# SHELF_SD, SHELF_POWEROFF, SHELF_STOCK_UI and SHELF_CRASH_WINDOW exist so tools/
+# test_updater.sh can run this on a host; they are not meant to be set on the device.
+SD=${SHELF_SD:-/mnt/SDCARD}
+SH=$SD/.shelf
+LOG=$SH/data/shelf.log
+POWEROFF=${SHELF_POWEROFF:-poweroff}
+STOCK_UI=${SHELF_STOCK_UI:-/customer/app/MainUI}
+CRASH_WINDOW=${SHELF_CRASH_WINDOW:-30}
+MAX_CRASHES=3
+LOG_MAX=262144 # 256 KiB
+
+# The vendor libmi_*.so libraries (audio, video, sys) live outside the card.
+export LD_LIBRARY_PATH=/lib:/config/lib:/customer/lib:"$SH/lib"
+
+# The stock audio daemon holds /dev/mi_ao, which Shelf drives itself. Absent on some
+# builds, which is fine.
+killall -9 audioserver audioserver.mod 2>/dev/null
+
+mkdir -p "$SH/data"
+if [ -f "$LOG" ] && [ "$(wc -c <"$LOG")" -gt "$LOG_MAX" ]; then
+	mv -f "$LOG" "$LOG.1"
+fi
+
+log() { echo "shelf: $*" >>"$LOG"; }
+
+cd "$SH" || exit 1
+
+crashes=0
+while :; do
+	log "start"
+	start=$(date +%s)
+	./bin/shelf >>"$LOG" 2>&1
+	status=$?
+	now=$(date +%s)
+	elapsed=$((now - start))
+
+	if [ "$status" -eq 0 ]; then
+		log "exit 0 after ${elapsed}s, powering off"
+		sync
+		exec "$POWEROFF"
+	fi
+
+	# A run long enough to be useful clears the streak; quick crashes add up.
+	if [ "$elapsed" -ge "$CRASH_WINDOW" ]; then
+		crashes=0
+	else
+		crashes=$((crashes + 1))
+	fi
+	log "exit $status after ${elapsed}s (crash $crashes of $MAX_CRASHES)"
+
+	if [ "$crashes" -ge "$MAX_CRASHES" ]; then
+		log "giving up, starting the stock UI"
+		sync
+		cd "$(dirname "$STOCK_UI")" || exit 1
+		exec "./$(basename "$STOCK_UI")"
+	fi
+done

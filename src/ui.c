@@ -72,6 +72,9 @@ static void spring_step(Spring *s, float dt, float k, float c)
 #define PULSE_FOR 6.f     // seconds of pulsing after the last button
 #define PULSE_PERIOD (6.2831853f / PULSE_RATE)
 
+// How long a home-screen message (ui_set_toast) stays up.
+#define TOAST_FOR 4.f
+
 enum { F_ALL, F_FAV, F_SYS };
 typedef struct {
     int kind, sys;
@@ -119,17 +122,26 @@ static struct {
     int sound;               // pending UI click
 
     int dark;                // palette index
+    Settings set;            // Options panel values; see ui_set_settings
     int options, osel;       // Options panel open, its selected row
-    int boot;                // Shelf is Onion's home screen (boot hook installed)
+    int oconfirm;            // "power off?" is waiting for a second A
     int action;              // pending UiAction
-    int battery, charging, wifi; // see ui_set_status
+    int battery, charging;   // see ui_set_status
+    char toast[128];         // message over the home screen, "" when none
+    float toast_t;           // seconds it has been up
 } S;
 
 // Options rows, top to bottom.
-enum { O_DARK, O_BOOT, O_ONION, O_COUNT };
+enum { O_BRIGHT, O_VOLUME, O_SCREEN, O_DARK, O_OFF, O_COUNT };
+static const char *const OPT_TITLE[O_COUNT] = {"Brightness", "Volume", "Screen", "Dark mode", "Power off"};
+static const char *const OPT_SUB[O_COUNT] = {
+    "Left / right adjusts", "Left / right adjusts", "How games fill the screen",
+    "Easier on the eyes at night", "Saves everything first",
+};
 
 static void tiles_free(void);
 static void status_free(void);
+static void panel_invalidate(void);
 // The game switcher view, at the end of this file.
 static int sw_on(void);
 static void sw_button(Button b);
@@ -180,6 +192,20 @@ static int add_folder(int kind, int sys, const char *label, uint32_t color)
     return 0;
 }
 
+// Re-derives each folder's games after a favorite changed.
+static void folders_refresh(void)
+{
+    for (int k = 0; k < S.nfolders; k++) {
+        Folder *f = &S.folders[k];
+        f->ngames = 0;
+        for (int i = 0; i < S.lib->ngames; i++) {
+            Game *g = &S.lib->games[i];
+            if (f->kind == F_ALL || (f->kind == F_FAV && g->fav) || (f->kind == F_SYS && g->sys == f->sys))
+                f->games[f->ngames++] = i;
+        }
+    }
+}
+
 static int build_bg(void)
 {
     S.bg = img_new(SCREEN_W, SCREEN_H);
@@ -211,8 +237,10 @@ int ui_init(Library *lib, const char *font_dir)
     if (bad) { ui_free(); return -1; } // ui_free undoes any part of this
 
     S.launching = -1;
-    S.battery = S.wifi = -1;
+    S.battery = -1;
     S.dark = P == &PALETTES[1];
+    settings_defaults(&S.set);
+    S.set.dark = S.dark;
     S.enter.x = S.enter.t = 1;
     for (int i = 0; i < home_count(); i++) S.hscale[i].x = S.hscale[i].t = 1;
     S.track.x = S.track.t = CENTER_X;
@@ -316,6 +344,24 @@ static void start_launch(int gi)
 
 static void ui_button_inner(Button b);
 
+// X in a folder: favorite the selected game, and show the new state in the detail panel.
+static void favorite_toggle(void)
+{
+    if (!S.nfg) return;
+    int gi = S.fgames[S.fsel];
+    if (lib_set_fav(S.lib, gi, !S.lib->games[gi].fav)) {
+        ui_set_toast("Couldn't save the favorites");
+        return;
+    }
+    folders_refresh();
+    panel_invalidate();
+    int folder = S.folder;
+    folder_open(folder); // the folder and its sort may now list other games
+    for (int k = 0; k < S.nfg; k++)
+        if (S.fgames[k] == gi) { folder_select(k); break; }
+    S.enter.x = 1; // the view itself didn't change, so don't replay the zoom
+}
+
 void ui_button(Button b)
 {
     S.redraw = 1;
@@ -354,6 +400,7 @@ void ui_set_dark(int dark)
 {
     P = &PALETTES[dark ? 1 : 0];
     S.dark = dark ? 1 : 0;
+    S.set.dark = S.dark;
     if (!S.bg) return; // before ui_init: build_bg picks the palette up
     Image *old = S.bg;
     if (build_bg()) S.bg = old; // out of memory: keep the old dots rather than none
@@ -364,38 +411,77 @@ void ui_set_dark(int dark)
 
 int ui_dark(void) { return S.dark; }
 
-void ui_set_boot(int on) { S.boot = on; }
-
-void ui_set_status(int battery, int charging, int wifi)
+void ui_set_settings(const Settings *s)
 {
-    if (S.battery != battery || S.charging != charging || S.wifi != wifi) S.redraw = 1;
+    if (!s) return;
+    S.set = *s;
+    if (s->dark != S.dark) ui_set_dark(s->dark);
+    S.redraw = 1;
+}
+
+Settings ui_settings(void)
+{
+    Settings s = S.set;
+    s.dark = S.dark;
+    return s;
+}
+
+void ui_set_toast(const char *text)
+{
+    snprintf(S.toast, sizeof S.toast, "%s", text ? text : "");
+    S.toast_t = 0;
+    S.redraw = 1;
+}
+
+void ui_set_status(int battery, int charging)
+{
+    if (S.battery != battery || S.charging != charging) S.redraw = 1;
     S.battery = battery;
     S.charging = charging;
-    S.wifi = wifi;
 }
+
+static int clamp_level(int v, int hi) { return v < 0 ? 0 : v > hi ? hi : v; }
 
 static void options_button(Button b)
 {
     if (b == BTN_UP && S.osel > 0) S.osel--;
     if (b == BTN_DOWN && S.osel < O_COUNT - 1) S.osel++;
-    if (b == BTN_B || b == BTN_START) S.options = 0;
-    int toggle = b == BTN_A || ((b == BTN_LEFT || b == BTN_RIGHT) && S.osel == O_DARK);
-    if (!toggle) return;
-    if (S.osel == O_DARK) {
-        ui_set_dark(!S.dark);
-        S.action = UI_THEME;
-    } else {
-        S.options = 0;
-        S.action = S.osel == O_ONION ? UI_EXIT : S.boot ? UI_BOOT_ONION : UI_BOOT_SHELF;
+    if (b == BTN_B || b == BTN_START || b == BTN_MENU) {
+        if (S.oconfirm) S.oconfirm = 0; // answers the power-off question first
+        else S.options = 0;
+        return;
     }
+    if (S.osel == O_OFF) { // never powers off on a single press
+        if (b != BTN_A) return;
+        if (!S.oconfirm) { S.oconfirm = 1; return; }
+        S.oconfirm = 0;
+        S.action = UI_POWER_OFF;
+        return;
+    }
+    int adjust = b == BTN_LEFT ? -1 : (b == BTN_RIGHT || b == BTN_A) ? 1 : 0;
+    if (!adjust) return;
+    switch (S.osel) {
+    case O_BRIGHT:
+        S.set.brightness = clamp_level(S.set.brightness + adjust, BRIGHTNESS_MAX);
+        break;
+    case O_VOLUME:
+        S.set.volume = clamp_level(S.set.volume + adjust, VOLUME_MAX);
+        break;
+    case O_SCREEN:
+        S.set.scale = (ScaleMode)((S.set.scale + adjust + SCALE_MODES) % SCALE_MODES);
+        break;
+    case O_DARK:
+        ui_set_dark(!S.dark);
+        break;
+    }
+    S.action = UI_SETTINGS;
 }
 
 static void ui_button_inner(Button b)
 {
     S.scene_dirty = 1;
     if (S.options) { options_button(b); return; }
-    if (b == BTN_MENU) { S.action = UI_EXIT; return; }
-    if (b == BTN_START) { S.options = 1; S.osel = 0; return; }
+    if (b == BTN_MENU || b == BTN_START) { S.options = 1; S.osel = 0; S.oconfirm = 0; return; }
     if (S.view == V_HOME) {
         int n = home_count();
         if (b == BTN_LEFT && S.sel > 0) home_select(S.sel - 1);
@@ -418,6 +504,7 @@ static void ui_button_inner(Button b)
         if (b == BTN_L) folder_select(0);
         if (b == BTN_R && S.nfg) folder_select(S.nfg - 1);
         if (b == BTN_Y) { S.sort = (S.sort + 1) % 3; int f = S.folder; folder_open(f); S.enter.x = 1; }
+        if (b == BTN_X) favorite_toggle();
         if (b == BTN_A && S.nfg) start_launch(S.fgames[S.fsel]);
         if (b == BTN_B) { S.view = V_HOME; S.enter.x = 0; S.enter.v = 0; }
     }
@@ -461,12 +548,18 @@ static void sw_prebuild(void);
 static int animating(void)
 {
     if (S.pulse < S.pulse_end && cursor_shown()) return 1;
+    if (S.toast[0]) return 1; // the message fades out on its own
     if (sw_on()) return sw_animating();
     return scene_moving() || spring_moving(&S.enter) || S.launching >= 0;
 }
 
 void ui_update(float dt)
 {
+    if (S.toast[0]) {
+        S.toast_t += dt;
+        if (S.toast_t > TOAST_FOR) S.toast[0] = 0;
+        S.redraw = 1; // including the frame that takes it away
+    }
     if (animating()) S.redraw = 1;
     if (S.pulse < S.pulse_end && cursor_shown()) {
         S.pulse += dt;
@@ -525,6 +618,22 @@ void ui_reset_home(void)
 }
 
 /* ---------- drawing ---------- */
+
+// A message over the home screen: a dark pill that fades in and out.
+static void draw_toast(Image *c)
+{
+    if (!S.toast[0]) return;
+    float t = S.toast_t, a = 1;
+    if (t < .12f) a = t / .12f;
+    else if (t > TOAST_FOR - .45f) a = (TOAST_FOR - t) / .45f;
+    if (a <= 0) return;
+    char text[128];
+    text_fit(S.body, S.toast, SCREEN_W - 120, text, sizeof text);
+    int tw = text_width(S.body, text), th = font_height(S.body) + 18;
+    float x = (SCREEN_W - tw - 36) / 2.f, y = SCREEN_H - FOOTER_H - th - 22;
+    gfx_fill_rrect(c, x, y, tw + 36, th, th / 2.f, argb((uint8_t)(a * 235), 22, 25, 33));
+    text_draw(c, S.body, text, (int)x + 18, (int)y + 8, argb((uint8_t)(a * 255), 255, 255, 255));
+}
 
 static uint32_t lerp_rgb(uint32_t a, uint32_t b, float t)
 {
@@ -752,20 +861,9 @@ static void draw_cursor(Image *c, float cx, float cy, float w, int base)
 }
 
 // Status glyphs are coverage masks, 4x4 supersampled once from a shape test.
-#define WIFI_W 23
-#define WIFI_H 17
 #define BOLT_W 9
 #define BOLT_H 13
-static uint8_t wifi_mask[4][WIFI_W * WIFI_H], bolt_mask[BOLT_W * BOLT_H];
-
-// Wi-Fi fan: part 0 is the dot, 1..3 the arcs, within 45° of vertical.
-static int in_wifi(float x, float y, int part)
-{
-    float dx = x - WIFI_W / 2.f, dy = WIFI_H - .5f - y, r = sqrtf(dx * dx + dy * dy);
-    if (dy < 0 || fabsf(dx) > dy + .5f) return 0;
-    static const float BAND[4][2] = {{0, 2.6f}, {5, 7.6f}, {10, 12.6f}, {15, 17.6f}};
-    return r >= BAND[part][0] && r < BAND[part][1];
-}
+static uint8_t bolt_mask[BOLT_W * BOLT_H];
 
 static int in_bolt(float x, float y)
 {
@@ -783,13 +881,6 @@ static void build_status_masks(void)
     static int built;
     if (built) return;
     built = 1;
-    for (int part = 0; part < 4; part++)
-        for (int y = 0; y < WIFI_H; y++)
-            for (int x = 0; x < WIFI_W; x++) {
-                int n = 0;
-                for (int s = 0; s < 16; s++) n += in_wifi(x + (s % 4 + .5f) / 4, y + (s / 4 + .5f) / 4, part);
-                wifi_mask[part][y * WIFI_W + x] = (uint8_t)(n * 255 / 16);
-            }
     for (int y = 0; y < BOLT_H; y++)
         for (int x = 0; x < BOLT_W; x++) {
             int n = 0;
@@ -798,8 +889,8 @@ static void build_status_masks(void)
         }
 }
 
-// Right-aligned at `right`; returns the left edge.
-static int draw_battery(Image *c, int right, int y)
+// Right-aligned at `right`.
+static void draw_battery(Image *c, int right, int y)
 {
     const int bw = 27, bh = 14;
     int x = right - bw - 3;
@@ -814,7 +905,6 @@ static int draw_battery(Image *c, int right, int y)
     snprintf(pct, sizeof pct, "%d%%", S.battery);
     int tx = x - (S.charging ? BOLT_W + 9 : 6) - text_width(S.small, pct);
     text_draw(c, S.small, pct, tx, y - 4, rgb(C_SUB));
-    return tx;
 }
 
 static void status_clock(char *buf, int n)
@@ -829,7 +919,7 @@ static void status_key(char *out, int n)
 {
     char clock[64];
     status_clock(clock, sizeof clock);
-    snprintf(out, n, "%s|%d|%d|%d|%p", clock, S.battery, S.charging, S.wifi, (const void *)P);
+    snprintf(out, n, "%s|%d|%d|%p", clock, S.battery, S.charging, (const void *)P);
 }
 
 static void draw_status_raw(Image *c)
@@ -838,15 +928,7 @@ static void draw_status_raw(Image *c)
     status_clock(buf, sizeof buf);
     text_draw(c, S.small, buf, 16, 7, rgb(C_SUB));
     build_status_masks();
-    int x = SCREEN_W - 16, y = 11;
-    if (S.battery >= 0) x = draw_battery(c, x, y) - 14;
-    if (S.wifi >= 0) { // bars lit up to the signal; all dim while not connected
-        for (int part = 0; part < 4; part++) {
-            int lit = S.wifi > 0 && (part == 0 || part <= S.wifi);
-            gfx_mask_a8(c, wifi_mask[part], WIFI_W, WIFI_H, x - WIFI_W, y - 3,
-                        lit ? rgb(C_SUB) : rgb(P->line));
-        }
-    }
+    if (S.battery >= 0) draw_battery(c, SCREEN_W - 16, 11);
 }
 
 // Chrome that changes rarely: drawn once onto a transparent band of the screen and blended
@@ -1014,8 +1096,8 @@ static time_t day_start(time_t t)
 
 static void format_last_played(const Game *g, char *out, int n)
 {
-    // Without network time the clock may start near 1970, and so may Onion's records;
-    // only trust dates after 2020. Otherwise fall back to the recents list.
+    // Without network time the clock may start near 1970, and so may the play times Shelf
+    // recorded; only trust dates after 2020. Otherwise fall back to the recents list.
     const time_t sane = 1577836800;
     time_t now = time(NULL), t = (time_t)g->last_played;
     if (t > sane && now > sane) {
@@ -1038,6 +1120,8 @@ static void format_last_played(const Game *g, char *out, int n)
 // background, so it's kept as one pre-composited image per selection and copied in; the
 // empty card is rasterized once. Its left margin also covers grid tiles that have
 // scrolled under it.
+static void panel_invalidate(void) { panel_game = -1; }
+
 static void draw_detail(Image *c, int gi)
 {
     const int x0 = G_EDGE, y0 = PANEL_Y - 8;
@@ -1116,34 +1200,68 @@ static void draw_folder_view(Image *c)
         }
     if (S.nfg) draw_detail(c, S.fgames[S.fsel]);
     else text_center(c, S.body, "Nothing here yet", SCREEN_W / 2, 220, rgb(C_SUB), SCREEN_W);
-    static const char *const H[] = {"A", "Play", "B", "Back", "Y", "Sort", "L1", "First", "R1", "Last"};
-    draw_footer(c, H, 10);
+    static const char *const H[] = {"A", "Play", "B", "Back", "X", "Favorite", "Y", "Sort",
+                                   "L1", "First", "R1", "Last"};
+    draw_footer(c, H, 12);
 }
 
 // Options sheet over the dimmed view; drawn into the retained scene since it's static.
+static void draw_level(Image *c, int right, int cy, int value, int max, int sel)
+{
+    char n[8];
+    snprintf(n, sizeof n, "%d", value);
+    const int bar_w = 132, bar_h = 10;
+    int bx = right - bar_w, by = cy - bar_h / 2;
+    gfx_fill_rrect(c, bx, by, bar_w, bar_h, bar_h / 2.f, sel ? argb(70, 255, 255, 255) : rgb(P->line));
+    int fill = bar_w * value / max;
+    if (fill > 0) gfx_fill_rrect(c, bx, by, fill < bar_h ? bar_h : (float)fill, bar_h, bar_h / 2.f,
+                                 sel ? rgb(0xffffff) : rgb(C_SEL));
+    text_draw(c, S.small, n, right - bar_w - 10 - text_width(S.small, n),
+              cy - font_height(S.small) / 2, sel ? rgb(0xffffff) : rgb(C_INK));
+}
+
+// The three scale modes as pills, the current one filled in.
+static void draw_scale_pills(Image *c, int right, int cy, int sel)
+{
+    static const char *const NAME[SCALE_MODES] = {"Sharp", "Smooth", "Integer"};
+    int width[SCALE_MODES], total = 0, h = font_height(S.small) + 8;
+    for (int i = 0; i < SCALE_MODES; i++) {
+        width[i] = text_width(S.small, NAME[i]) + 18;
+        total += width[i] + (i ? 4 : 0);
+    }
+    int x = right - total, y = cy - h / 2;
+    for (int i = 0; i < SCALE_MODES; i++) {
+        int on = i == (int)S.set.scale;
+        uint32_t bg = on ? (sel ? rgb(0xffffff) : rgb(C_SEL)) : (sel ? argb(50, 255, 255, 255) : rgb(P->line));
+        uint32_t ink = on ? (sel ? rgb(C_SEL) : rgb(0xffffff)) : (sel ? argb(220, 255, 255, 255) : rgb(C_SUB));
+        gfx_fill_rrect(c, x, y, width[i], h, h / 2.f, bg);
+        text_draw(c, S.small, NAME[i], x + 9, y + 4, ink);
+        x += width[i] + 4;
+    }
+}
+
 static void draw_options(Image *c)
 {
     gfx_fill_rect(c, 0, 0, SCREEN_W, SCREEN_H - FOOTER_H, argb(S.dark ? 150 : 110, 10, 12, 18));
-    const int w = 452, row = 66, h = 62 + O_COUNT * row + 12;
+    const int w = 452, row = 66, h = 58 + O_COUNT * row + 10;
     int x = (SCREEN_W - w) / 2, y = (SCREEN_H - FOOTER_H - h) / 2;
     gfx_fill_rrect(c, x + 2, y + 6, w - 4, h - 2, 18, argb(60, 0, 0, 0));
     gfx_fill_rrect(c, x, y, w, h, 18, rgb(P->panel));
-    text_draw(c, S.label, "Options", x + 24, y + 20, rgb(C_INK));
-    static const char *const TITLE[O_COUNT] = {"Dark mode", NULL, "Open Onion's menu"};
-    const char *sub[O_COUNT] = {
-        "Easier on the eyes at night",
-        S.boot ? "Shelf comes back from Apps › Shelf" : "Start in Shelf and return to it after games",
-        "Just this once; games still come back here",
-    };
+    text_draw(c, S.label, "Options", x + 24, y + 18, rgb(C_INK));
     for (int i = 0; i < O_COUNT; i++) {
-        int ry = y + 60 + i * row, sel = i == S.osel;
+        int ry = y + 58 + i * row, sel = i == S.osel;
         if (sel) gfx_fill_rrect(c, x + 10, ry, w - 20, row - 6, 12, rgb(C_SEL));
         uint32_t ink = sel ? rgb(0xffffff) : rgb(C_INK), sub_ink = sel ? argb(220, 255, 255, 255) : rgb(C_SUB);
-        const char *title = TITLE[i] ? TITLE[i] : S.boot ? "Use Onion's menu instead" : "Make Shelf the home screen";
-        text_draw(c, S.body, title, x + 24, ry + 7, ink);
-        text_draw(c, S.small, sub[i], x + 24, ry + 32, sub_ink);
+        text_draw(c, S.body, OPT_TITLE[i], x + 24, ry + 7, ink);
+        const char *sub = OPT_SUB[i];
+        if (i == O_OFF && S.oconfirm) sub = "Press A again to power off, B to cancel";
+        text_draw(c, S.small, sub, x + 24, ry + 32, sub_ink);
+        int cy = ry + (row - 6) / 2, right = x + w - 24;
+        if (i == O_BRIGHT) draw_level(c, right, cy, S.set.brightness, BRIGHTNESS_MAX, sel);
+        if (i == O_VOLUME) draw_level(c, right, cy, S.set.volume, VOLUME_MAX, sel);
+        if (i == O_SCREEN) draw_scale_pills(c, right, cy, sel);
         if (i == O_DARK) { // switch
-            float sw = 52, sh = 30, sx = x + w - 24 - sw, sy = ry + (row - 6 - sh) / 2;
+            float sw = 52, sh = 30, sx = right - sw, sy = cy - sh / 2;
             uint32_t track = S.dark ? (sel ? argb(90, 255, 255, 255) : rgb(C_SEL)) : (sel ? argb(60, 0, 0, 0) : rgb(P->line));
             gfx_fill_rrect(c, sx, sy, sw, sh, sh / 2, track);
             gfx_fill_rrect(c, sx + (S.dark ? sw - sh : 0) + 3, sy + 3, sh - 6, sh - 6, (sh - 6) / 2, rgb(0xffffff));
@@ -1194,7 +1312,7 @@ void ui_draw(Image *c)
         if (S.view == V_HOME) draw_home(target); else draw_folder_view(target);
         if (S.options) {
             draw_options(target);
-            static const char *const H[] = {"A", "Select", "B", "Close"};
+            static const char *const H[] = {"A", "Change", "B", "Close"};
             draw_footer(target, H, 4);
         }
         S.scene_dirty = !retain;
@@ -1224,6 +1342,7 @@ void ui_draw(Image *c)
         gfx_fade_scaled_nearest(c, S.bg, S.layer, (SCREEN_W - w) / 2, (SCREEN_H - h) / 2, w, h, (uint8_t)(a * 255));
     }
     draw_status(c);
+    draw_toast(c);
     if (S.launching >= 0) draw_launch(c);
 }
 
@@ -1242,7 +1361,7 @@ void ui_draw(Image *c)
 #define SW_SPRITE_PAD 8
 
 static struct {
-    int on, overlay, running;  // switcher view; over a paused game; recents[0] is that game
+    int on, running;           // switcher view; over a paused game, recents[0] is it
     const Image *(*card)(int), *(*full)(int);
     void (*select)(int);
     unsigned (*revision)(void);
@@ -1264,8 +1383,8 @@ static struct {
     int fired;                // the closing action was handed out; hold the last frame
     int layer_ok;             // S.layer holds the scene behind a zoom; reused while it's still
     unsigned layer_rev;       // card + art revisions it was drawn with
-    int saving;               // SW_TOAST_*
-    Band top, bottom;         // status, toast and titles; position dots and footer
+    char notice[64];          // a question over the row ("Restart the game?"); "" when none
+    Band top, bottom;         // status, notice and titles; position dots and footer
 } W;
 
 void ui_switch_hooks(const Image *(*card)(int), const Image *(*full)(int), void (*select)(int),
@@ -1274,10 +1393,17 @@ void ui_switch_hooks(const Image *(*card)(int), const Image *(*full)(int), void 
     W.card = card; W.full = full; W.select = select; W.revision = revision;
 }
 
-void ui_switch_saving(int state)
+void ui_switch_notice(const char *text)
 {
-    if (W.saving != state) W.layer_ok = 0, S.redraw = 1;
-    W.saving = state;
+    snprintf(W.notice, sizeof W.notice, "%s", text ? text : "");
+    W.layer_ok = 0;
+    S.redraw = 1;
+}
+
+void ui_switch_card_size(int *w, int *h)
+{
+    if (w) *w = SW_SHOT_W;
+    if (h) *h = SW_SHOT_H;
 }
 
 int ui_switch_target(void) { return W.close_to; }
@@ -1306,11 +1432,10 @@ static void sw_select(int i)
     if (W.select) W.select(i);
 }
 
-int ui_init_switcher(Library *lib, const char *font_dir, int overlay, int running)
+int ui_init_switcher(Library *lib, const char *font_dir, int from_game, int running)
 {
     if (ui_init(lib, font_dir)) return -1;
     W.on = 1;
-    W.overlay = overlay;
     W.running = running;
     W.backdrop_for = -1;
     W.home_bg = S.bg;     // in the user's palette
@@ -1322,7 +1447,7 @@ int ui_init_switcher(Library *lib, const char *font_dir, int overlay, int runnin
     S.track.x = S.track.t;
     S.hscale[0].x = 1;
     // Over a game, open from its frame filling the screen.
-    W.zoom.x = overlay && running ? 0 : 1;
+    W.zoom.x = from_game && running ? 0 : 1;
     W.zoom.t = 1;
     return 0;
 }
@@ -1360,7 +1485,7 @@ static void sw_button(Button b)
         else sw_close(UI_SW_HOME, -1);
     }
     if (b == BTN_B) sw_close(UI_SW_HOME, -1);
-    if (b == BTN_QUIT) { // power off: get back to the game at once, as Onion does
+    if (b == BTN_QUIT) { // the window closed: leave by the nearest exit
         if (W.running) { S.action = UI_SW_RESUME; W.close_to = 0; }
         else S.action = UI_SW_HOME;
     }
@@ -1591,7 +1716,7 @@ static void sw_draw_chrome(Image *c)
     int resume = S.sel == 0 && W.running;
     char key[256], status[200];
     status_key(status, sizeof status);
-    snprintf(key, sizeof key, "%s|%d|%d|%d", status, S.sel, resume, W.saving);
+    snprintf(key, sizeof key, "%s|%d|%d|%s", status, S.sel, resume, W.notice);
     Image *b = band_begin(&W.top, SW_TOP_H, key);
     if (b) {
         if (L->nrecent) {
@@ -1602,17 +1727,15 @@ static void sw_draw_chrome(Image *c)
             text_center(b, S.body, meta, SCREEN_W / 2, 86, argb(255, 0xb8, 0xbf, 0xd0), SCREEN_W - 60);
         }
         draw_status_raw(b);
-        if (W.saving) {
-            const char *t = W.saving == SW_TOAST_SAVING ? "Saving…" : W.saving == SW_TOAST_SAVED ? "✓ Saved"
-                          : W.saving == SW_TOAST_ON_EXIT ? "Saves on exit" : "Couldn't save";
-            int tw = text_width(S.small, t), th = font_height(S.small) + 8;
+        if (W.notice[0]) { // the question a confirming press answers
+            int tw = text_width(S.small, W.notice), th = font_height(S.small) + 8;
             float tx = SCREEN_W / 2.f - (tw + 24) / 2.f;
             gfx_fill_rrect(b, tx, 6, tw + 24, th, th / 2.f, rgb(0xffffff));
-            text_draw(b, S.small, t, (int)tx + 12, 10, rgb(W.saving == SW_TOAST_FAILED ? 0xc0392b : 0x2f8a4c));
+            text_draw(b, S.small, W.notice, (int)tx + 12, 10, rgb(0x262a35));
         }
         band_end(&W.top);
     }
-    snprintf(key, sizeof key, "%d|%d|%d|%d", S.sel, L->nrecent, resume, W.running);
+    snprintf(key, sizeof key, "%d|%d|%d|%d|%s", S.sel, L->nrecent, resume, W.running, W.notice);
     if ((b = band_begin(&W.bottom, SCREEN_H - SW_BOTTOM_Y, key))) {
         const int y0 = SW_BOTTOM_Y;
         if (L->nrecent > 1) {
@@ -1623,9 +1746,14 @@ static void sw_draw_chrome(Image *c)
                                i == S.sel ? rgb(C_SEL) : argb(70, 255, 255, 255));
             }
         }
-        const char *const H[] = {"A", resume ? "Resume" : "Play", "B", "Shelf", "MENU", "Back to game"};
-        if (L->nrecent) draw_footer_raw(b, SCREEN_H - FOOTER_H - y0, H, W.running ? 6 : 4);
-        else draw_footer_raw(b, SCREEN_H - FOOTER_H - y0, H + 2, 2);
+        // A question owns the footer while it is up: A answers yes, B no.
+        const char *const ASK[] = {"A", "Yes", "B", "No"};
+        const char *const GAME[] = {"A", resume ? "Resume" : "Play", "B", "Shelf", "SELECT", "Restart",
+                                    "MENU", "Back"};
+        const char *const OTHER[] = {"A", "Play", "B", "Shelf"};
+        if (W.notice[0]) draw_footer_raw(b, SCREEN_H - FOOTER_H - y0, ASK, 4);
+        else if (L->nrecent) draw_footer_raw(b, SCREEN_H - FOOTER_H - y0, GAME, W.running ? 8 : 4);
+        else draw_footer_raw(b, SCREEN_H - FOOTER_H - y0, OTHER, 4);
         band_end(&W.bottom);
     }
     if (W.top.img) gfx_blit(c, W.top.img, 0, 0, 255);

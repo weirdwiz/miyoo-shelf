@@ -68,7 +68,7 @@ int icons_init(Library *lib)
         for (int b = 0; b < 2; b++) { free(Q[b].game); Q[b].game = NULL; }
         return -1;
     }
-    host_path(SD_PREFIX "/App/Shelf/cache", cache_dir, sizeof cache_dir);
+    host_path(SD_PREFIX "/.shelf/cache", cache_dir, sizeof cache_dir);
     mkdirs(cache_dir);
     return 0;
 }

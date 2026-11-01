@@ -2,14 +2,15 @@
 
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "../third_party/cJSON.h"
-#include "gfx.h"
 
 static char g_root[PATH_LEN] = SD_PREFIX;
 
@@ -57,48 +58,39 @@ static char *read_file(const char *path)
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     fseek(f, 0, SEEK_SET);
-    char *s = malloc(n + 1);
+    char *s = n < 0 ? NULL : malloc(n + 1);
     if (s && fread(s, 1, n, f) != (size_t)n) { free(s); s = NULL; }
     if (s) s[n] = 0;
     fclose(f);
     return s;
 }
 
-// Friendly names and colours for Onion's Emu folder names.
-static const struct { const char *dir, *label, *name; uint32_t color; } KNOWN[] = {
-    {"GBA", "GBA", "Game Boy Advance", 0x5b4fd0},
-    {"SFC", "SNES", "Super Nintendo", 0x8f5fc8},
-    {"GBC", "GBC", "Game Boy Color", 0x13a39a},
-    {"GB", "Game Boy", "Game Boy", 0x6f8f2f},
-    {"FC", "NES", "Nintendo (NES)", 0xd6413a},
-    {"PS", "PS1", "PlayStation", 0x4b5568},
-    {"MD", "Mega Drive", "Mega Drive / Genesis", 0x1f5fbf},
-    {"GG", "Game Gear", "Game Gear", 0x2b2f3a},
-    {"MS", "Master Sys", "Master System", 0xb3262b},
-    {"PCE", "PC Engine", "PC Engine", 0xe0782a},
-    {"NGP", "NeoGeo Pkt", "Neo Geo Pocket", 0x3d6ea8},
-    {"WS", "WonderSwan", "WonderSwan", 0x7a7f8c},
-    {"ARCADE", "Arcade", "Arcade", 0xc0392b},
-    {"FBNEO", "Arcade", "Arcade (FBNeo)", 0xc0392b},
-    {"N64", "N64", "Nintendo 64", 0x2a9d48},
-    {"PICO", "PICO-8", "PICO-8", 0xff004d},
-};
+/* ---------- systems ---------- */
 
-static void sys_identity(System *s, const char *cfg_label)
+// The three systems Shelf runs, in home-row order. A folder matches by its own name or by a
+// MinUI-style name such as "Game Boy Advance (GBA)"; GB folders also hold the original
+// Game Boy formats (.dmg, .sgb), both of which gambatte runs.
+static const struct {
+    const char *dir, *label, *name, *core, *exts;
+    uint32_t color;
+} SYSTEMS[] = {
+    {"GB", "GB", "Game Boy", "gambatte", "gb|gbc|dmg|sgb", 0x6f8f2f},
+    {"GBC", "GBC", "Game Boy Color", "gambatte", "gb|gbc|dmg|sgb", 0x13a39a},
+    {"GBA", "GBA", "Game Boy Advance", "mgba", "gba", 0x5b4fd0},
+};
+#define NSYS ((int)(sizeof SYSTEMS / sizeof *SYSTEMS))
+
+// "GB", "gb" and "Game Boy (GB)" all name the GB folder; -1 for anything else.
+static int system_for(const char *name)
 {
-    for (size_t i = 0; i < sizeof KNOWN / sizeof *KNOWN; i++)
-        if (!strcasecmp(s->dir, KNOWN[i].dir)) {
-            snprintf(s->label, sizeof s->label, "%s", KNOWN[i].label);
-            snprintf(s->name, sizeof s->name, "%s", KNOWN[i].name);
-            s->color = KNOWN[i].color;
-            return;
-        }
-    snprintf(s->label, sizeof s->label, "%s", cfg_label && *cfg_label ? cfg_label : s->dir);
-    snprintf(s->name, sizeof s->name, "%s", s->label);
-    uint32_t h = 2166136261u;
-    for (const char *c = s->dir; *c; c++) h = (h ^ (unsigned char)*c) * 16777619u;
-    static const uint32_t PALETTE[] = {0x5b4fd0, 0x13a39a, 0xd6413a, 0x1f5fbf, 0xe0782a, 0x8f5fc8, 0x2a9d48};
-    s->color = PALETTE[h % 7];
+    for (int i = 0; i < NSYS; i++) {
+        if (!strcasecmp(name, SYSTEMS[i].dir)) return i;
+        char tag[8];
+        snprintf(tag, sizeof tag, "(%s)", SYSTEMS[i].dir);
+        size_t n = strlen(name), t = strlen(tag);
+        if (n > t && !strcasecmp(name + n - t, tag)) return i;
+    }
+    return -1;
 }
 
 // "Legend of Zelda, The - The Minish Cap (USA) [!]" -> "The Legend of Zelda - The Minish Cap"
@@ -127,10 +119,11 @@ static void make_title(const char *stem, char *out, int n)
     snprintf(out, n, "%s", t);
 }
 
+// Whether `name` has one of the extensions in `extlist` ("gba", "gb|gbc"), ignoring case.
 static int ext_ok(const char *name, const char *extlist)
 {
     const char *dot = strrchr(name, '.');
-    if (!dot || !extlist || !*extlist) return dot != NULL;
+    if (!dot) return 0;
     const char *e = extlist;
     size_t n = strlen(dot + 1);
     while (*e) {
@@ -147,7 +140,9 @@ static void add_game(Library *lib, int *cap, int sys, const char *dir_dev, const
 {
     if (lib->ngames == *cap) {
         *cap = *cap ? *cap * 2 : 256;
-        lib->games = realloc(lib->games, sizeof(Game) * *cap);
+        Game *grown = realloc(lib->games, sizeof(Game) * *cap);
+        if (!grown) return;
+        lib->games = grown;
     }
     Game *g = &lib->games[lib->ngames++];
     memset(g, 0, sizeof *g);
@@ -158,10 +153,12 @@ static void add_game(Library *lib, int *cap, int sys, const char *dir_dev, const
     if (dot) *dot = 0;
     make_title(g->stem, g->title, sizeof g->title);
     snprintf(g->path, sizeof g->path, "%s/%s", dir_dev, file);
+    lib->sys[sys].ngames++;
 }
 
-static void scan_directory(Library *lib, int *cap, int sys, const char *dir_dev,
-                           const char *extlist)
+// Adds every ROM under `dir_dev`, including subfolders but not hidden ones, Imgs or
+// anything reached through a symlink (which could loop or leave the card).
+static void scan_directory(Library *lib, int *cap, int sys, const char *dir_dev)
 {
     char host[PATH_LEN];
     host_path(dir_dev, host, sizeof host);
@@ -172,206 +169,288 @@ static void scan_directory(Library *lib, int *cap, int sys, const char *dir_dev,
         if (e->d_name[0] == '.' || !strcasecmp(e->d_name, "Imgs")) continue;
         char full[PATH_LEN];
         struct stat st;
-        // Skip symlinks to prevent loops and traversal outside the ROM tree.
         int len = snprintf(full, sizeof full, "%s/%s", host, e->d_name);
-        if (len < 0 || len >= sizeof full || lstat(full, &st)) continue;
+        if (len < 0 || len >= (int)sizeof full || lstat(full, &st)) continue;
         if (S_ISDIR(st.st_mode)) {
             char dev[PATH_LEN];
             len = snprintf(dev, sizeof dev, "%s/%s", dir_dev, e->d_name);
-            if (len >= 0 && len < sizeof dev)
-                scan_directory(lib, cap, sys, dev, extlist);
+            if (len >= 0 && len < (int)sizeof dev) scan_directory(lib, cap, sys, dev);
             continue;
         }
-        if (!S_ISREG(st.st_mode) || !ext_ok(e->d_name, extlist)) continue;
-        if (strstr(e->d_name, ".xml") || strstr(e->d_name, ".db")) continue;
-        char dev[PATH_LEN];
-        len = snprintf(dev, sizeof dev, "%s/%s", dir_dev, e->d_name);
-        if (len < 0 || len >= sizeof dev) continue;
+        if (!S_ISREG(st.st_mode) || !ext_ok(e->d_name, SYSTEMS[sys].exts)) continue;
         add_game(lib, cap, sys, dir_dev, e->d_name);
-        lib->sys[sys].ngames++;
     }
     closedir(d);
 }
 
-// Keep launchable playlists / CUE sheets, not their individual discs / tracks.
-// Resolve references after scanning so directory order does not affect discovery.
-static void collapse_disc_files(Library *lib)
-{
-    int *owner = malloc(lib->ngames * sizeof *owner);
-    if (!owner) return;
-    for (int i = 0; i < lib->ngames; i++) owner[i] = -1;
-    for (int i = 0; i < lib->ngames; i++) {
-        const Game *g = &lib->games[i];
-        const char *ext = strrchr(g->path, '.');
-        int cue = ext && !strcasecmp(ext, ".cue");
-        if (!cue && (!ext || strcasecmp(ext, ".m3u"))) continue;
-        char host[PATH_LEN];
-        host_path(g->path, host, sizeof host);
-        FILE *f = fopen(host, "r");
-        if (!f) continue;
-        char line[PATH_LEN + 16];
-        while (fgets(line, sizeof line, f)) {
-            char *ref = line;
-            if (!strncmp(ref, "\xef\xbb\xbf", 3)) ref += 3;
-            while (isspace((unsigned char)*ref)) ref++;
-            if (cue) {
-                if (strncasecmp(ref, "FILE", 4) || !isspace((unsigned char)ref[4])) continue;
-                ref += 4;
-                while (isspace((unsigned char)*ref)) ref++;
-                char *end;
-                if (*ref == '"') {
-                    ref++;
-                    end = strchr(ref, '"');
-                    if (!end) continue;
-                } else {
-                    end = ref;
-                    while (*end && !isspace((unsigned char)*end)) end++;
-                }
-                *end = 0;
-            } else {
-                if (!*ref || *ref == '#') continue;
-                char *end = ref + strlen(ref);
-                while (end > ref && isspace((unsigned char)end[-1])) *--end = 0;
-            }
-            if (!*ref) continue;
-            char path[PATH_LEN];
-            int len;
-            if (*ref == '/') len = snprintf(path, sizeof path, "%s", ref);
-            else {
-                const char *slash = strrchr(g->path, '/');
-                len = snprintf(path, sizeof path, "%.*s/%s", (int)(slash - g->path), g->path, ref);
-            }
-            if (len < 0 || len >= sizeof path) continue;
-            path_normalise(path);
-            for (int j = 0; j < lib->ngames; j++)
-                if (j != i && lib->games[j].sys == g->sys && !strcmp(lib->games[j].path, path))
-                    owner[j] = i;
-        }
-        fclose(f);
-    }
-    // A recent/favorite disc belongs to its playlist, including M3U -> CUE -> BIN.
-    for (int i = 0; i < lib->ngames; i++) {
-        int target = i, steps = 0;
-        while (owner[target] >= 0 && steps++ < lib->ngames) target = owner[target];
-        if (steps >= lib->ngames) { owner[i] = -1; continue; }
-        Game *g = &lib->games[target];
-        g->fav |= lib->games[i].fav;
-        int recent = lib->games[i].recent;
-        if (recent >= 0 && (g->recent < 0 || recent < g->recent)) g->recent = recent;
-    }
-    int kept = 0;
-    for (int i = 0; i < lib->ngames; i++) {
-        if (owner[i] >= 0) lib->sys[lib->games[i].sys].ngames--;
-        else lib->games[kept++] = lib->games[i];
-    }
-    lib->ngames = kept;
-    free(owner);
-}
+/* ---------- Shelf's own files ---------- */
 
-static int find_game(const Library *lib, const char *rompath)
+static int find_game(const Library *lib, const char *path)
 {
     char p[PATH_LEN];
-    snprintf(p, sizeof p, "%s", rompath);
+    snprintf(p, sizeof p, "%s", path);
     path_normalise(p);
     for (int i = 0; i < lib->ngames; i++)
         if (!strcmp(lib->games[i].path, p)) return i;
     return -1;
 }
 
-// Onion stores recents/favourites as one JSON object per line.
-static void read_entries(Library *lib, const char *dev_path, int recent)
+// The JSON in a device file, or NULL when it is missing or unreadable.
+static cJSON *read_json(const char *dev_path)
 {
     char host[PATH_LEN];
     host_path(dev_path, host, sizeof host);
-    char *s = read_file(host);
-    if (!s) return;
-    char *save;
-    for (char *line = strtok_r(s, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
-        cJSON *j = cJSON_Parse(line);
-        if (!j) continue;
-        const char *rp = cJSON_GetStringValue(cJSON_GetObjectItem(j, "rompath"));
-        int gi = rp ? find_game(lib, rp) : -1;
-        if (gi >= 0) {
-            if (recent && lib->games[gi].recent < 0 && lib->nrecent < MAX_RECENT) {
-                lib->games[gi].recent = lib->nrecent;
-                lib->recent[lib->nrecent++] = gi;
-            }
-            if (!recent) lib->games[gi].fav = 1;
-        }
-        cJSON_Delete(j);
-    }
-    free(s);
+    char *txt = read_file(host);
+    cJSON *j = txt ? cJSON_Parse(txt) : NULL;
+    free(txt);
+    return j;
 }
+
+// An array of ROM paths: recents (most recent first) or favorites. *n is 0 when the file
+// is missing, corrupt or not an array of strings.
+static char **read_paths(const char *dev_path, int *n)
+{
+    *n = 0;
+    cJSON *arr = read_json(dev_path);
+    if (!cJSON_IsArray(arr)) { cJSON_Delete(arr); return NULL; }
+    int count = cJSON_GetArraySize(arr);
+    char **paths = malloc(sizeof *paths * (count ? count : 1));
+    for (int i = 0; paths && i < count; i++) {
+        const char *p = cJSON_GetStringValue(cJSON_GetArrayItem(arr, i));
+        if (p && (paths[*n] = strdup(p))) (*n)++; // the strings die with the cJSON tree
+    }
+    cJSON_Delete(arr);
+    return paths;
+}
+
+static void free_paths(char **paths, int n)
+{
+    for (int i = 0; i < n; i++) free(paths[i]);
+    free(paths);
+}
+
+static void read_data(Library *lib)
+{
+    int n = 0;
+    char **paths = read_paths(DATA_DIR "/recents.json", &n);
+    for (int i = 0; i < n && lib->nrecent < MAX_RECENT; i++) {
+        int gi = find_game(lib, paths[i]);
+        if (gi < 0 || lib->games[gi].recent >= 0) continue;
+        lib->games[gi].recent = lib->nrecent;
+        lib->recent[lib->nrecent++] = gi;
+    }
+    free_paths(paths, n);
+
+    paths = read_paths(DATA_DIR "/favorites.json", &n);
+    for (int i = 0; i < n; i++) {
+        int gi = find_game(lib, paths[i]);
+        if (gi >= 0) lib->games[gi].fav = 1;
+    }
+    free_paths(paths, n);
+
+    // playtime.json: path -> [seconds, sessions, last unix time].
+    cJSON *obj = read_json(DATA_DIR "/playtime.json");
+    if (!cJSON_IsObject(obj)) { cJSON_Delete(obj); return; }
+    for (cJSON *row = obj->child; row; row = row->next) {
+        int gi = row->string ? find_game(lib, row->string) : -1;
+        if (gi < 0 || !cJSON_IsArray(row)) continue;
+        Game *g = &lib->games[gi];
+        cJSON *secs = cJSON_GetArrayItem(row, 0), *count = cJSON_GetArrayItem(row, 1);
+        cJSON *last = cJSON_GetArrayItem(row, 2);
+        if (cJSON_IsNumber(secs)) g->play_time = (int)secs->valuedouble;
+        if (cJSON_IsNumber(count)) g->play_count = (int)count->valuedouble;
+        if (cJSON_IsNumber(last)) g->last_played = (long long)last->valuedouble;
+    }
+    cJSON_Delete(obj);
+}
+
+/* ---------- writing ---------- */
+
+// mkdir -p for a host path. 0 when the folder exists afterwards.
+static int mkdirs(const char *path)
+{
+    char buf[PATH_LEN];
+    if (snprintf(buf, sizeof buf, "%s", path) >= (int)sizeof buf) return -1;
+    for (char *c = buf + 1;; c++) {
+        if (*c && *c != '/') continue;
+        char keep = *c;
+        *c = 0;
+        if (mkdir(buf, 0755) && errno != EEXIST) return -1;
+        *c = keep;
+        if (!keep) return 0;
+    }
+}
+
+int lib_write_json(const char *dev_path, const char *json)
+{
+    char host[PATH_LEN], dir[PATH_LEN], tmp[PATH_LEN + 8];
+    host_path(dev_path, host, sizeof host);
+    snprintf(tmp, sizeof tmp, "%s.tmp", host);
+    snprintf(dir, sizeof dir, "%s", host);
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        *slash = 0;
+        if (mkdirs(dir)) {
+            fprintf(stderr, "shelf: can't create %s: %s\n", dir, strerror(errno));
+            return -1;
+        }
+    }
+    FILE *f = fopen(tmp, "wb");
+    if (!f) {
+        fprintf(stderr, "shelf: can't write %s: %s\n", tmp, strerror(errno));
+        return -1;
+    }
+    size_t len = strlen(json);
+    int bad = fwrite(json, 1, len, f) != len;
+    if (!bad) bad = fflush(f) != 0;
+    if (!bad) bad = fsync(fileno(f)) != 0;
+    if (fclose(f)) bad = 1;
+    if (!bad && rename(tmp, host)) bad = 1;
+    if (bad) {
+        fprintf(stderr, "shelf: can't save %s: %s\n", dev_path, strerror(errno));
+        remove(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+// Prints and saves `j`, which it releases: 0 or -1.
+static int save_json(cJSON *j, const char *dev_path)
+{
+    if (!j) return -1;
+    char *json = cJSON_Print(j);
+    cJSON_Delete(j);
+    int rc = json ? lib_write_json(dev_path, json) : -1;
+    cJSON_free(json);
+    return rc;
+}
+
+// Appends one string to a JSON array; nonzero when out of memory.
+static int add_path(cJSON *arr, const char *path)
+{
+    cJSON *item = cJSON_CreateString(path);
+    if (!item) return 1;
+    cJSON_AddItemToArray(arr, item);
+    return 0;
+}
+
+int lib_mark_played(Library *lib, int game)
+{
+    if (game < 0 || game >= lib->ngames) return -1;
+    int order[MAX_RECENT], n = 0;
+    order[n++] = game;
+    for (int i = 0; i < lib->nrecent && n < MAX_RECENT; i++)
+        if (lib->recent[i] != game) order[n++] = lib->recent[i];
+
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; arr && i < n; i++) add_path(arr, lib->games[order[i]].path);
+    if (save_json(arr, DATA_DIR "/recents.json")) return -1;
+
+    for (int i = 0; i < lib->ngames; i++) lib->games[i].recent = -1;
+    for (int i = 0; i < n; i++) {
+        lib->recent[i] = order[i];
+        lib->games[order[i]].recent = i;
+    }
+    lib->nrecent = n;
+    return 0;
+}
+
+int lib_set_fav(Library *lib, int game, int fav)
+{
+    if (game < 0 || game >= lib->ngames) return -1;
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; arr && i < lib->ngames; i++)
+        if (i == game ? fav : lib->games[i].fav) add_path(arr, lib->games[i].path);
+    if (save_json(arr, DATA_DIR "/favorites.json")) return -1;
+    lib->games[game].fav = fav ? 1 : 0;
+    return 0;
+}
+
+int lib_add_play(Library *lib, int game, int seconds, long long now)
+{
+    if (game < 0 || game >= lib->ngames) return -1;
+    cJSON *obj = cJSON_CreateObject();
+    if (!obj) return -1;
+    for (int i = 0; i < lib->ngames; i++) {
+        const Game *g = &lib->games[i];
+        int played = i == game;
+        int count = g->play_count + played;
+        if (!count) continue; // never started: no entry
+        cJSON *row = cJSON_CreateArray();
+        if (!row) { cJSON_Delete(obj); return -1; }
+        cJSON_AddItemToArray(row, cJSON_CreateNumber(g->play_time + (played ? seconds : 0)));
+        cJSON_AddItemToArray(row, cJSON_CreateNumber(count));
+        cJSON_AddItemToArray(row, cJSON_CreateNumber((double)(played ? now : g->last_played)));
+        if (!cJSON_AddItemToObject(obj, g->path, row)) { cJSON_Delete(obj); return -1; }
+    }
+    if (save_json(obj, DATA_DIR "/playtime.json")) return -1;
+    lib->games[game].play_time += seconds;
+    lib->games[game].play_count++;
+    lib->games[game].last_played = now;
+    return 0;
+}
+
+void lib_save_dir(const Library *lib, int game, char *out, int n)
+{
+    snprintf(out, n, SD_PREFIX "/Saves/%s", lib->sys[lib->games[game].sys].dir);
+}
+
+/* ---------- loading ---------- */
 
 static int cmp_game(const void *a, const void *b)
 {
     return strcasecmp(((const Game *)a)->title, ((const Game *)b)->title);
 }
 
-// Fills s from Emu/<dir>/config.json. Returns 0 if it names a ROM folder and launcher.
-static int system_from_config(System *s, const char *dir, cJSON *cfg)
-{
-    const char *rompath = cJSON_GetStringValue(cJSON_GetObjectItem(cfg, "rompath"));
-    const char *launch = cJSON_GetStringValue(cJSON_GetObjectItem(cfg, "launch"));
-    const char *imgpath = cJSON_GetStringValue(cJSON_GetObjectItem(cfg, "imgpath"));
-    if (!rompath || !launch) return -1;
-    memset(s, 0, sizeof *s);
-    snprintf(s->dir, sizeof s->dir, "%s", dir);
-    snprintf(s->emu_dir, sizeof s->emu_dir, SD_PREFIX "/Emu/%s", dir);
-    snprintf(s->launch, sizeof s->launch, "%s/%s", s->emu_dir, launch);
-    snprintf(s->rom_dir, sizeof s->rom_dir, "%s/%s", s->emu_dir, rompath);
-    path_normalise(s->rom_dir);
-    if (imgpath) snprintf(s->img_dir, sizeof s->img_dir, "%s/%s", s->emu_dir, imgpath);
-    else snprintf(s->img_dir, sizeof s->img_dir, "%s/Imgs", s->rom_dir);
-    path_normalise(s->img_dir);
-    sys_identity(s, cJSON_GetStringValue(cJSON_GetObjectItem(cfg, "label")));
-    return 0;
-}
-
 int lib_load(Library *lib)
 {
     memset(lib, 0, sizeof *lib);
-    int cap = 0;
-    char emu_host[PATH_LEN];
-    host_path(SD_PREFIX "/Emu", emu_host, sizeof emu_host);
-    DIR *d = opendir(emu_host);
+    for (int i = 0; i < NSYS; i++) {
+        System *s = &lib->sys[lib->nsys++];
+        snprintf(s->dir, sizeof s->dir, "%s", SYSTEMS[i].dir);
+        snprintf(s->label, sizeof s->label, "%s", SYSTEMS[i].label);
+        snprintf(s->name, sizeof s->name, "%s", SYSTEMS[i].name);
+        snprintf(s->core, sizeof s->core, "%s", SYSTEMS[i].core);
+        s->color = SYSTEMS[i].color;
+        snprintf(s->rom_dir, sizeof s->rom_dir, SD_PREFIX "/Roms/%s", SYSTEMS[i].dir);
+        snprintf(s->img_dir, sizeof s->img_dir, "%s/Imgs", s->rom_dir);
+    }
+
+    char roms[PATH_LEN];
+    host_path(SD_PREFIX "/Roms", roms, sizeof roms);
+    DIR *d = opendir(roms);
     if (!d) {
-        fprintf(stderr, "shelf: no Emu folder at %s\n", emu_host);
+        fprintf(stderr, "shelf: no ROM folder at %s\n", roms);
         return -1;
     }
+    int cap = 0, have_dir[MAX_SYSTEMS] = {0};
     struct dirent *e;
-    while ((e = readdir(d)) && lib->nsys < MAX_SYSTEMS) {
-        if (e->d_name[0] == '.') continue;
-        char cfg_path[PATH_LEN];
-        snprintf(cfg_path, sizeof cfg_path, "%s/%s/config.json", emu_host, e->d_name);
-        char *txt = read_file(cfg_path);
-        if (!txt) continue;
-        cJSON *cfg = cJSON_Parse(txt);
-        free(txt);
-        if (!cfg) continue;
-        System *s = &lib->sys[lib->nsys];
-        if (!system_from_config(s, e->d_name, cfg)) {
-            scan_directory(lib, &cap, lib->nsys, s->rom_dir,
-                           cJSON_GetStringValue(cJSON_GetObjectItem(cfg, "extlist")));
-            if (s->ngames) lib->nsys++;
+    while ((e = readdir(d))) {
+        int sys = system_for(e->d_name);
+        if (sys < 0) continue;
+        char host[PATH_LEN], dev[PATH_LEN];
+        struct stat st;
+        int len = snprintf(host, sizeof host, "%s/%s", roms, e->d_name);
+        if (len < 0 || len >= (int)sizeof host || lstat(host, &st) || !S_ISDIR(st.st_mode)) continue;
+        snprintf(dev, sizeof dev, SD_PREFIX "/Roms/%s", e->d_name);
+        if (!have_dir[sys]) { // the first matching folder names the system's own art folder
+            have_dir[sys] = 1;
+            snprintf(lib->sys[sys].rom_dir, PATH_LEN, "%s", dev);
+            snprintf(lib->sys[sys].img_dir, PATH_LEN, "%s/Imgs", dev);
         }
-        cJSON_Delete(cfg);
+        scan_directory(lib, &cap, sys, dev);
     }
     closedir(d);
-    // With Onion's "hide recents" setting, MainUI's runtime moves each new recentlist.json
-    // into recentlist-hidden.json (newest first). Shelf's home row shows both.
-    read_entries(lib, SD_PREFIX "/Roms/recentlist.json", 1);
-    read_entries(lib, SD_PREFIX "/Roms/recentlist-hidden.json", 1);
-    read_entries(lib, SD_PREFIX "/Roms/favourite.json", 0);
-    collapse_disc_files(lib);
+
+    read_data(lib);
     if (lib->ngames) qsort(lib->games, lib->ngames, sizeof(Game), cmp_game);
-    // Sorting and collapsing change indices; compact recents in their original order.
-    int nrecent = 0;
+    // Sorting reindexes the games; compact the recents in the order they were read.
+    int n = 0;
     for (int rank = 0; rank < lib->nrecent; rank++)
         for (int i = 0; i < lib->ngames; i++)
-            if (lib->games[i].recent == rank) lib->recent[nrecent++] = i;
-    lib->nrecent = nrecent;
-    for (int i = 0; i < nrecent; i++) lib->games[lib->recent[i]].recent = i;
+            if (lib->games[i].recent == rank) lib->recent[n++] = i;
+    lib->nrecent = n;
+    for (int i = 0; i < n; i++) lib->games[lib->recent[i]].recent = i;
     return 0;
 }
 
@@ -386,269 +465,22 @@ int lib_img_path(const Library *lib, const Game *g, char *out, int n)
     static const char *EXTS[] = {"png", "jpg", "jpeg", "gif"};
     const System *s = &lib->sys[g->sys];
     const char *slash = strrchr(g->path, '/');
-    const char *relative = g->path + strlen(s->rom_dir) + 1;
-    int subdir_len = (int)(slash - relative);
     struct stat st;
-    // Prefer Onion's configured artwork folder, then mirrored category folders,
-    // then an Imgs folder beside the ROM.
-    for (int location = 0; location < 3; location++) {
-        if (location == 1 && subdir_len <= 0) continue;
+    // The system's own Imgs folder first, then an Imgs folder beside the ROM (which is the
+    // same folder for a ROM at the top of Roms/<SYS>).
+    for (int beside = 0; beside < 2; beside++) {
         for (int i = 0; i < 4; i++) {
             char dev[PATH_LEN];
             int len;
-            if (location == 0)
-                len = snprintf(dev, sizeof dev, "%s/%s.%s", s->img_dir, g->stem, EXTS[i]);
-            else if (location == 1)
-                len = snprintf(dev, sizeof dev, "%s/%.*s/%s.%s", s->img_dir,
-                               subdir_len, relative, g->stem, EXTS[i]);
+            if (beside)
+                len = snprintf(dev, sizeof dev, "%.*s/Imgs/%s.%s", (int)(slash - g->path),
+                               g->path, g->stem, EXTS[i]);
             else
-                len = snprintf(dev, sizeof dev, "%.*s/Imgs/%s.%s",
-                               (int)(slash - g->path), g->path, g->stem, EXTS[i]);
-            if (len < 0 || len >= sizeof dev) continue;
+                len = snprintf(dev, sizeof dev, "%s/%s.%s", s->img_dir, g->stem, EXTS[i]);
+            if (len < 0 || len >= (int)sizeof dev) continue;
             host_path(dev, out, n);
             if (!stat(out, &st) && S_ISREG(st.st_mode)) return 0;
         }
     }
     return -1;
-}
-
-static void json_escape(const char *s, char *out, int n)
-{
-    int k = 0;
-    for (; *s && k < n - 2; s++) {
-        if (*s == '"' || *s == '\\') out[k++] = '\\';
-        out[k++] = *s;
-    }
-    out[k] = 0;
-}
-
-// Onion's runtime parses MainUI's exact layout (LD_PRELOAD=... "<launch>" "<rompath>") with
-// awk and escapes '$' itself, so write it verbatim. Names it cannot quote are refused.
-static int unquotable(const char *s)
-{
-    return strpbrk(s, "\"`\\\n") != NULL;
-}
-
-int lib_launch(Library *lib, int gi, const char *cmd_path)
-{
-    Game *g = &lib->games[gi];
-    System *s = &lib->sys[g->sys];
-
-    // MainUI records rompath relative to the Emu folder ("<emu>/../../Roms/..."); keep that form.
-    char rel[PATH_LEN], rompath[PATH_LEN];
-    snprintf(rel, sizeof rel, "%s", g->path + strlen(SD_PREFIX) + 1);
-    snprintf(rompath, sizeof rompath, "%s/../../%s", s->emu_dir, rel);
-
-    if (unquotable(s->launch) || unquotable(rompath)) {
-        fprintf(stderr, "shelf: cannot launch %s: quote, backtick or backslash in path\n", g->path);
-        return -1;
-    }
-    FILE *f = fopen(cmd_path, "w");
-    if (!f) { perror("shelf: cmd_to_run"); return -1; }
-    fprintf(f, "LD_PRELOAD=/mnt/SDCARD/miyoo/app/../lib/libpadsp.so \"%s\" \"%s\"\n", s->launch, rompath);
-    int failed = fflush(f) != 0;
-    if (!failed && fchmod(fileno(f), 0755)) failed = 1;
-    if (fclose(f)) failed = 1;
-    if (failed) {
-        perror("shelf: write launch command");
-        remove(cmd_path);
-        return -1;
-    }
-    if (getenv("SHELF_TRY")) return 0; // trial runs never touch the real recents file
-
-    // Rewrite recentlist.json with this game first, dropping its old line.
-    char host[PATH_LEN], tmp[PATH_LEN];
-    host_path(SD_PREFIX "/Roms/recentlist.json", host, sizeof host);
-    snprintf(tmp, sizeof tmp, "%s.tmp", host);
-    char *old = read_file(host);
-    FILE *out = fopen(tmp, "w");
-    if (!out) { perror("shelf: recents"); free(old); return LIB_RECENTS_UNSAVED; }
-
-    char label[256], launch[PATH_LEN * 2], rp[PATH_LEN * 2], img_dev[PATH_LEN], img[PATH_LEN * 2];
-    json_escape(g->stem, label, sizeof label);
-    json_escape(s->launch, launch, sizeof launch);
-    json_escape(rompath, rp, sizeof rp);
-    snprintf(img_dev, sizeof img_dev, "%s/%s.png", s->img_dir, g->stem);
-    json_escape(img_dev, img, sizeof img);
-    fprintf(out, "{\"label\":\"%s\",\"launch\":\"%s\",\"type\":5,\"imgpath\":\"%s\",\"rompath\":\"%s\"}\n", label, launch, img, rp);
-
-    int kept = 1;
-    if (old) {
-        char *save;
-        for (char *line = strtok_r(old, "\n", &save); line && kept < 50; line = strtok_r(NULL, "\n", &save)) {
-            cJSON *j = cJSON_Parse(line);
-            const char *p = j ? cJSON_GetStringValue(cJSON_GetObjectItem(j, "rompath")) : NULL;
-            char norm[PATH_LEN] = "";
-            if (p) { snprintf(norm, sizeof norm, "%s", p); path_normalise(norm); }
-            if (j && strcmp(norm, g->path)) { fprintf(out, "%s\n", line); kept++; }
-            cJSON_Delete(j);
-        }
-        free(old);
-    }
-    int bad = ferror(out);
-    if (fclose(out)) bad = 1;
-    if (bad || rename(tmp, host)) {
-        perror("shelf: recents");
-        remove(tmp);
-        return LIB_RECENTS_UNSAVED;
-    }
-
-    // Refresh in-memory recents to match the file.
-    for (int i = 0; i < lib->ngames; i++) lib->games[i].recent = -1;
-    int n = 0, order[MAX_RECENT];
-    order[n++] = gi;
-    for (int i = 0; i < lib->nrecent && n < MAX_RECENT; i++)
-        if (lib->recent[i] != gi) order[n++] = lib->recent[i];
-    for (int i = 0; i < n; i++) { lib->recent[i] = order[i]; lib->games[order[i]].recent = i; }
-    lib->nrecent = n;
-    return 0;
-}
-
-/* ---------- recents only, for the game switcher ---------- */
-
-// Onion's switcher reads the hidden list when "hide recents" is on, else the visible one.
-static void recents_file(char *host, int n)
-{
-    struct stat st;
-    host_path(SD_PREFIX "/Roms/recentlist-hidden.json", host, n);
-    if (stat(host, &st)) host_path(SD_PREFIX "/Roms/recentlist.json", host, n);
-}
-
-static int dev_exists(const char *dev)
-{
-    char host[PATH_LEN];
-    struct stat st;
-    host_path(dev, host, sizeof host);
-    return !stat(host, &st);
-}
-
-// Splits one recents line as Onion does: type 5 (ROM) or 17, and a rompath of the form
-// "launch:rompath" overrides "launch".
-static int parse_recent(const char *line, Recent *r)
-{
-    cJSON *j = cJSON_Parse(line);
-    if (!j) return -1;
-    cJSON *type = cJSON_GetObjectItem(j, "type");
-    const char *rp = cJSON_GetStringValue(cJSON_GetObjectItem(j, "rompath"));
-    const char *la = cJSON_GetStringValue(cJSON_GetObjectItem(j, "launch"));
-    int ok = cJSON_IsNumber(type) && (type->valueint == 5 || type->valueint == 17) && rp;
-    if (ok) {
-        const char *colon = strchr(rp, ':');
-        if (colon) {
-            snprintf(r->launch, sizeof r->launch, "%.*s", (int)(colon - rp), rp);
-            snprintf(r->rompath, sizeof r->rompath, "%s", colon + 1);
-        } else {
-            snprintf(r->launch, sizeof r->launch, "%s", la ? la : "");
-            snprintf(r->rompath, sizeof r->rompath, "%s", rp);
-        }
-    }
-    cJSON_Delete(j);
-    return ok ? 0 : -1;
-}
-
-// The system a recent belongs to: the Emu folder its launcher lives in when that folder's
-// config covers the ROM, else one named after the ROM's folder.
-static int recent_system(Library *lib, const Recent *r, const char *path)
-{
-    char dir[64] = "";
-    const char *emu = strstr(r->launch, "/Emu/");
-    if (emu) {
-        emu += 5;
-        const char *end = strchr(emu, '/');
-        if (end && end - emu < (int)sizeof dir) snprintf(dir, sizeof dir, "%.*s", (int)(end - emu), emu);
-    }
-    for (int i = 0; i < lib->nsys; i++)
-        if (!strcmp(lib->sys[i].dir, dir) && !strncmp(path, lib->sys[i].rom_dir, strlen(lib->sys[i].rom_dir)))
-            return i;
-    if (lib->nsys == MAX_SYSTEMS) return -1;
-    System *s = &lib->sys[lib->nsys];
-    char cfg_host[PATH_LEN];
-    snprintf(cfg_host, sizeof cfg_host, SD_PREFIX "/Emu/%s/config.json", dir);
-    host_path(cfg_host, cfg_host, sizeof cfg_host);
-    char *txt = *dir ? read_file(cfg_host) : NULL;
-    cJSON *cfg = txt ? cJSON_Parse(txt) : NULL;
-    free(txt);
-    int found = cfg && !system_from_config(s, dir, cfg) && !strncmp(path, s->rom_dir, strlen(s->rom_dir));
-    cJSON_Delete(cfg);
-    if (!found) {
-        const char *slash = strrchr(path, '/');
-        memset(s, 0, sizeof *s);
-        snprintf(s->rom_dir, sizeof s->rom_dir, "%.*s", (int)(slash - path), path);
-        snprintf(s->img_dir, sizeof s->img_dir, "%s/Imgs", s->rom_dir);
-        snprintf(s->launch, sizeof s->launch, "%s", r->launch);
-        const char *name = strrchr(s->rom_dir, '/');
-        snprintf(s->dir, sizeof s->dir, "%s", name ? name + 1 : s->rom_dir);
-        sys_identity(s, NULL);
-    }
-    return lib->nsys++;
-}
-
-int lib_load_recents(Library *lib, Recent *rec, int max)
-{
-    memset(lib, 0, sizeof *lib);
-    lib->games = calloc(max > 0 ? max : 1, sizeof(Game));
-    if (!lib->games) return -1;
-    char host[PATH_LEN];
-    recents_file(host, sizeof host);
-    char *s = read_file(host);
-    if (!s) return 0;
-    char *save;
-    for (char *line = strtok_r(s, "\n", &save); line && lib->ngames < max; line = strtok_r(NULL, "\n", &save)) {
-        Recent *r = &rec[lib->ngames];
-        if (parse_recent(line, r)) continue;
-        int dup = 0;
-        for (int i = 0; i < lib->ngames && !dup; i++) dup = !strcmp(rec[i].rompath, r->rompath);
-        if (dup || !dev_exists(r->rompath) || !dev_exists(r->launch)) continue;
-        Game *g = &lib->games[lib->ngames];
-        snprintf(g->path, sizeof g->path, "%s", r->rompath);
-        path_normalise(g->path);
-        const char *slash = strrchr(g->path, '/');
-        if (!slash) continue;
-        g->sys = recent_system(lib, r, g->path);
-        if (g->sys < 0) continue;
-        snprintf(g->stem, sizeof g->stem, "%s", slash + 1);
-        char *dot = strrchr(g->stem, '.');
-        if (dot) *dot = 0;
-        make_title(g->stem, g->title, sizeof g->title);
-        g->recent = lib->ngames;
-        lib->sys[g->sys].ngames++;
-        if (lib->nrecent < MAX_RECENT) lib->recent[lib->nrecent++] = lib->ngames;
-        lib->ngames++;
-    }
-    free(s);
-    return 0;
-}
-
-int lib_resume(const Recent *r, const char *cmd_path)
-{
-    if (unquotable(r->launch) || unquotable(r->rompath)) return -1;
-    FILE *f = fopen(cmd_path, "w");
-    if (!f) return -1;
-    fprintf(f, "LD_PRELOAD=/mnt/SDCARD/miyoo/app/../lib/libpadsp.so \"%s\" \"%s\"\n", r->launch, r->rompath);
-    int failed = fflush(f) != 0 || fchmod(fileno(f), 0755);
-    if (fclose(f) || failed) { remove(cmd_path); return -1; }
-
-    // Move its line to the top, as Onion does, so it's first next time.
-    char host[PATH_LEN], tmp[PATH_LEN + 4];
-    recents_file(host, sizeof host);
-    snprintf(tmp, sizeof tmp, "%s.tmp", host);
-    char *old = read_file(host);
-    if (!old) return 0;
-    FILE *out = fopen(tmp, "w");
-    if (!out) { perror("shelf: recents"); free(old); return LIB_RECENTS_UNSAVED; }
-    size_t total = strlen(old);
-    for (char *c = old; *c; c++) if (*c == '\n') *c = 0;
-    char *first = NULL;
-    for (char *line = old; line < old + total; line += strlen(line) + 1) {
-        Recent other;
-        if (!first && !parse_recent(line, &other) && !strcmp(other.rompath, r->rompath)) first = line;
-    }
-    if (first) fprintf(out, "%s\n", first);
-    for (char *line = old; line < old + total; line += strlen(line) + 1)
-        if (line != first && *line) fprintf(out, "%s\n", line);
-    int bad = ferror(out);
-    if (fclose(out)) bad = 1;
-    free(old);
-    if (bad || rename(tmp, host)) { perror("shelf: recents"); remove(tmp); return LIB_RECENTS_UNSAVED; }
-    return 0;
 }

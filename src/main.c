@@ -1,105 +1,24 @@
-// Shelf: a DSi/3DS-style launcher that stands in for Onion's MainUI.
-// It shows Recent games and Library folders, and when you pick a game it writes
-// /tmp/cmd_to_run.sh and exits. Onion's runtime then runs the game and starts us again.
-#include <arpa/inet.h>
-#include <errno.h>
-#include <signal.h>
+// Shelf: a DSi/3DS-style launcher for Game Boy, Game Boy Color and Game Boy Advance games
+// on the Miyoo Mini. It shows recently played games and library folders; picking a game
+// starts it inside Shelf, which saves and returns here when the player leaves it.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
-#include "../third_party/cJSON.h"
-#include "activity.h"
+#include "game.h"
 #include "icons.h"
 #include "library.h"
 #include "loop.h"
 #include "platform.h"
-#include "switcher.h"
+#include "settings.h"
 #include "ui.h"
 
-// Exit codes that ask mainui.sh / launch.sh to run boot.sh after Shelf quits.
-#define EXIT_BOOT_ONION 10 // boot.sh disable
-#define EXIT_BOOT_SHELF 11 // boot.sh enable
-
-// Settings live beside the app: {"dark": true}.
-static void settings_path(char *out, int n) { host_path(SD_PREFIX "/App/Shelf/settings.json", out, n); }
-
-static void settings_load(void)
+// Battery and charging state, polled while the home screen is up.
+static void status_poll(void)
 {
-    char path[PATH_LEN], buf[256];
-    settings_path(path, sizeof path);
-    FILE *f = fopen(path, "rb");
-    if (!f) return;
-    size_t len = fread(buf, 1, sizeof buf - 1, f);
-    fclose(f);
-    buf[len] = 0;
-    cJSON *j = cJSON_Parse(buf);
-    ui_set_dark(cJSON_IsTrue(cJSON_GetObjectItem(j, "dark")));
-    cJSON_Delete(j);
-}
-
-static void settings_save(void)
-{
-    char path[PATH_LEN], tmp[PATH_LEN + 4];
-    settings_path(path, sizeof path);
-    snprintf(tmp, sizeof tmp, "%s.new", path);
-    FILE *f = fopen(tmp, "wb");
-    if (!f) { fprintf(stderr, "shelf: can't save %s\n", path); return; }
-    fprintf(f, "{\"dark\": %s}\n", ui_dark() ? "true" : "false");
-    if (fclose(f) == 0) rename(tmp, path);
-}
-
-static int read_small(const char *path, char *buf, int n)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f) return -1;
-    size_t len = fread(buf, 1, n - 1, f);
-    fclose(f);
-    buf[len] = 0;
-    return (int)len;
-}
-
-// Battery from Onion's batmon (/tmp/.axp_result on the Mini Plus, else /tmp/percBat) and
-// Wi-Fi from the kernel. SHELF_STATUS="pct,charging,wifi" stands in on the simulator.
-static void status_poll(int sim)
-{
-    int battery = -1, charging = 0, wifi = -1;
-    char buf[512];
-    const char *fake = getenv("SHELF_STATUS");
-    if (fake || sim) {
-        if (!fake || sscanf(fake, "%d,%d,%d", &battery, &charging, &wifi) != 3) {
-            battery = 76; charging = 0; wifi = 3;
-        }
-        ui_set_status(battery, charging, wifi);
-        return;
-    }
-    if (read_small("/tmp/.axp_result", buf, sizeof buf) > 0) {
-        cJSON *j = cJSON_Parse(buf);
-        cJSON *b = cJSON_GetObjectItem(j, "battery"), *ch = cJSON_GetObjectItem(j, "charging");
-        if (cJSON_IsNumber(b)) battery = b->valueint;
-        charging = cJSON_IsNumber(ch) && ch->valueint;
-        cJSON_Delete(j);
-    }
-    if (battery < 0 && read_small("/tmp/percBat", buf, sizeof buf) > 0) battery = atoi(buf);
-    if (battery > 100) battery = 100;
-
-    unsigned flags = 0;
-    if (read_small("/sys/class/net/wlan0/flags", buf, sizeof buf) > 0 &&
-        sscanf(buf, "%x", &flags) == 1 && (flags & 1)) { // IFF_UP: Onion's Wi-Fi is on
-        wifi = 0;
-        if (read_small("/sys/class/net/wlan0/operstate", buf, sizeof buf) > 0 && !strncmp(buf, "up", 2) &&
-            read_small("/proc/net/wireless", buf, sizeof buf) > 0) {
-            const char *line = strstr(buf, "wlan0:");
-            float link, level;
-            int status;
-            if (line && sscanf(line + 6, "%x %f %f", &status, &link, &level) == 3)
-                wifi = level >= -60 ? 3 : level >= -70 ? 2 : 1;
-            else wifi = 1;
-        }
-    }
-    ui_set_status(battery, charging, wifi);
+    int charging = 0;
+    int battery = platform_battery(&charging);
+    ui_set_status(battery, charging);
 }
 
 static int write_ppm(const Image *img, const char *out)
@@ -118,11 +37,12 @@ static int write_ppm(const Image *img, const char *out)
 
 // SHELF_SHOT=out.ppm SHELF_KEYS="RRA..." renders without a window: each key is pressed
 // and given 0.6s of animation, then the final frame is written. Keys: U D L R A B Y l r s
-// (s = START).
-static int headless(Library *lib, const char *cmd_path, Image *canvas, const char *keys, const char *out)
+// (s = START), and X for favorites.
+static int headless(Library *lib, Image *canvas, const char *keys, const char *out)
 {
-    static const char MAP[] = "UDLRABYlrs";
-    static const Button BTN[] = {BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_A, BTN_B, BTN_Y, BTN_L, BTN_R, BTN_START};
+    static const char MAP[] = "UDLRABYXlrs";
+    static const Button BTN[] = {BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_A, BTN_B,
+                                 BTN_Y, BTN_X, BTN_L, BTN_R, BTN_START};
     for (const char *k = keys ? keys : ""; ; k++) {
         const char *m = *k ? strchr(MAP, *k) : NULL;
         if (m) ui_button(BTN[m - MAP]);
@@ -130,9 +50,12 @@ static int headless(Library *lib, const char *cmd_path, Image *canvas, const cha
             ui_draw(canvas); // requests the icons on screen
             while (icons_pump(64)) {}
             ui_update(1.f / 60);
-            int g = ui_take_launch();
-            if (g >= 0) { lib_launch(lib, g, cmd_path); ui_reset_home(); }
-            ui_take_action(); // a screenshot never saves settings or quits
+            int gi = ui_take_launch(); // as if it had played: the game becomes the newest
+            if (gi >= 0) {
+                if (lib_mark_played(lib, gi)) fprintf(stderr, "shelf: couldn't save recents\n");
+                ui_reset_home();
+            }
+            ui_take_action(); // a screenshot never saves settings
         }
         if (!*k) break;
     }
@@ -140,70 +63,48 @@ static int headless(Library *lib, const char *cmd_path, Image *canvas, const cha
     return write_ppm(canvas, out);
 }
 
-/* ---------- game switcher ---------- */
-
-#define SYSDIR SD_PREFIX "/.tmp_update"
-
-// Creates an empty marker file. Returns 0, or -1 (reported) when it couldn't be made.
-static int touch(const char *dev)
+// SHELF_BENCH frames draws the screen as fast as it can, without a display. Scenes: home,
+// grid (a folder), scroll (the home row), transition (in and out of a folder).
+static int bench(Library *lib, Image *canvas)
 {
-    char host[PATH_LEN];
-    host_path(dev, host, sizeof host);
-    FILE *f = fopen(host, "w");
-    if (!f || fclose(f)) {
-        fprintf(stderr, "shelf: couldn't create %s: %s\n", host, strerror(errno));
-        return -1;
+    int n = atoi(getenv("SHELF_BENCH"));
+    if (n < 1 || n > 10000) return 1;
+    const char *scene = getenv("SHELF_BENCH_SCENE");
+    if (!scene) scene = "home";
+    int grid = !strcmp(scene, "grid"), scroll = !strcmp(scene, "scroll");
+    int transitions = !strcmp(scene, "transition");
+    if (!grid && !scroll && !transitions && strcmp(scene, "home")) return 1;
+    // Grid and transitions start from the first library folder (A on a recent plays it).
+    if (grid || transitions) ui_button(BTN_R);
+    if (grid) ui_button(BTN_A);
+    // Warm the same initial scene in both renderers; navigation still exercises newly
+    // visible tiles and art requests inside the measured loop.
+    for (int i = 0; i < 60; i++) {
+        ui_draw(canvas);
+        while (icons_pump(64)) {}
+        ui_update(1.f / 60);
     }
+    icons_start_worker(); // as in the interactive loop: art decodes off the frame
+    double t0 = platform_now(), worst_frame = 0;
+    int over = 0;
+    for (int i = 0; i < n; i++) {
+        double begin = platform_now();
+        if (scroll && i % 12 == 0) ui_button((i / 72) % 2 ? BTN_LEFT : BTN_RIGHT);
+        if (grid && i % 12 == 0) {
+            static const Button moves[] = {BTN_DOWN, BTN_DOWN, BTN_RIGHT, BTN_UP, BTN_UP, BTN_LEFT};
+            ui_button(moves[(i / 12) % 6]);
+        }
+        if (transitions && i % 36 == 0) ui_button((i / 36) % 2 ? BTN_B : BTN_A);
+        icons_pump(2);
+        ui_update(1.f / 60);
+        ui_draw(canvas);
+        double elapsed = platform_now() - begin;
+        if (elapsed > worst_frame) worst_frame = elapsed;
+        if (elapsed > .015) over++; // 16.7 ms vblank less ~1.6 ms rotate into fb
+    }
+    fprintf(stderr, "shelf: %s benchmark %d frames, %.2f ms/frame, worst %.2f ms, %d over 15 ms\n",
+            scene, n, (platform_now() - t0) * 1000 / n, worst_frame * 1000, over);
     return 0;
-}
-
-static void unlink_dev(const char *dev)
-{
-    char host[PATH_LEN];
-    host_path(dev, host, sizeof host);
-    remove(host);
-}
-
-// Where Onion's runtime looks for its handoff flags (tests point it elsewhere).
-static const char *runtime_tmp = "/tmp";
-
-// Tells the runtime to run the queued game next and load its autosave. Both flags or
-// neither: a game started without its state looks like lost progress.
-static int queue_resume_flags(void)
-{
-    char quick[PATH_LEN], load[PATH_LEN];
-    snprintf(quick, sizeof quick, "%s/quick_switch", runtime_tmp);
-    snprintf(load, sizeof load, "%s/force_auto_load_state", runtime_tmp);
-    if (touch(quick)) return -1;
-    if (touch(load)) { unlink(quick); return -1; }
-    return 0;
-}
-
-// If Shelf's switcher dies over a paused game, the game would stay frozen with MENU
-// disabled. Unpause it on the way out (sendto is async-signal-safe).
-static void overlay_crash(int sig)
-{
-    pid_t pid = sw_overlay_pid();
-    if (pid > 0) kill(pid, SIGCONT);
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    struct sockaddr_in to = {0};
-    to.sin_family = AF_INET;
-    to.sin_port = htons(55355);
-    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    const char *cmd = sw_resume_command();
-    sendto(fd, cmd, cmd[0] == 'P' ? 12 : 7, 0, (struct sockaddr *)&to, sizeof to);
-    unlink(SYSDIR "/.runGameSwitcher");
-    _exit(128 + sig);
-}
-
-// Keymon terminates the overlay before power/sleep handoffs. Leave through the normal
-// loop so framebuffer ownership and required saves are unwound before resuming.
-static volatile sig_atomic_t overlay_stop;
-static void overlay_term(int sig) { overlay_stop = 1; platform_wake(); }
-static Button overlay_poll(void)
-{
-    if (overlay_stop) { overlay_stop = 0; return BTN_QUIT; }
-    return platform_poll();
 }
 
 /* ---------- frame loop screens (see loop.h) ---------- */
@@ -223,266 +124,100 @@ static double screen_idle(void *ud) { return ui_idle(); }
 static void screen_draw(void *ud, Image *canvas) { ui_draw(canvas); }
 
 typedef struct {
-    int sim, running, toast;
-    double next_status;
-} SwitcherLoop;
-
-static double switcher_tick(void *ud, double now)
-{
-    SwitcherLoop *l = ud;
-    if (now >= l->next_status) { status_poll(l->sim); l->next_status = now + 5; }
-    icons_trim();
-    int save = l->running ? sw_save_state() : SW_SAVE_NONE;
-    int t = save == SW_SAVE_BUSY ? SW_TOAST_SAVING : save == SW_SAVE_DONE ? SW_TOAST_SAVED
-          : save == SW_SAVE_FAILED ? SW_TOAST_FAILED
-          : save == SW_SAVE_ON_EXIT ? SW_TOAST_ON_EXIT : SW_TOAST_NONE;
-    if (t != l->toast) ui_switch_saving(l->toast = t);
-    return l->next_status;
-}
-
-static int switcher_after(void *ud) { return ui_take_action(); }
-static void overlay_present(const Image *canvas)
-{
-    if (sw_overlay_ready()) platform_present(canvas);
-}
-
-static int switcher_main(int overlay, int sim, const char *font_dir, char **argv)
-{
-    static Recent rec[MAX_RECENT];
-    static Library lib;
-    double t0 = platform_now();
-    Image *canvas = img_new(SCREEN_W, SCREEN_H), *frame = img_new(SCREEN_W, SCREEN_H);
-    // The paused game's last frame, before anything draws over it.
-    int have_frame = overlay && canvas && frame && !platform_grab(frame);
-    double t_grab = platform_now();
-    if (lib_load_recents(&lib, rec, MAX_RECENT) || !canvas) {
-        if (overlay) unlink_dev(SYSDIR "/.runGameSwitcher");
-        img_free(canvas); img_free(frame); lib_free(&lib);
-        return 1;
-    }
-    if (overlay && !sim) {
-        signal(SIGSEGV, overlay_crash);
-        signal(SIGBUS, overlay_crash);
-        signal(SIGABRT, overlay_crash);
-        signal(SIGFPE, overlay_crash);
-        signal(SIGTERM, overlay_term);
-        setenv("SHELF_MUTE", "1", 1); // RetroArch has the audio device
-    }
-    double t_recents = platform_now();
-    int running = overlay && lib.ngames && sw_overlay_begin(have_frame ? frame : NULL, &rec[0]);
-    double t_verify = platform_now();
-    if (sim && overlay && getenv("SHELF_FRAME")) running = lib.ngames > 0; // no RetroArch to ask
-    if (overlay && !running) {
-        // A startup timeout/mismatched recent is not a license to steal the game's VT
-        // or terminate it. Clear the launch lock so MENU can retry once RA is ready.
-        fprintf(stderr, "shelf: declining overlay; running game could not be verified\n");
-        sw_overlay_resume();
-        unlink_dev(SYSDIR "/.runGameSwitcher");
-        img_free(canvas); img_free(frame); lib_free(&lib);
-        return 0;
-    }
-    settings_load();
-    if (icons_init(&lib)) fprintf(stderr, "shelf: no memory for artwork; showing none\n");
-    sw_cards_start(&lib, rec, 248, 186, running && have_frame ? frame : NULL);
-    if (running && have_frame) frame = NULL;
-    ui_switch_hooks(sw_card, sw_full, sw_card_select, sw_cards_revision);
-    const char *shot = getenv("SHELF_SHOT");
-    if (shot) { // headless, as for Shelf: SHELF_FRAMES frames (default 36) after each key
-        static const char MAP[] = "LRABlrm";
-        static const Button BTN[] = {BTN_LEFT, BTN_RIGHT, BTN_A, BTN_B, BTN_L, BTN_R, BTN_MENU};
-        const char *fr = getenv("SHELF_FRAMES");
-        int frames = fr ? atoi(fr) : 36;
-        if (ui_init_switcher(&lib, font_dir, overlay, running)) return 1;
-        ui_draw(canvas);
-        fprintf(stderr, "shelf: switcher first frame after %.0f ms\n", (platform_now() - t0) * 1000);
-        ui_set_status(76, 0, 3);
-        for (const char *k = getenv("SHELF_KEYS") ? getenv("SHELF_KEYS") : ""; ; k++) {
-            const char *m = *k ? strchr(MAP, *k) : NULL;
-            if (m) ui_button(BTN[m - MAP]);
-            for (int f = 0; f < frames; f++) {
-                if (f == 0) usleep(150000); // let the card worker catch up
-                ui_switch_saving(running ? SW_TOAST_SAVED : SW_TOAST_NONE);
-                ui_update(1.f / 60);
-                ui_draw(canvas);
-                while (icons_pump(64)) {}
-                ui_take_action();
-            }
-            if (!*k) break;
-        }
-        ui_draw(canvas);
-        int rc = write_ppm(canvas, shot);
-        if (running) sw_overlay_resume(); // finishes the save, as leaving does
-        sw_cards_stop();
-        return rc;
-    }
-    // Render-only benchmark, as for Shelf (SHELF_SWITCHER=1 keeps RetroArch out of it).
-    // Scenes: idle, scroll (left/right every 12 frames), zoom (open, then A, every 36).
-    const char *bench = getenv("SHELF_BENCH");
-    if (bench) {
-        int n = atoi(bench);
-        const char *scene = getenv("SHELF_BENCH_SCENE");
-        if (!scene) scene = "idle";
-        int scroll = !strcmp(scene, "scroll"), zoom = !strcmp(scene, "zoom");
-        if (n < 1 || n > 10000 || (!scroll && !zoom && strcmp(scene, "idle"))) return 1;
-        if (ui_init_switcher(&lib, font_dir, overlay, running)) return 1;
-        fprintf(stderr, "shelf: switcher ready after %.0f ms\n", (platform_now() - t0) * 1000);
-        for (int i = 0; i < 60; i++) { // let the cards load
-            ui_update(1.f / 60);
-            ui_draw(canvas);
-            while (icons_pump(64)) {}
-            usleep(5000);
-        }
-        icons_start_worker();
-        double start = platform_now(), worst = 0;
-        int over = 0;
-        for (int i = 0; i < n; i++) {
-            double begin = platform_now();
-            if (scroll && i % 12 == 0) ui_button((i / 72) % 2 ? BTN_LEFT : BTN_RIGHT);
-            if (zoom && i % 36 == 0) {
-                if ((i / 36) % 2) ui_button(BTN_A);
-                else ui_switch_reopen();
-            }
-            ui_update(1.f / 60);
-            ui_draw(canvas);
-            ui_take_action();
-            double el = platform_now() - begin;
-            if (el > worst) worst = el;
-            if (el > .015) over++;
-        }
-        fprintf(stderr, "shelf: switcher %s benchmark %d frames, %.2f ms/frame, worst %.2f ms, %d over 15 ms\n",
-                scene, n, (platform_now() - start) * 1000 / n, worst * 1000, over);
-        if (running) sw_overlay_resume();
-        sw_cards_stop();
-        return 0;
-    }
-    double t_setup = platform_now();
-    int ui_failed = ui_init_switcher(&lib, font_dir, overlay, running);
-    double t_ui = platform_now();
-    if (ui_failed || platform_init(running)) {
-        fprintf(stderr, "shelf: switcher couldn't start\n");
-        if (running) sw_overlay_resume();
-        if (overlay) unlink_dev(SYSDIR "/.runGameSwitcher");
-        return 1;
-    }
-    double t_platform = platform_now();
-    icons_start_worker();
-    status_poll(sim);
-    double t_up = platform_now();
-    fprintf(stderr, "shelf: switcher up in %.0f ms (%d recents, %s): grab %.0f, recents %.0f, "
-            "verify+pause %.0f, cards %.0f, ui %.0f, display %.0f, rest %.0f\n", (t_up - t0) * 1000,
-            lib.ngames, running ? "game paused" : overlay ? "no game running" : "menu",
-            (t_grab - t0) * 1000, (t_recents - t_grab) * 1000, (t_verify - t_recents) * 1000,
-            (t_setup - t_verify) * 1000, (t_ui - t_setup) * 1000, (t_platform - t_ui) * 1000,
-            (t_up - t_platform) * 1000);
-
-    SwitcherLoop sl = {sim, running, SW_TOAST_NONE, platform_now() + 5};
-    LoopScreen screen = {&sl, screen_button, switcher_tick, screen_update, screen_idle, screen_draw, switcher_after};
-    LoopIO io = loop_platform();
-    if (overlay) io.poll = overlay_poll;
-    if (overlay && !sim) io.present = overlay_present;
-    sw_set_notify(platform_wake);
-    icons_set_notify(platform_wake);
-    int action = loop_run(&io, &screen, canvas, NULL);
-    sw_set_notify(NULL);
-    icons_set_notify(NULL);
-
-    int target = ui_switch_target();
-    fprintf(stderr, "shelf: switcher %s %s\n", action == UI_SW_RESUME ? "resume" : action == UI_SW_PLAY ? "play" : "home",
-            target >= 0 ? rec[target].rompath : "");
-    if (action == UI_SW_PLAY) {
-        // Onion's resume: queue the game, keep the queued command over the runtime's
-        // "back to MainUI" step, and auto-load its state.
-        char cmd[PATH_LEN], tmp[PATH_LEN + 4];
-        host_path(SYSDIR "/cmd_to_run.sh", cmd, sizeof cmd);
-        snprintf(tmp, sizeof tmp, "%s.new", cmd);
-        // The runtime's sh may still be reading cmd_to_run.sh (the game being left):
-        // replace it by rename rather than rewriting it.
-        if (lib_resume(&rec[target], tmp) < 0 || rename(tmp, cmd)) {
-            fprintf(stderr, "shelf: couldn't queue the game\n");
-            action = UI_SW_HOME;
-        } else if (!sim && queue_resume_flags()) {
-            fprintf(stderr, "shelf: couldn't hand the game to the runtime; going home\n");
-            action = UI_SW_HOME;
-        }
-    }
-    if (action == UI_SW_HOME) unlink_dev(SYSDIR "/cmd_to_run.sh");
-
-    // Finish every flip and restore the original framebuffer BEFORE letting RA draw
-    // or exit. Its runtime may start the next game immediately when the old PID exits.
-    sw_cards_stop();
-    ui_free();
-    icons_free();
-    // A game being left would show its old frame through its exit save and the next
-    // launch; keep the switcher's last frame (the chosen game, or Shelf) up instead.
-    if (running && action != UI_SW_RESUME) platform_keep_last_frame();
-    platform_quit();
-    unlink_dev(SYSDIR "/.runGameSwitcher");
-    // keymon flags every in-game MENU press so the runtime shows Onion's "Saving ..."
-    // panel when RA exits; Shelf's switcher already showed the save.
-    if (running) {
-        char flag[PATH_LEN];
-        snprintf(flag, sizeof flag, "%s/.displaySavingMessage", runtime_tmp);
-        remove(flag);
-    }
-    sync();
-    if (action == UI_SW_RESUME) sw_overlay_resume();
-    else if (running) sw_quit_game();
-    img_free(canvas);
-    img_free(frame);
-    lib_free(&lib);
-    return 0;
-}
-
-typedef struct {
     Library *lib;
-    const char *cmd_path;
-    int sim, status;
+    Settings *set;
+    int quit, launch, power_off;
     double next_status;
 } HomeLoop;
 
+// Saves what the Options panel changed and applies it to the hardware.
+static void settings_apply(HomeLoop *l)
+{
+    Settings s = ui_settings();
+    *l->set = s;
+    platform_set_brightness(s.brightness);
+    platform_set_volume(s.volume);
+    if (settings_save(&s)) fprintf(stderr, "shelf: couldn't save the settings\n");
+}
+
+// POWER on the home screen: blank the panel and sleep until POWER wakes it (or the sleep
+// limit powers off). Returns 1 when Shelf should power off.
+static int home_standby(void)
+{
+    platform_standby(1);
+    double until = platform_now() + 30 * 60;
+    int off = 0;
+    for (;;) {
+        platform_wait(until);
+        Button b;
+        while ((b = platform_poll()) != BTN_NONE) {
+            if (b == BTN_POWER) goto woke;
+            if (b == BTN_POWER_OFF || b == BTN_QUIT) { off = 1; goto woke; }
+        }
+        if (platform_now() >= until) { off = 1; goto woke; }
+    }
+woke:
+    platform_standby(0);
+    return off;
+}
+
 static void home_button(void *ud, Button b)
 {
-    if (b == BTN_QUIT) ((HomeLoop *)ud)->status = -1;
-    else screen_button(ud, b);
+    HomeLoop *l = ud;
+    if (b == BTN_QUIT) { l->quit = 1; return; } // the window closed
+    if (b == BTN_POWER) {
+        if (!home_standby()) { ui_button(BTN_REDRAW); return; }
+        settings_save(l->set);
+        l->power_off = 1;
+        platform_power_off();
+        return;
+    }
+    if (b == BTN_POWER_OFF) { // held: save everything and go
+        settings_save(l->set);
+        l->power_off = 1;
+        platform_power_off();
+        return;
+    }
+    if (b == BTN_VOLUME) { // the hardware keys moved the volume: remember it
+        Settings s = ui_settings();
+        s.volume = platform_volume();
+        ui_set_settings(&s);
+        *l->set = s;
+        settings_save(&s);
+        return;
+    }
+    screen_button(ud, b);
 }
 
 static double home_tick(void *ud, double now)
 {
     HomeLoop *l = ud;
-    if (now >= l->next_status) { status_poll(l->sim); l->next_status = now + 5; }
+    if (now >= l->next_status) {
+        status_poll();
+        l->next_status = now + 30;
+    }
     icons_pump(2); // only without the worker; new art makes ui_idle draw
     icons_trim();
     return l->next_status;
 }
 
-// Returns nonzero to leave Shelf, with l->status as the exit code.
 static int home_after(void *ud)
 {
     HomeLoop *l = ud;
-    if (l->status < 0) { l->status = 0; return 1; } // window closed
-    switch (ui_take_action()) {
-    case UI_EXIT: return 1; // to Onion's menu
-    case UI_THEME: settings_save(); break;
-    case UI_BOOT_ONION: l->status = EXIT_BOOT_ONION; break;
-    case UI_BOOT_SHELF: l->status = EXIT_BOOT_SHELF; break;
+    if (l->quit || l->power_off) return 1;
+    int action = ui_take_action();
+    if (action == UI_SETTINGS) {
+        settings_apply(l);
+    } else if (action == UI_POWER_OFF) {
+        settings_save(l->set);
+        l->power_off = 1;
+        platform_power_off();
+        return 1;
     }
-    if (l->status && l->sim) {
-        fprintf(stderr, "shelf: would run boot.sh %s\n", l->status == EXIT_BOOT_ONION ? "disable" : "enable");
-        l->status = 0;
-    }
-    if (l->status) return 1;
-    int g = ui_take_launch();
-    if (g >= 0) {
-        int launched = lib_launch(l->lib, g, l->cmd_path) >= 0;
-        ui_reset_home();
-        if (launched) {
-            fprintf(stderr, "shelf: launch -> %s\n", l->cmd_path);
-            if (!l->sim) return 1; // on the device Onion takes over from here
-        } else {
-            fprintf(stderr, "shelf: launch failed; staying in Shelf\n");
-        }
-    }
-    return 0;
+    int gi = ui_take_launch();
+    if (gi < 0) return 0;
+    l->launch = gi;
+    return 1;
 }
 
 // SHELF_STATS: draw and present times, frames and idle waits, every 120 frames.
@@ -517,113 +252,97 @@ static void stats_present(const Image *frame)
     stats.t0 = platform_now();
 }
 
-int main(int argc, char **argv)
+int main(void)
 {
-    const char *root = getenv("SHELF_ROOT");      // simulator: folder standing in for /mnt/SDCARD
-    const char *fonts = getenv("SHELF_FONTS");    // defaults to the installed app folder
-    const char *cmd = getenv("SHELF_CMD");        // where to write the launch command
-    int sim = root != NULL;
+    const char *root = getenv("SHELF_ROOT");   // simulator: folder standing in for /mnt/SDCARD
+    const char *fonts = getenv("SHELF_FONTS"); // defaults to Shelf's own fonts folder
     if (root) lib_set_root(root);
 
-    char font_dir[PATH_LEN], cmd_path[PATH_LEN];
+    char font_dir[PATH_LEN];
     if (fonts) snprintf(font_dir, sizeof font_dir, "%s", fonts);
-    else host_path(SD_PREFIX "/App/Shelf/fonts", font_dir, sizeof font_dir);
-    snprintf(cmd_path, sizeof cmd_path, "%s", cmd ? cmd : "/tmp/cmd_to_run.sh");
-
-    // Run as Onion's gameSwitcher (boot.sh mounts Shelf there), or SHELF_SWITCHER=1|overlay.
-    const char *base = strrchr(argv[0], '/');
-    const char *sw = getenv("SHELF_SWITCHER");
-    if (!strcmp(base ? base + 1 : argv[0], "gameSwitcher") || sw) {
-        int overlay = (argc > 1 && !strcmp(argv[1], "--overlay")) || (sw && !strcmp(sw, "overlay"));
-        return switcher_main(overlay, sim, font_dir, argv);
-    }
+    else host_path(SD_PREFIX "/.shelf/fonts", font_dir, sizeof font_dir);
 
     Library lib;
     if (lib_load(&lib)) return 1;
-    fprintf(stderr, "shelf: %d systems, %d games, %d recent, %d with play time\n", lib.nsys, lib.ngames,
-            lib.nrecent, activity_load(&lib));
+    fprintf(stderr, "shelf: %d systems, %d games, %d recent\n", lib.nsys, lib.ngames, lib.nrecent);
 
-    // SHELF_THEME=light|dark overrides the saved setting (screenshots).
-    const char *theme = getenv("SHELF_THEME");
-    if (theme) ui_set_dark(!strcmp(theme, "dark"));
-    else settings_load();
-    char hook[PATH_LEN];
-    host_path(SD_PREFIX "/.tmp_update/startup/shelf.sh", hook, sizeof hook);
-    ui_set_boot(access(hook, F_OK) == 0);
+    Settings set;
+    settings_load(&set);
+    const char *theme = getenv("SHELF_THEME"); // screenshots override the saved theme
+    if (theme) set.dark = !strcmp(theme, "dark");
 
     if (icons_init(&lib)) fprintf(stderr, "shelf: no memory for artwork; showing none\n");
-    if (ui_init(&lib, font_dir)) { fprintf(stderr, "shelf: fonts missing in %s\n", font_dir); return 1; }
     Image *canvas = img_new(SCREEN_W, SCREEN_H);
+    if (!canvas) return 1;
+    status_poll();
 
-    status_poll(sim);
     const char *shot = getenv("SHELF_SHOT");
-    if (shot) return headless(&lib, cmd_path, canvas, getenv("SHELF_KEYS"), shot);
-
-    // Render-only benchmark: safe to run over SSH while Onion owns the screen.
-    const char *bench = getenv("SHELF_BENCH");
-    if (bench) {
-        int n = atoi(bench);
-        if (n < 1 || n > 10000) return 1;
-        const char *scene = getenv("SHELF_BENCH_SCENE");
-        if (!scene) scene = "home";
-        int grid = !strcmp(scene, "grid"), scroll = !strcmp(scene, "scroll");
-        int transitions = !strcmp(scene, "transition");
-        if (!grid && !scroll && !transitions && strcmp(scene, "home")) return 1;
-        // Grid and transitions start from the first library folder (A on a recent launches).
-        if (grid || transitions) ui_button(BTN_R);
-        if (grid) ui_button(BTN_A);
-        // Warm the same initial scene in both renderers; navigation still exercises
-        // newly visible tiles and art requests inside the measured loop.
-        for (int i = 0; i < 60; i++) {
-            ui_draw(canvas);
-            while (icons_pump(64)) {}
-            ui_update(1.f / 60);
-        }
-        icons_start_worker(); // as in the interactive loop: art decodes off the frame
-        double t0 = platform_now(), worst_frame = 0;
-        int over = 0;
-        for (int i = 0; i < n; i++) {
-            double begin = platform_now();
-            if (scroll && i % 12 == 0)
-                ui_button((i / 72) % 2 ? BTN_LEFT : BTN_RIGHT);
-            if (grid && i % 12 == 0) {
-                static const Button moves[] = {BTN_DOWN, BTN_DOWN, BTN_RIGHT, BTN_UP, BTN_UP, BTN_LEFT};
-                ui_button(moves[(i / 12) % 6]);
-            }
-            if (transitions && i % 36 == 0)
-                ui_button((i / 36) % 2 ? BTN_B : BTN_A);
-            icons_pump(2);
-            ui_update(1.f / 60);
-            ui_draw(canvas);
-            double elapsed = platform_now() - begin;
-            if (elapsed > worst_frame) worst_frame = elapsed;
-            if (elapsed > .015) over++; // 16.7 ms vblank less ~1.6 ms rotate into fb
-        }
-        fprintf(stderr, "shelf: %s benchmark %d frames, %.2f ms/frame, worst %.2f ms, %d over 15 ms\n",
-                scene, n, (platform_now() - t0) * 1000 / n, worst_frame * 1000, over);
-        img_free(canvas); ui_free(); icons_free(); lib_free(&lib);
-        return 0;
+    if (shot || getenv("SHELF_BENCH")) {
+        ui_set_dark(set.dark); // before ui_init: the background is built in this palette
+        if (ui_init(&lib, font_dir)) { fprintf(stderr, "shelf: fonts missing in %s\n", font_dir); return 1; }
+        ui_set_settings(&set);
+        int rc = shot ? headless(&lib, canvas, getenv("SHELF_KEYS"), shot) : bench(&lib, canvas);
+        ui_free();
+        icons_free();
+        lib_free(&lib);
+        img_free(canvas);
+        return rc;
     }
 
-    if (platform_init(0)) return 1;
+    if (platform_init()) return 1;
+    platform_set_brightness(set.brightness);
+    platform_set_volume(set.volume);
     if (icons_start_worker()) fprintf(stderr, "shelf: icon worker unavailable; loading art per frame\n");
-    HomeLoop hl = {&lib, cmd_path, sim, 0, platform_now() + 5};
-    LoopScreen screen = {&hl, home_button, home_tick, screen_update, screen_idle, screen_draw, home_after};
-    LoopIO io = loop_platform();
-    if (getenv("SHELF_STATS")) {
-        stats.t0 = platform_now();
-        screen.draw = stats_draw;
-        io.present = stats_present;
-    }
     icons_set_notify(platform_wake);
-    loop_run(&io, &screen, canvas, &stats.loop);
-    icons_set_notify(NULL);
-    int status = hl.status;
 
+    int quit = 0, power_off = 0;
+    char toast[192] = ""; // a failure the home screen should show
+    while (!quit && !power_off) {
+        ui_set_dark(set.dark);
+        if (ui_init(&lib, font_dir)) {
+            fprintf(stderr, "shelf: fonts missing in %s\n", font_dir);
+            break;
+        }
+        ui_set_settings(&set);
+        if (toast[0]) {
+            ui_set_toast(toast);
+            toast[0] = 0;
+        }
+        HomeLoop hl = {&lib, &set, 0, -1, 0, platform_now() + 30};
+        LoopScreen screen = {&hl, home_button, home_tick, screen_update, screen_idle, screen_draw, home_after};
+        LoopIO io = loop_platform();
+        if (getenv("SHELF_STATS")) {
+            stats.t0 = platform_now();
+            screen.draw = stats_draw;
+            io.present = stats_present;
+        }
+        loop_run(&io, &screen, canvas, &stats.loop);
+        set = ui_settings();
+        ui_free();
+        if (hl.quit || hl.power_off) break;
+
+        // A game, and then whichever game its in-game menu asked for.
+        int want = hl.launch;
+        for (;;) {
+            if (want < 0) break;
+            if (lib_mark_played(&lib, want)) fprintf(stderr, "shelf: couldn't save recents\n");
+            GameSettings gs = {set.scale, font_dir};
+            int next = -1;
+            int result = game_play(&lib, want, &gs, &next);
+            if (game_error()[0]) snprintf(toast, sizeof toast, "%s", game_error());
+            if (result == GAME_SWITCH && next >= 0 && next != want) {
+                want = next;
+                continue;
+            }
+            if (result == GAME_POWER_OFF) power_off = 1;
+            break;
+        }
+    }
+
+    icons_set_notify(NULL);
     img_free(canvas);
-    ui_free();
     icons_free();
     lib_free(&lib);
     platform_quit();
-    return status;
+    return 0;
 }

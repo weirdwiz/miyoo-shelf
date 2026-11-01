@@ -62,7 +62,7 @@ static double s_tick(void *ud, double now)
 {
     icons_pump(2);
     if (now >= card_at) { card_rev++; card_at = INFINITY; }
-    if (now >= status_at) { ui_set_status(50, 1, 2); status_at = INFINITY; }
+    if (now >= status_at) { ui_set_status(50, 1); status_at = INFINITY; }
     double next = card_at < status_at ? card_at : status_at;
     return next < now + 5 ? next : now + 5;
 }
@@ -150,13 +150,11 @@ int main(int argc, char **argv)
     ui_free();
     icons_free();
 
-    // Switcher: a screenshot arriving later redraws; a settled switcher stops.
-    static Recent rec[MAX_RECENT];
-    Library sw;
-    CHECK(lib_load_recents(&sw, rec, MAX_RECENT) == 0);
-    icons_init(&sw);
+    // Switcher (the in-game menu to come): a screenshot arriving later redraws; a settled
+    // switcher stops.
+    icons_init(&lib);
     ui_switch_hooks(no_image, no_image, no_select, card_revision);
-    CHECK(ui_init_switcher(&sw, argv[2], 0, 0) == 0);
+    CHECK(ui_init_switcher(&lib, argv[2], 0, 0) == 0);
     double t0 = clock_now;
     n = run_until(canvas, t0 + 10, &st);
     CHECK(n > 30 && last_present < t0 + 8);
@@ -174,7 +172,7 @@ int main(int argc, char **argv)
     CHECK(shot != NULL);
     card_rev = 0;
     ui_switch_hooks(fake_card, no_image, no_select, card_revision);
-    CHECK(ui_init_switcher(&sw, argv[2], 0, 0) == 0);
+    CHECK(ui_init_switcher(&lib, argv[2], 0, 0) == 0);
     t0 = clock_now;
     run_until(canvas, t0 + 10, &st);
     card_at = t0 + 12;
@@ -187,7 +185,6 @@ int main(int argc, char **argv)
     ui_free();
     img_free(shot);
     icons_free();
-    lib_free(&sw);
     lib_free(&lib);
     img_free(canvas);
     if (failures) return 1;

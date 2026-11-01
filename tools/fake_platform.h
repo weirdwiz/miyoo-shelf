@@ -1,0 +1,39 @@
+// A fake platform for host tests and headless screenshots: a clock that only moves when
+// Shelf sleeps or waits, scripted button presses, and counters for what the platform was
+// asked to do. See fake_platform.c.
+#ifndef SHELF_FAKE_PLATFORM_H
+#define SHELF_FAKE_PLATFORM_H
+
+#include "../src/platform.h"
+
+typedef struct {
+    int presents;        // platform_present calls (UI frames)
+    int game_presents;   // platform_present_game calls (game frames)
+    int asleep_presents; // frames presented while platform_standby(1) was in effect
+    int standby_on;      // platform_standby(1) calls
+    int standby_off;     // platform_standby(0) calls
+    int power_off;       // platform_power_off calls
+    int performance_on;  // platform_performance(1) calls
+    int audio_on;        // platform_audio_source(pull) calls
+    int audio_off;       // platform_audio_source(NULL) calls
+    int clicks;
+    int brightness, volume;
+} FakePlatform;
+
+void fp_reset(void); // forget the clock, the script and the counters
+const FakePlatform *fp(void);
+// Queues a press the fake delivers once, when the clock reaches `at`; the test scripts
+// presses in time order (fp_press_at sorts them).
+void fp_press_at(double at, Button b);
+// Buttons platform_held() reports.
+void fp_hold(unsigned mask);
+// Fails (exit 1) instead of letting a stuck loop run past `at`.
+void fp_limit(double at);
+// The next presented canvas from clock time `at` on, as a copy for screenshots.
+void fp_capture_at(double at);
+const Image *fp_capture(void);
+// The last game frame presented, and the first one after fp_reset() (borrowed copies).
+const Image *fp_frame(void);
+const Image *fp_first_frame(void);
+
+#endif
