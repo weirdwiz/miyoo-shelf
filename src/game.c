@@ -478,7 +478,7 @@ static int run_menu(Session *s)
     LoopScreen screen = {&menu, menu_button, menu_tick, menu_update, menu_idle, menu_draw, menu_after};
     loop_run(&io, &screen, canvas, NULL);
 
-    ui_free();
+    ui_leave(); // the UI stays loaded for the next menu and for the home screen
     menu_cards = NULL;
     cards_free(&cards);
     img_free(canvas);

@@ -365,7 +365,9 @@ int main(void)
         resume = -1;
         if (want < 0) { // the home screen, until it launches a game
             ui_set_dark(set.dark);
-            if (ui_init(&lib, font_dir)) {
+            // The first visit loads the UI; every later one (the menu may have loaded it
+            // already) only enters it, so coming home reads nothing from the card.
+            if (ui_loaded() ? ui_enter_home() : ui_init(&lib, font_dir)) {
                 fprintf(stderr, "shelf: fonts missing in %s\n", font_dir);
                 break;
             }
@@ -386,7 +388,7 @@ int main(void)
             }
             loop_run(&io, &screen, canvas, &stats.loop);
             set = ui_settings();
-            ui_free();
+            ui_leave();
             if (hl.quit || hl.power_off) break;
             want = hl.launch;
         }
@@ -408,6 +410,7 @@ int main(void)
         }
     }
 
+    ui_free();
     icons_set_notify(NULL);
     img_free(canvas);
     icons_free();
