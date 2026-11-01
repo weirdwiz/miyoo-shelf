@@ -183,23 +183,27 @@ static int queue_resume_flags(void)
 // disabled. Unpause it on the way out (sendto is async-signal-safe).
 static void overlay_crash(int sig)
 {
+    pid_t pid = sw_overlay_pid();
+    if (pid > 0) kill(pid, SIGCONT);
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in to = {0};
     to.sin_family = AF_INET;
     to.sin_port = htons(55355);
     to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    sendto(fd, "UNPAUSE", 7, 0, (struct sockaddr *)&to, sizeof to);
+    const char *cmd = sw_resume_command();
+    sendto(fd, cmd, cmd[0] == 'P' ? 12 : 7, 0, (struct sockaddr *)&to, sizeof to);
     unlink(SYSDIR "/.runGameSwitcher");
     _exit(128 + sig);
 }
 
-// Onion's own switcher, copied aside by boot.sh before it mounts Shelf over it.
-static void exec_onion_switcher(char **argv)
+// Keymon terminates the overlay before power/sleep handoffs. Leave through the normal
+// loop so framebuffer ownership and required saves are unwound before resuming.
+static volatile sig_atomic_t overlay_stop;
+static void overlay_term(int sig) { overlay_stop = 1; platform_wake(); }
+static Button overlay_poll(void)
 {
-    static const char ONION[] = SD_PREFIX "/App/Shelf/boot/gameSwitcher-onion";
-    if (access(ONION, X_OK)) return;
-    fprintf(stderr, "shelf: falling back to Onion's switcher\n");
-    execv(ONION, argv);
+    if (overlay_stop) { overlay_stop = 0; return BTN_QUIT; }
+    return platform_poll();
 }
 
 /* ---------- frame loop screens (see loop.h) ---------- */
@@ -230,12 +234,17 @@ static double switcher_tick(void *ud, double now)
     icons_trim();
     int save = l->running ? sw_save_state() : SW_SAVE_NONE;
     int t = save == SW_SAVE_BUSY ? SW_TOAST_SAVING : save == SW_SAVE_DONE ? SW_TOAST_SAVED
-          : save == SW_SAVE_FAILED ? SW_TOAST_FAILED : SW_TOAST_NONE;
+          : save == SW_SAVE_FAILED ? SW_TOAST_FAILED
+          : save == SW_SAVE_ON_EXIT ? SW_TOAST_ON_EXIT : SW_TOAST_NONE;
     if (t != l->toast) ui_switch_saving(l->toast = t);
     return l->next_status;
 }
 
 static int switcher_after(void *ud) { return ui_take_action(); }
+static void overlay_present(const Image *canvas)
+{
+    if (sw_overlay_ready()) platform_present(canvas);
+}
 
 static int switcher_main(int overlay, int sim, const char *font_dir, char **argv)
 {
@@ -245,18 +254,32 @@ static int switcher_main(int overlay, int sim, const char *font_dir, char **argv
     Image *canvas = img_new(SCREEN_W, SCREEN_H), *frame = img_new(SCREEN_W, SCREEN_H);
     // The paused game's last frame, before anything draws over it.
     int have_frame = overlay && canvas && frame && !platform_grab(frame);
+    double t_grab = platform_now();
     if (lib_load_recents(&lib, rec, MAX_RECENT) || !canvas) {
-        if (overlay && !sim) exec_onion_switcher(argv);
+        if (overlay) unlink_dev(SYSDIR "/.runGameSwitcher");
+        img_free(canvas); img_free(frame); lib_free(&lib);
         return 1;
     }
-    int running = overlay && lib.ngames && sw_overlay_begin(have_frame ? frame : NULL, &rec[0]);
-    if (sim && overlay && getenv("SHELF_FRAME")) running = lib.ngames > 0; // no RetroArch to ask
     if (overlay && !sim) {
         signal(SIGSEGV, overlay_crash);
         signal(SIGBUS, overlay_crash);
         signal(SIGABRT, overlay_crash);
         signal(SIGFPE, overlay_crash);
+        signal(SIGTERM, overlay_term);
         setenv("SHELF_MUTE", "1", 1); // RetroArch has the audio device
+    }
+    double t_recents = platform_now();
+    int running = overlay && lib.ngames && sw_overlay_begin(have_frame ? frame : NULL, &rec[0]);
+    double t_verify = platform_now();
+    if (sim && overlay && getenv("SHELF_FRAME")) running = lib.ngames > 0; // no RetroArch to ask
+    if (overlay && !running) {
+        // A startup timeout/mismatched recent is not a license to steal the game's VT
+        // or terminate it. Clear the launch lock so MENU can retry once RA is ready.
+        fprintf(stderr, "shelf: declining overlay; running game could not be verified\n");
+        sw_overlay_resume();
+        unlink_dev(SYSDIR "/.runGameSwitcher");
+        img_free(canvas); img_free(frame); lib_free(&lib);
+        return 0;
     }
     settings_load();
     if (icons_init(&lib)) fprintf(stderr, "shelf: no memory for artwork; showing none\n");
@@ -332,20 +355,31 @@ static int switcher_main(int overlay, int sim, const char *font_dir, char **argv
         sw_cards_stop();
         return 0;
     }
-    if (ui_init_switcher(&lib, font_dir, overlay, running) || platform_init()) {
+    double t_setup = platform_now();
+    int ui_failed = ui_init_switcher(&lib, font_dir, overlay, running);
+    double t_ui = platform_now();
+    if (ui_failed || platform_init(running)) {
         fprintf(stderr, "shelf: switcher couldn't start\n");
         if (running) sw_overlay_resume();
-        if (overlay && !sim) { unlink_dev(SYSDIR "/.runGameSwitcher"); exec_onion_switcher(argv); }
+        if (overlay) unlink_dev(SYSDIR "/.runGameSwitcher");
         return 1;
     }
+    double t_platform = platform_now();
     icons_start_worker();
     status_poll(sim);
-    fprintf(stderr, "shelf: switcher up in %.0f ms (%d recents, %s)\n", (platform_now() - t0) * 1000,
-            lib.ngames, running ? "game paused" : overlay ? "no game running" : "menu");
+    double t_up = platform_now();
+    fprintf(stderr, "shelf: switcher up in %.0f ms (%d recents, %s): grab %.0f, recents %.0f, "
+            "verify+pause %.0f, cards %.0f, ui %.0f, display %.0f, rest %.0f\n", (t_up - t0) * 1000,
+            lib.ngames, running ? "game paused" : overlay ? "no game running" : "menu",
+            (t_grab - t0) * 1000, (t_recents - t_grab) * 1000, (t_verify - t_recents) * 1000,
+            (t_setup - t_verify) * 1000, (t_ui - t_setup) * 1000, (t_platform - t_ui) * 1000,
+            (t_up - t_platform) * 1000);
 
     SwitcherLoop sl = {sim, running, SW_TOAST_NONE, platform_now() + 5};
     LoopScreen screen = {&sl, screen_button, switcher_tick, screen_update, screen_idle, screen_draw, switcher_after};
     LoopIO io = loop_platform();
+    if (overlay) io.poll = overlay_poll;
+    if (overlay && !sim) io.present = overlay_present;
     sw_set_notify(platform_wake);
     icons_set_notify(platform_wake);
     int action = loop_run(&io, &screen, canvas, NULL);
@@ -372,16 +406,27 @@ static int switcher_main(int overlay, int sim, const char *font_dir, char **argv
         }
     }
     if (action == UI_SW_HOME) unlink_dev(SYSDIR "/cmd_to_run.sh");
-    unlink_dev(SYSDIR "/.runGameSwitcher");
-    sync();
-    if (action == UI_SW_RESUME) sw_overlay_resume();
-    else if (running) sw_quit_game();
-    else if (overlay && !sim) sw_quit_game(); // RetroArch without our game: still close it
 
+    // Finish every flip and restore the original framebuffer BEFORE letting RA draw
+    // or exit. Its runtime may start the next game immediately when the old PID exits.
     sw_cards_stop();
     ui_free();
     icons_free();
+    // A game being left would show its old frame through its exit save and the next
+    // launch; keep the switcher's last frame (the chosen game, or Shelf) up instead.
+    if (running && action != UI_SW_RESUME) platform_keep_last_frame();
     platform_quit();
+    unlink_dev(SYSDIR "/.runGameSwitcher");
+    // keymon flags every in-game MENU press so the runtime shows Onion's "Saving ..."
+    // panel when RA exits; Shelf's switcher already showed the save.
+    if (running) {
+        char flag[PATH_LEN];
+        snprintf(flag, sizeof flag, "%s/.displaySavingMessage", runtime_tmp);
+        remove(flag);
+    }
+    sync();
+    if (action == UI_SW_RESUME) sw_overlay_resume();
+    else if (running) sw_quit_game();
     img_free(canvas);
     img_free(frame);
     lib_free(&lib);
@@ -560,7 +605,7 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (platform_init()) return 1;
+    if (platform_init(0)) return 1;
     if (icons_start_worker()) fprintf(stderr, "shelf: icon worker unavailable; loading art per frame\n");
     HomeLoop hl = {&lib, cmd_path, sim, 0, platform_now() + 5};
     LoopScreen screen = {&hl, home_button, home_tick, screen_update, screen_idle, screen_draw, home_after};

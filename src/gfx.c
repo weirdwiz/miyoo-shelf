@@ -45,6 +45,9 @@ Image *img_new(int w, int h)
     img->h = h;
     img->px = calloc((size_t)w * h, 4);
     img->spans = NULL;
+    img->run_row = NULL;
+    img->runs = NULL;
+    img->run_cap = 0;
     if (!img->px) { free(img); return NULL; }
     return img;
 }
@@ -54,6 +57,8 @@ void img_free(Image *img)
     if (!img) return;
     free(img->px);
     free(img->spans);
+    free(img->run_row);
+    free(img->runs);
     free(img);
 }
 
@@ -70,6 +75,54 @@ void img_find_spans(Image *img)
         img->spans[2 * y] = (int16_t)a;
         img->spans[2 * y + 1] = (int16_t)b;
     }
+}
+
+// Finds the first run of visible pixels at or after x that are all opaque or all not:
+// returns its start (w when there is none) and sets *end and *opaque.
+static int next_run(const uint32_t *row, int w, int x, int *end, int *opaque)
+{
+    while (x < w && !(row[x] >> 24)) x++;
+    if (x == w) return w;
+    *opaque = row[x] >> 24 == 255;
+    *end = x + 1;
+    while (*end < w && row[*end] >> 24 && (row[*end] >> 24 == 255) == *opaque) ++*end;
+    return x;
+}
+
+void img_find_runs(Image *img)
+{
+    // Keeps its buffers between calls: bands are redrawn whenever what they show changes.
+    int n = 0, end, opaque;
+    for (int y = 0; y < img->h; y++) {
+        const uint32_t *row = img->px + y * img->w;
+        for (int x = next_run(row, img->w, 0, &end, &opaque); x < img->w; x = next_run(row, img->w, end, &end, &opaque))
+            n++;
+    }
+    if (!img->run_row) img->run_row = malloc(sizeof *img->run_row * (img->h + 1));
+    if (img->run_row && n > img->run_cap) {
+        int16_t *runs = realloc(img->runs, sizeof *img->runs * 3 * n);
+        if (runs) img->runs = runs, img->run_cap = n;
+    }
+    if (!img->run_row || n > img->run_cap) { // out of memory: blend every pixel instead
+        free(img->run_row);
+        free(img->runs);
+        img->run_row = NULL;
+        img->runs = NULL;
+        img->run_cap = 0;
+        return;
+    }
+    n = 0;
+    for (int y = 0; y < img->h; y++) {
+        const uint32_t *row = img->px + y * img->w;
+        img->run_row[y] = n;
+        for (int x = next_run(row, img->w, 0, &end, &opaque); x < img->w; x = next_run(row, img->w, end, &end, &opaque)) {
+            img->runs[3 * n] = (int16_t)x;
+            img->runs[3 * n + 1] = (int16_t)end;
+            img->runs[3 * n + 2] = (int16_t)opaque;
+            n++;
+        }
+    }
+    img->run_row[img->h] = n;
 }
 
 Image *img_load(const char *path)
@@ -228,14 +281,32 @@ void gfx_fill_rrect_around(Image *dst, float x, float y, float w, float h, float
     if (y0 < 0) y0 = 0;
     if (x1 > dst->w) x1 = dst->w;
     if (y1 > dst->h) y1 = dst->h;
-    for (int yy = y0; yy < y1; yy++)
-        for (int xx = x0; xx < x1; xx++) {
-            if (yy >= hy0 && yy < hy1 && xx == hx0 && hx1 > hx0) { xx = hx1 - 1; continue; }
-            float cv = rrect_cov(xx + 0.5f, yy + 0.5f, x, y, w, h, r);
-            if (cv <= 0) continue;
-            uint32_t *d = &dst->px[yy * dst->w + xx];
-            *d = over(*d, cv >= 1 ? c : scale_px(c, (uint32_t)(cv * 255)));
+    for (int yy = y0; yy < y1; yy++) {
+        // The pixels rrect_cov's own shortcut counts as fully covered: a plain fill.
+        float py = yy + 0.5f, lo = x1, hi = x0 - 1.f;
+        if (r >= .5f && py >= y + 1 && py <= y + h - 1) {
+            int straight = py >= y + r && py <= y + h - r;
+            lo = straight || r < 1 ? x + 1 : x + r;
+            hi = straight || r < 1 ? x + w - 1 : x + w - r;
         }
+        int fa = (int)ceilf(lo - 0.5f), fb = (int)floorf(hi - 0.5f); // inclusive
+        int hole = yy >= hy0 && yy < hy1 && hx1 > hx0;
+        uint32_t *row = dst->px + yy * dst->w;
+        for (int xx = x0; xx < x1; xx++) {
+            if (hole && xx == hx0) { xx = hx1 - 1; continue; }
+            if (xx >= fa && xx <= fb) {
+                int end = fb + 1 < x1 ? fb + 1 : x1;
+                if (hole && hx0 > xx && hx0 < end) end = hx0;
+                if (c >> 24 == 255) for (; xx < end; xx++) row[xx] = c;
+                else for (; xx < end; xx++) row[xx] = over(row[xx], c);
+                xx--;
+                continue;
+            }
+            float cv = rrect_cov(xx + 0.5f, py, x, y, w, h, r);
+            if (cv <= 0) continue;
+            row[xx] = over(row[xx], cv >= 1 ? c : scale_px(c, (uint32_t)(cv * 255)));
+        }
+    }
 }
 
 void gfx_stroke_rrect(Image *dst, float x, float y, float w, float h, float r, float t, uint32_t c)
@@ -264,6 +335,18 @@ void gfx_blit(Image *dst, const Image *src, int x, int y, uint8_t alpha)
     for (int sy = sy0; sy < sy1; sy++) {
         const uint32_t *s = src->px + sy * src->w;
         uint32_t *d = dst->px + (y + sy) * dst->w + x;
+        if (alpha == 255 && src->run_row) {
+            // Only the visible runs: copy opaque ones, blend the rest.
+            for (int r = src->run_row[sy]; r < src->run_row[sy + 1]; r++) {
+                int a = src->runs[3 * r], b = src->runs[3 * r + 1];
+                if (a < sx0) a = sx0;
+                if (b > sx1) b = sx1;
+                if (a >= b) continue;
+                if (src->runs[3 * r + 2]) memcpy(d + a, s + a, (size_t)(b - a) * sizeof *d);
+                else for (int sx = a; sx < b; sx++) d[sx] = over(d[sx], s[sx]);
+            }
+            continue;
+        }
         if (alpha == 255 && src->spans) {
             // Blend the soft edges, copy the opaque middle.
             int a = src->spans[2 * sy], b = src->spans[2 * sy + 1];

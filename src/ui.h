@@ -46,7 +46,7 @@ int ui_init_switcher(Library *lib, const char *font_dir, int overlay, int runnin
 // loading or missing), the selection to load first, and a counter that changes with them.
 void ui_switch_hooks(const Image *(*card)(int), const Image *(*full)(int), void (*select)(int),
                      unsigned (*revision)(void));
-enum { SW_TOAST_NONE, SW_TOAST_SAVING, SW_TOAST_SAVED, SW_TOAST_FAILED };
+enum { SW_TOAST_NONE, SW_TOAST_SAVING, SW_TOAST_SAVED, SW_TOAST_FAILED, SW_TOAST_ON_EXIT };
 void ui_switch_saving(int toast);
 int ui_switch_target(void);
 // Benchmark: play the opening zoom again, from full screen into the row.

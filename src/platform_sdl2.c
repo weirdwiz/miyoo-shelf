@@ -17,7 +17,7 @@ static double held_next;
 #define REPEAT_DELAY 0.28
 #define REPEAT_RATE 0.075
 
-int platform_init(void)
+int platform_init(int overlay)
 {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) { SDL_Log("SDL_Init: %s", SDL_GetError()); return -1; }
     const char *s = getenv("SHELF_SCALE");
@@ -95,6 +95,8 @@ void platform_present(const Image *frame)
     SDL_RenderCopy(ren, tex, NULL, NULL);
     SDL_RenderPresent(ren);
 }
+
+void platform_keep_last_frame(void) {}
 
 int platform_grab(Image *out)
 {

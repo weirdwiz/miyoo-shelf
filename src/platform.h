@@ -10,10 +10,11 @@
 typedef enum {
     BTN_NONE, BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT,
     BTN_A, BTN_B, BTN_X, BTN_Y, BTN_L, BTN_R,
-    BTN_START, BTN_SELECT, BTN_MENU, BTN_QUIT,
+    BTN_START, BTN_SELECT, BTN_MENU, BTN_QUIT, BTN_REDRAW,
 } Button;
 
-int platform_init(void);
+// Overlay mode on Miyoo uses raw input/direct fb without taking RetroArch's VT.
+int platform_init(int overlay);
 void platform_quit(void);
 // Returns the next button press (including d-pad auto-repeat), BTN_NONE when drained.
 Button platform_poll(void);
@@ -22,6 +23,9 @@ void platform_present(const Image *frame);
 // SCREEN_W x SCREEN_H image, upright. Call before platform_init. Simulator: SHELF_FRAME
 // names a picture to use. Returns 0 on success.
 int platform_grab(Image *out);
+// The overlay's game is quitting rather than resuming: leave the last presented frame
+// on screen at platform_quit instead of putting the game's own page back.
+void platform_keep_last_frame(void);
 // Nonzero when present waits on vblank (for the previous frame's flip), so the frame
 // loop needn't sleep to pace.
 int platform_vsync_paced(void);

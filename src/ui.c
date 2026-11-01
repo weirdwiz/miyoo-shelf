@@ -319,6 +319,7 @@ static void ui_button_inner(Button b);
 void ui_button(Button b)
 {
     S.redraw = 1;
+    if (b == BTN_REDRAW) return; // exposure/wake, not navigation or new pulse activity
     pulse_wake();
     if (sw_on()) {
         int sel = S.sel;
@@ -427,9 +428,10 @@ static int spring_moving(const Spring *s) { return s->x != s->t || s->v != 0; }
 // Whether the next update will change the scene (springs snap exactly when they settle).
 static int scene_moving(void)
 {
-    if (spring_moving(&S.track)) return 1;
-    for (int i = 0; i < home_count(); i++) if (spring_moving(&S.hscale[i])) return 1;
-    if (S.view == V_FOLDER) {
+    if (S.view == V_HOME) { // hidden behind a folder, the row's springs just settle
+        if (spring_moving(&S.track)) return 1;
+        for (int i = 0; i < home_count(); i++) if (spring_moving(&S.hscale[i])) return 1;
+    } else {
         if (spring_moving(&S.ftrack)) return 1;
         if (S.fall) return 1;
         for (int i = 0; i < S.nfactive; i++) if (spring_moving(&S.fscale[S.factive[i]])) return 1;
@@ -452,6 +454,8 @@ static int cursor_shown(void)
 
 static int sw_animating(void);
 static unsigned sw_revision(void);
+static int sw_prebuild_next(void);
+static void sw_prebuild(void);
 
 // Whether the next update changes what's on screen.
 static int animating(void)
@@ -470,8 +474,11 @@ void ui_update(float dt)
     }
     if (sw_on()) { sw_update(dt); return; }
     spring_step(&S.enter, dt, SNAPPY);
-    scene_step(&S.track, dt, BOUNCE);
-    for (int i = 0; i < home_count(); i++) scene_step(&S.hscale[i], dt, 400.f, 18.f);
+    // Opening or closing a folder rebuilds the scene anyway (any button dirties it), so
+    // the home row moving out of sight mustn't redraw the folder view every frame.
+    void (*home_step)(Spring *, float, float, float) = S.view == V_HOME ? scene_step : spring_step;
+    home_step(&S.track, dt, BOUNCE);
+    for (int i = 0; i < home_count(); i++) home_step(&S.hscale[i], dt, 400.f, 18.f);
     if (S.view == V_FOLDER) {
         scene_step(&S.ftrack, dt, BOUNCE);
         if (S.fall) {
@@ -534,6 +541,8 @@ static void text_center(Image *c, Font *f, const char *s, int cx, int y, uint32_
     text_draw(c, f, buf, cx - text_width(f, buf) / 2, y, col);
 }
 
+static int wrap_text(Font *f, const char *s, int max_w, char out[][128], int max);
+
 static void draw_placeholder(Image *c, const Game *g, float x, float y, float w)
 {
     const System *s = &S.lib->sys[g->sys];
@@ -541,22 +550,16 @@ static void draw_placeholder(Image *c, const Game *g, float x, float y, float w)
     gfx_fill_rrect(c, x + w * .08f, y + w * .08f, w * .84f, w * .84f, w * .06f, argb(40, 255, 255, 255));
     Font *f = w > 120 ? S.label : S.small;
     text_center(c, f, s->label, (int)(x + w / 2), (int)(y + w * .2f), argb(200, 255, 255, 255), (int)(w * .8f));
-    // Title, wrapped onto up to three lines.
-    char words[128];
-    snprintf(words, sizeof words, "%s", g->title);
-    char line[256] = "";
-    int ly = (int)(y + w * .42f), lines = 0, lh = font_height(f);
-    char *save;
-    for (char *wd = strtok_r(words, " ", &save); wd && lines < 3; wd = strtok_r(NULL, " ", &save)) {
-        char trial[256];
-        snprintf(trial, sizeof trial, "%s%s%s", line, *line ? " " : "", wd);
-        if (*line && text_width(f, trial) > w * .84f) {
-            text_center(c, f, line, (int)(x + w / 2), ly, rgb(0xffffff), (int)(w * .84f));
-            ly += lh; lines++;
-            snprintf(line, sizeof line, "%s", wd);
-        } else snprintf(line, sizeof line, "%s", trial);
-    }
-    if (*line && lines < 3) text_center(c, f, line, (int)(x + w / 2), ly, rgb(0xffffff), (int)(w * .84f));
+    // Title, wrapped into as many lines as fit inside the inner card, centred below the label.
+    int lh = font_height(f), top = (int)(y + w * .2f) + lh + (int)(w * .03f);
+    int bottom = (int)(y + w * .88f), max = (bottom - top) / lh;
+    if (max > 3) max = 3;
+    if (max < 1) max = 1;
+    char lines[3][128];
+    int n = wrap_text(f, g->title, (int)(w * .74f), lines, max);
+    int ly = top + (bottom - top - n * lh) / 2;
+    for (int i = 0; i < n; i++, ly += lh)
+        text_center(c, f, lines[i], (int)(x + w / 2), ly, rgb(0xffffff), (int)(w * .74f));
 }
 
 static void draw_game_raw(Image *c, int gi, float cx, float cy, float w, int big)
@@ -872,7 +875,7 @@ static Image *band_begin(Band *b, int h, const char *key)
     return b->img;
 }
 
-static void band_end(Band *b) { img_find_spans(b->img); }
+static void band_end(Band *b) { img_find_runs(b->img); }
 
 static void status_free(void) { band_free(&status_band); }
 
@@ -1166,6 +1169,7 @@ double ui_idle(void)
     if (S.redraw || animating()) return 0;
     if (icons_revision() != S.drawn_art) return 0;
     if (sw_on() && sw_revision() != S.drawn_cards) return 0;
+    if (sw_on() && sw_prebuild_next() >= 0) return .001; // update, not redraw, builds it
     double now = wall();
     if ((long)(now / 60) != S.drawn_minute) return 0;
     return 60 - fmod(now, 60) + .01; // the status clock's next minute
@@ -1375,6 +1379,7 @@ static void sw_update(float dt)
         S.action = W.closing;
         W.fired = 1;
     }
+    sw_prebuild();
 }
 
 // One box-blur pass along a row or column of opaque pixels, edges clamped.
@@ -1520,6 +1525,30 @@ static const Image *sw_small(int i, const Image *sprite)
     return W.small[i];
 }
 
+// A nearby card whose screenshot has loaded but whose sprite isn't built yet, or -1.
+// Building one takes ~30 ms on the device, so it's done while the row is settled rather
+// than in the first frame that scrolls the card into view.
+#define SW_PREBUILD 3
+static int sw_prebuild_next(void)
+{
+    if (!W.card || W.closing || sw_animating()) return -1;
+    for (int d = 0; d <= SW_PREBUILD; d++)
+        for (int side = -1; side <= 1; side += 2) {
+            int i = S.sel + side * d;
+            if (i < 0 || i >= S.lib->nrecent) continue;
+            const Image *shot = W.card(i);
+            if (shot && W.sprite_src[i] != shot) return i;
+        }
+    return -1;
+}
+
+static void sw_prebuild(void)
+{
+    int i = sw_prebuild_next();
+    const Image *sprite = i >= 0 ? sw_sprite(i) : NULL;
+    if (sprite) sw_small(i, sprite);
+}
+
 // The selection ring around a w x h card: stroked once at full card size, then 9-sliced
 // to the size the card is animating through.
 #define SW_RING_OUT 6  // ring's outer edge beyond the card
@@ -1574,7 +1603,8 @@ static void sw_draw_chrome(Image *c)
         }
         draw_status_raw(b);
         if (W.saving) {
-            const char *t = W.saving == SW_TOAST_SAVING ? "Saving…" : W.saving == SW_TOAST_SAVED ? "✓ Saved" : "Couldn't save";
+            const char *t = W.saving == SW_TOAST_SAVING ? "Saving…" : W.saving == SW_TOAST_SAVED ? "✓ Saved"
+                          : W.saving == SW_TOAST_ON_EXIT ? "Saves on exit" : "Couldn't save";
             int tw = text_width(S.small, t), th = font_height(S.small) + 8;
             float tx = SCREEN_W / 2.f - (tw + 24) / 2.f;
             gfx_fill_rrect(b, tx, 6, tw + 24, th, th / 2.f, rgb(0xffffff));

@@ -1,13 +1,17 @@
 #include "switcher.h"
 
 #include <arpa/inet.h>
+#include <dirent.h>
+#include <errno.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -87,8 +91,72 @@ void sw_set_notify(void (*fn)(void)) { notify = fn; }
 
 static pthread_t saver;
 static pthread_mutex_t save_lock = PTHREAD_MUTEX_INITIALIZER;
-static int save_state, saver_started;
+static int save_state, saver_started, legacy_ra, renderer_held;
+static volatile sig_atomic_t renderer_pid;
+
+static pid_t find_ra_pid(void)
+{
+    if (simulated()) return 0;
+    DIR *dir = opendir("/proc");
+    if (!dir) return 0;
+    pid_t pid = 0;
+    for (struct dirent *e; !pid && (e = readdir(dir));) {
+        int candidate = atoi(e->d_name);
+        if (candidate <= 0) continue;
+        char path[64], name[32];
+        snprintf(path, sizeof path, "/proc/%d/comm", candidate);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        if (fgets(name, sizeof name, f) && !strcmp(name, "retroarch\n")) pid = candidate;
+        fclose(f);
+    }
+    closedir(dir);
+    return pid;
+}
+
+static pid_t (*process_pid)(void) = find_ra_pid;
+static int (*process_signal)(pid_t, int) = kill;
+
+void sw_set_process_hooks(pid_t (*pid_fn)(void), int (*signal_fn)(pid_t, int))
+{
+    process_pid = pid_fn ? pid_fn : find_ra_pid;
+    process_signal = signal_fn ? signal_fn : kill;
+}
+
+pid_t sw_overlay_pid(void) { return renderer_pid; }
+
+static void hold_renderer(void)
+{
+    // PAUSED stops emulation, not SDL rendering. Freeze only AFTER required saves:
+    // stopping before the UDP save reply would deadlock the save worker.
+    int held = renderer_pid > 0 ? !process_signal(renderer_pid, SIGSTOP) : simulated();
+    pthread_mutex_lock(&save_lock);
+    renderer_held = held;
+    pthread_mutex_unlock(&save_lock);
+    if (!held) fprintf(stderr, "shelf: could not stop RetroArch renderer\n");
+}
+
+static void release_renderer(void)
+{
+    if (renderer_pid > 0) process_signal(renderer_pid, SIGCONT);
+    renderer_pid = 0;
+    pthread_mutex_lock(&save_lock);
+    renderer_held = 0;
+    pthread_mutex_unlock(&save_lock);
+}
+
+int sw_overlay_ready(void)
+{
+    pthread_mutex_lock(&save_lock);
+    int ready = renderer_held;
+    pthread_mutex_unlock(&save_lock);
+    return ready;
+}
+
+const char *sw_resume_command(void) { return legacy_ra ? "PAUSE_TOGGLE" : "UNPAUSE"; }
 static Image *save_frame;
+static int save_timeout_ms = 60000; // large PS states on a slow card take seconds
+void sw_set_save_timeout(int ms) { save_timeout_ms = ms > 0 ? ms : 60000; }
 static char save_path[PATH_LEN];
 
 static int write_png(const Image *img, const char *path)
@@ -113,10 +181,25 @@ static void *save_main(void *ud)
     (void)ud;
     if (save_frame && write_png(save_frame, save_path))
         fprintf(stderr, "shelf: couldn't save %s\n", save_path);
-    // Onion's RetroArch answers once the state is written; a full save can take seconds.
+    // RetroArch 1.15 has no acknowledged autosave command. Do not send SAVE_STATE:
+    // it changes user slots and cannot confirm completion. Its normal TERM exit writes
+    // .state.auto; resuming a live game requires no state load.
+    if (legacy_ra) {
+        hold_renderer();
+        pthread_mutex_lock(&save_lock);
+        save_state = SW_SAVE_ON_EXIT;
+        pthread_mutex_unlock(&save_lock);
+        if (notify) notify();
+        return NULL;
+    }
+    // Onion's newer RetroArch answers once the state is written (any reply, as Onion
+    // reads it). Without an answer the state is unknown: say so, but still hold the
+    // renderer once we stop waiting, or the switcher never shows and keeps the input.
+    // A late save just continues after SIGCONT, which resume and quit both send first.
     char reply[128];
-    int ok = !ra_command("SAVE_STATE_SLOT -1", reply, sizeof reply, 60000);
+    int ok = !ra_command("SAVE_STATE_SLOT -1", reply, sizeof reply, save_timeout_ms);
     fprintf(stderr, "shelf: autosave %s\n", ok ? reply : "got no answer");
+    hold_renderer();
     pthread_mutex_lock(&save_lock);
     save_state = ok ? SW_SAVE_DONE : SW_SAVE_FAILED;
     pthread_mutex_unlock(&save_lock);
@@ -124,19 +207,59 @@ static void *save_main(void *ud)
     return NULL;
 }
 
+#define START_PATIENCE_MS 5000
+
+// Whether RetroArch process `pid` lacks the newer commands. Probing costs a 200 ms
+// timeout on legacy RA, so the answer is kept per process in /tmp (device only).
+#define PROTOCOL_CACHE "/tmp/shelf-ra-protocol"
+static int probe_legacy(pid_t pid)
+{
+    int cached_pid, cached;
+    FILE *f = pid > 0 && !simulated() ? fopen(PROTOCOL_CACHE, "r") : NULL;
+    if (f) {
+        int ok = fscanf(f, "%d %d", &cached_pid, &cached) == 2 && cached_pid == pid;
+        fclose(f);
+        if (ok) return cached;
+    }
+    // Probe a read-only command, not a save or toggle. Legacy RA silently ignores it.
+    char reply[128];
+    int slot;
+    int legacy = ra_command("GET_STATE_SLOT", reply, sizeof reply, 200) ||
+                 sscanf(reply, "GET_STATE_SLOT %d", &slot) != 1;
+    if (pid > 0 && !simulated() && (f = fopen(PROTOCOL_CACHE, "w"))) {
+        fprintf(f, "%d %d\n", (int)pid, legacy);
+        fclose(f);
+    }
+    return legacy;
+}
+
 int sw_overlay_begin(const Image *frame, const Recent *top)
 {
-    run("playActivity stop_all &");
     char reply[1100];
-    if (ra_command("GET_STATUS", reply, sizeof reply, 500)) {
-        fprintf(stderr, "shelf: RetroArch didn't answer GET_STATUS\n");
+    int status_ok = 0;
+    // MENU can arrive while a newly launched game is still loading (Lazarus' big state
+    // took over 1.4 s on the device): keep asking for a while rather than drop the press.
+    // Bounded; failure never falls through to a competing SDL console.
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int tries = 0;
+    long ms = 0;
+    while (!status_ok && ms < START_PATIENCE_MS) {
+        status_ok = !ra_command("GET_STATUS", reply, sizeof reply, 300);
+        tries++;
+        if (!status_ok) usleep(50000);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+    }
+    if (!status_ok) {
+        fprintf(stderr, "shelf: RetroArch didn't answer GET_STATUS (%d tries, %ld ms)\n", tries, ms);
         return 0;
     }
+    fprintf(stderr, "shelf: GET_STATUS answered after %d %s, %ld ms\n", tries, tries == 1 ? "try" : "tries", ms);
     // "GET_STATUS PAUSED game_boy_advance,Advance Wars (U) (V1.1) [!],crc32=26fd0fc9"
     char state[32] = "", info[1024] = "";
     sscanf(reply, "GET_STATUS %31s %1023[^\n]", state, info);
     if (strcmp(state, "PLAYING") && strcmp(state, "PAUSED")) return 0;
-    if (!strcmp(state, "PLAYING")) ra_command("PAUSE", NULL, 0, 0);
 
     // Running content is the first recent when ",<rom name>," appears in the info, as
     // Onion checks.
@@ -153,12 +276,30 @@ int sw_overlay_begin(const Image *frame, const Recent *top)
         return 0;
     }
 
+    pid_t pid = process_pid();
+    legacy_ra = probe_legacy(pid);
+    if (!strcmp(state, "PLAYING") &&
+        ra_command(legacy_ra ? "PAUSE_TOGGLE" : "PAUSE", NULL, 0, 0)) return 0;
+    // Do not freeze a process until it has actually consumed the pause command.
+    int paused = !strcmp(state, "PAUSED");
+    for (int i = 0; !paused && i < 10; i++) {
+        if (!ra_command("GET_STATUS", reply, sizeof reply, 100) &&
+            sscanf(reply, "GET_STATUS %31s", state) == 1 && !strcmp(state, "PAUSED")) paused = 1;
+        if (!paused) usleep(10000);
+    }
+    if (!paused) return 0;
+    renderer_pid = pid;
+    if (!renderer_pid && !simulated()) return 0;
+    run("playActivity stop_all &");
+
     if (frame) {
         save_frame = img_new(frame->w, frame->h);
         if (save_frame) memcpy(save_frame->px, frame->px, (size_t)frame->w * frame->h * 4);
     }
     sw_screen_path(top->rompath, save_path, sizeof save_path);
+    pthread_mutex_lock(&save_lock);
     save_state = SW_SAVE_BUSY;
+    pthread_mutex_unlock(&save_lock);
     if (pthread_create(&saver, NULL, save_main, NULL)) save_main(NULL);
     else saver_started = 1;
     return 1;
@@ -183,20 +324,36 @@ static void save_join(void)
 void sw_overlay_resume(void)
 {
     save_join();
-    ra_command("UNPAUSE", NULL, 0, 0);
+    release_renderer(); // UDP commands cannot be answered while SIGSTOPped.
+    // A toggle must only be sent when still paused (e.g. after a sleep/wake).
+    char reply[1100], state[32] = "";
+    if (!legacy_ra || (!ra_command("GET_STATUS", reply, sizeof reply, 500) &&
+        sscanf(reply, "GET_STATUS %31s", state) == 1 && !strcmp(state, "PAUSED")))
+        ra_command(sw_resume_command(), NULL, 0, 0);
     run("playActivity resume &");
 }
 
 void sw_quit_game(void)
 {
     save_join();
-    run("killall -TERM retroarch");
-    if (simulated()) return;
-    for (int i = 0; i < 50 && system("pidof retroarch > /dev/null") == 0; i++) usleep(100000);
-    if (system("pidof retroarch > /dev/null") == 0) {
+    pid_t pid = renderer_pid;
+    // Queue the TERM while the renderer is still stopped: it is handled as soon as the
+    // CONT wakes it, so RA quits (autosaving) without first drawing its paused frame
+    // over whatever the switcher left on screen.
+    int gone = pid > 0 && process_signal(pid, SIGTERM) && errno == ESRCH;
+    release_renderer(); // allow the exit autosave and normal termination to run
+    if (pid <= 0 || gone) return; // never kill an unverified game or a newly launched one
+    int waiting = 1;
+    for (int i = 0; waiting && (legacy_ra || i < 50); i++) {
+        waiting = !process_signal(pid, 0) || errno != ESRCH;
+        if (waiting) usleep(100000);
+    }
+    // On legacy RA, termination IS the autosave. Never force-kill mid-save.
+    if (waiting) {
         fprintf(stderr, "shelf: RetroArch didn't quit; killing it\n");
-        fclose(fopen("/tmp/.forceKillRetroarch", "w")); // tells the runtime it wasn't a crash
-        run("killall -9 retroarch");
+        FILE *marker = fopen("/tmp/.forceKillRetroarch", "w");
+        if (marker) fclose(marker); // tells the runtime it wasn't a crash
+        process_signal(pid, SIGKILL);
     }
 }
 

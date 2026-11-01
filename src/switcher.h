@@ -7,6 +7,7 @@
 #define SHELF_SWITCHER_H
 
 #include <stdint.h>
+#include <sys/types.h>
 
 #include "gfx.h"
 #include "library.h"
@@ -22,14 +23,26 @@ void sw_set_notify(void (*fn)(void));
 
 // Overlay start: stop play-time tracking, pause RetroArch and check that it's running the
 // first recent. If so, save `frame` as that game's screenshot and autosave its state on a
-// background thread. Returns 1 when the game is running (and so can be resumed).
+// background thread. Legacy RetroArch saves only on clean exit, never to a user slot.
+// Returns 1 when the game is running (and so can be resumed).
 int sw_overlay_begin(const Image *frame, const Recent *top);
-// Whether the autosave thread is still working; 2 once it reported success, 3 on failure.
-enum { SW_SAVE_NONE, SW_SAVE_BUSY, SW_SAVE_DONE, SW_SAVE_FAILED };
+// Save worker status; legacy RA reports ON_EXIT after its screenshot worker finishes.
+enum { SW_SAVE_NONE, SW_SAVE_BUSY, SW_SAVE_DONE, SW_SAVE_FAILED, SW_SAVE_ON_EXIT };
+// Cached protocol choice, also usable by the crash handler without locks or I/O.
+const char *sw_resume_command(void);
+// Renderer held after saving; crash recovery must SIGCONT this PID before unpausing.
+pid_t sw_overlay_pid(void);
+// No overlay frame may be presented until its renderer is exclusively held.
+int sw_overlay_ready(void);
+// Process-control seam for overlay tests; NULL restores real /proc discovery + kill.
+void sw_set_process_hooks(pid_t (*pid_fn)(void), int (*signal_fn)(pid_t, int));
+// SW_SAVE_FAILED: no answer within the timeout (0 restores 60 s); the renderer is held
+// anyway so the switcher can show it, and the game's own exit autosave still runs on quit.
+void sw_set_save_timeout(int ms);
 int sw_save_state(void);
 // Waits for the autosave, unpauses RetroArch and resumes play-time tracking.
 void sw_overlay_resume(void);
-// Waits for the autosave, then quits RetroArch: TERM, up to 5 s, then KILL.
+// Waits for the autosave, then quits RetroArch. Legacy RA is never killed mid-exit save.
 void sw_quit_game(void);
 
 // Screenshot cards: each recent's romScreen decoded and scaled to w x h on a worker

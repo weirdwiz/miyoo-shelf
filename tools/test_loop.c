@@ -54,6 +54,8 @@ static double card_at = INFINITY, status_at = INFINITY;
 static unsigned card_revision(void) { return card_rev; }
 static const Image *no_image(int i) { (void)i; return NULL; }
 static void no_select(int i) { (void)i; }
+static Image *shot; // every recent's screenshot card once cards "load"
+static const Image *fake_card(int i) { (void)i; return card_rev ? shot : NULL; }
 
 static void s_button(void *ud, Button b) { ui_button(b); ui_take_sound(); }
 static double s_tick(void *ud, double now)
@@ -165,6 +167,25 @@ int main(int argc, char **argv)
     n = run_until(canvas, t0 + 30, &st);
     CHECK(n > 30 && first_present_after < t0 + 20.01 && last_present < t0 + 28);
     ui_free();
+
+    // Screenshots arriving while settled: the backdrop cross-fades to them, the nearby
+    // sprites are built between frames (no presents), and the loop goes back to sleep.
+    shot = img_new(248, 186);
+    CHECK(shot != NULL);
+    card_rev = 0;
+    ui_switch_hooks(fake_card, no_image, no_select, card_revision);
+    CHECK(ui_init_switcher(&sw, argv[2], 0, 0) == 0);
+    t0 = clock_now;
+    run_until(canvas, t0 + 10, &st);
+    card_at = t0 + 12;
+    n = run_until(canvas, t0 + 14, &st);
+    CHECK(n > 0 && n < 30 && first_present_after >= t0 + 12 && first_present_after < t0 + 12.01);
+    CHECK(last_present < t0 + 12.5);
+    st.waits = 0;
+    n = run_until(canvas, t0 + 40, &st);
+    CHECK(n <= 1 && st.waits < 10); // at most the clock's minute; sleeping, not polling
+    ui_free();
+    img_free(shot);
     icons_free();
     lib_free(&sw);
     lib_free(&lib);

@@ -10,6 +10,8 @@
 
 static Library lib;
 static const char *fonts;
+// A fixed clock: a minute turning mid-run would redraw the status and change the count.
+static double fixed_wall(void) { return 1767225605.0; }
 
 static int run(int switcher, long fail_at, Image *canvas)
 {
@@ -41,6 +43,7 @@ int main(int argc, char **argv)
     if (argc != 3) { fprintf(stderr, "usage: %s <SDCARD> <fonts>\n", argv[0]); return 2; }
     lib_set_root(argv[1]);
     fonts = argv[2];
+    ui_set_wall_clock(fixed_wall);
     Image *canvas = img_new(640, 480);
     if (lib_load(&lib) || !canvas) return 1;
     for (int switcher = 0; switcher < 2; switcher++) {

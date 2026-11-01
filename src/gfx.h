@@ -8,6 +8,9 @@ typedef struct {
     int w, h;
     uint32_t *px; // premultiplied ARGB, row-major, stride == w
     int16_t *spans; // optional per-row [begin, end) fully-opaque run, from img_find_spans
+    int *run_row;   // optional, from img_find_runs: row y's visible runs are
+    int16_t *runs;  // runs[3 * run_row[y] .. 3 * run_row[y + 1]) as x0, x1, opaque
+    int run_cap;    // runs allocated
 } Image;
 
 // Build a premultiplied ARGB colour from straight RGB + alpha.
@@ -28,6 +31,9 @@ Image *img_load_raw(const char *path);
 // Record each row's opaque run so gfx_blit can copy it instead of blending.
 // Call again after changing the pixels.
 void img_find_spans(Image *img);
+// Record each row's runs of visible pixels so gfx_blit skips the transparent ones: for
+// mostly empty overlays such as text bands. Call again after changing the pixels.
+void img_find_runs(Image *img);
 
 void gfx_clear(Image *dst, uint32_t c);
 void gfx_fill_rect(Image *dst, int x, int y, int w, int h, uint32_t c);

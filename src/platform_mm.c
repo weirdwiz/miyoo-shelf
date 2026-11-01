@@ -1,11 +1,22 @@
 // Miyoo Mini / Mini Plus: SDL 1.2 with explicit 180-degree panel rotation.
-// Buttons arrive as SDL key events using the stock Miyoo mapping (see Onion's keymap_sw.h).
+// Launcher: SDL keys; paused overlay: raw evdev without taking RetroArch's VT.
 #include <SDL/SDL.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/fb.h>
+#include <linux/input.h>
+// Linux mouse/gamepad button macros collide with Shelf's logical Button enum.
+#undef BTN_LEFT
+#undef BTN_RIGHT
+#undef BTN_A
+#undef BTN_B
+#undef BTN_X
+#undef BTN_Y
+#undef BTN_START
+#undef BTN_SELECT
 #include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,12 +27,15 @@
 
 #include "../third_party/cJSON.h"
 #include "platform.h"
+#include "evdev_keys.h"
+#include "fb_snapshot.h"
 
 static SDL_Surface *video;
+static int input_fd = -1; // overlays must not switch away from RetroArch's locked VT
 
 // Page flipping straight on /dev/fb0, whose virtual height holds two screens. SDL 1.2
 // here only offers the visible page, so drawing there tore mid-scanout; instead each
-// frame goes to the hidden page and FBIOPAN_DISPLAY shows it. SDL still owns input.
+// frame goes to the hidden page and FBIOPAN_DISPLAY shows it. Overlay input is evdev.
 // The pan blocks until vblank, so a flipper thread issues it: the main thread renders
 // the next frame meanwhile and waits only before writing into the page being replaced.
 static int fb = -1;
@@ -29,6 +43,10 @@ static struct fb_var_screeninfo fb_var;
 static unsigned char *fb_mem;
 static size_t fb_len;
 static int fb_pitch, fb_back;
+static FbSnapshot game_page;
+static FbSnapshot grabbed; // the visible page as platform_grab read it, raw (overlay only)
+static volatile sig_atomic_t overlay_resumed;
+static void (*previous_cont)(int);
 static pthread_t flipper;
 static pthread_mutex_t flip_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t flip_cond = PTHREAD_COND_INITIALIZER;
@@ -60,21 +78,38 @@ static void flip_wait(void)
     pthread_mutex_unlock(&flip_lock);
 }
 
-static void fb_init(void)
+static void fb_init(int overlay)
 {
     struct fb_fix_screeninfo fix;
     if (getenv("SHELF_NO_FLIP")) return;
     if ((fb = open("/dev/fb0", O_RDWR)) < 0) return;
     if (ioctl(fb, FBIOGET_VSCREENINFO, &fb_var) || ioctl(fb, FBIOGET_FSCREENINFO, &fix) ||
         fb_var.xres != SCREEN_W || fb_var.yres != SCREEN_H || fb_var.bits_per_pixel != 32 ||
-        fb_var.yres_virtual < 2 * SCREEN_H) goto fail;
+        fix.line_length < SCREEN_W * 4) goto fail;
     fb_pitch = fix.line_length;
-    fb_len = (size_t)fb_pitch * 2 * SCREEN_H;
+    fb_len = fb_map_len(fb_pitch, SCREEN_H, fb_var.yres_virtual, fb_var.yoffset, fix.smem_len);
+    if (!fb_len) goto fail;
     fb_mem = mmap(NULL, fb_len, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
     if (fb_mem == MAP_FAILED) { fb_mem = NULL; goto fail; }
     fb_back = fb_var.yoffset >= SCREEN_H ? 0 : 1;
+    // Every page, not just the visible one: RA cycles through all of them after resuming
+    // and only redraws its viewport, so any page Shelf drew on would show stale borders.
+    // Reading video memory is slow (~18 MB/s), so reuse the page platform_grab already
+    // read when there is one (all pages took ~200 ms); fb_quit copies it over the pages
+    // Shelf draws on.
+    if (overlay && grabbed.pixels && grabbed.bytes == (size_t)fb_pitch * SCREEN_H) {
+        game_page = grabbed;
+        grabbed = (FbSnapshot){0};
+    } else if (overlay && fb_snapshot_take(&game_page, fb_mem, fb_len, fb_pitch, (int)(fb_len / fb_pitch), 0)) {
+        goto unmap;
+    }
+    if (overlay) game_page.yoffset = fb_var.yoffset; // panned back to on exit
+    flip_quit = flip_pending = 0;
     if (!pthread_create(&flipper, NULL, flip_main, NULL)) return;
+unmap:
+    fb_snapshot_free(&game_page);
     munmap(fb_mem, fb_len);
+    fb_mem = NULL;
 fail:
     fprintf(stderr, "shelf: no fb page flip; drawing to the visible page\n");
     close(fb);
@@ -89,12 +124,26 @@ static void fb_quit(void)
     pthread_cond_broadcast(&flip_cond);
     pthread_mutex_unlock(&flip_lock);
     pthread_join(flipper, NULL); // finishes a pending flip first
-    // Leave page 0 showing what was last presented: the next app draws there.
-    int shown = !fb_back;
-    if (shown) memcpy(fb_mem, fb_mem + (size_t)fb_pitch * SCREEN_H, (size_t)fb_pitch * SCREEN_H);
-    fb_var.yoffset = 0;
+    if (game_page.pixels) {
+        // RA does not redraw its letterbox borders every frame. Restore the original
+        // game page, not the menu, or those borders retain switcher artifacts.
+        if (game_page.bytes == (size_t)fb_pitch * SCREEN_H) {
+            // Shelf draws on pages 0 and 1; the page RA showed last may be a third.
+            int last = (int)(game_page.yoffset / SCREEN_H);
+            fb_snapshot_restore_pages(&game_page, fb_mem, fb_len, last > 1 ? last + 1 : 2);
+        } else {
+            fb_snapshot_restore(&game_page, fb_mem, fb_len);
+        }
+        fb_var.yoffset = game_page.yoffset;
+    } else {
+        int shown = !fb_back;
+        if (shown) memcpy(fb_mem, fb_mem + (size_t)fb_pitch * SCREEN_H, (size_t)fb_pitch * SCREEN_H);
+        fb_var.yoffset = 0;
+    }
     ioctl(fb, FBIOPAN_DISPLAY, &fb_var);
+    fb_snapshot_free(&game_page);
     munmap(fb_mem, fb_len);
+    fb_mem = NULL;
     close(fb);
     fb = -1;
 }
@@ -238,7 +287,7 @@ static int find_tty_fd(void)
 
 static void wait_init(void)
 {
-    tty_fd = find_tty_fd();
+    tty_fd = input_fd >= 0 ? input_fd : find_tty_fd();
     if (pipe(wake_pipe)) wake_pipe[0] = wake_pipe[1] = -1;
     for (int i = 0; i < 2; i++)
         if (wake_pipe[i] >= 0) fcntl(wake_pipe[i], F_SETFL, fcntl(wake_pipe[i], F_GETFL) | O_NONBLOCK);
@@ -259,13 +308,29 @@ void platform_wake(void)
     if (fd >= 0 && write(fd, "w", 1) < 0) {} // full pipe: a wakeup is pending anyway
 }
 
-int platform_init(void)
+static void overlay_continue(int sig)
 {
+    overlay_resumed = 1;
+    platform_wake();
+}
+
+int platform_init(int overlay)
+{
+    if (overlay) {
+        input_fd = open("/dev/input/event0", O_RDONLY | O_NONBLOCK);
+        if (input_fd < 0) { perror("overlay input"); return -1; }
+        fb_init(1);
+        if (fb < 0) { close(input_fd); input_fd = -1; return -1; }
+        wait_init();
+        overlay_resumed = 0;
+        previous_cont = signal(SIGCONT, overlay_continue);
+        return 0;
+    }
     if (SDL_Init(SDL_INIT_VIDEO)) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return -1; }
     SDL_ShowCursor(SDL_DISABLE);
     video = SDL_SetVideoMode(SCREEN_W, SCREEN_H, 32, SDL_HWSURFACE);
     if (!video) { fprintf(stderr, "SDL_SetVideoMode: %s\n", SDL_GetError()); return -1; }
-    fb_init();
+    fb_init(0);
     audio_init();
     wait_init();
     return 0;
@@ -279,7 +344,11 @@ void platform_quit(void)
     click = NULL;
     wait_quit();
     fb_quit();
-    SDL_Quit();
+    fb_snapshot_free(&grabbed);
+    if (input_fd >= 0) {
+        if (previous_cont != SIG_ERR) signal(SIGCONT, previous_cont);
+        close(input_fd); input_fd = -1;
+    } else SDL_Quit();
 }
 
 static Button map_key(SDLKey k)
@@ -306,8 +375,28 @@ static int is_dpad(Button b) { return b >= BTN_UP && b <= BTN_RIGHT; }
 
 Button platform_poll(void)
 {
+    if (input_fd >= 0 && overlay_resumed) {
+        overlay_resumed = 0;
+        flip_wait();
+        struct fb_var_screeninfo current;
+        if (!ioctl(fb, FBIOGET_VSCREENINFO, &current))
+            fb_back = current.yoffset >= SCREEN_H ? 0 : 1;
+        return BTN_REDRAW; // keymon saved/cleared/restored the display during sleep
+    }
+    // Each evdev reader has its own queue. Keymon keeps power/shortcut ownership;
+    // overlay input never grabs the device or changes RetroArch's console state.
+    struct input_event raw;
+    while (input_fd >= 0 && read(input_fd, &raw, sizeof raw) == sizeof raw) {
+        if (raw.type != EV_KEY) continue;
+        Button b = evdev_button(raw.code);
+        if (raw.value == 1) {
+            if (is_dpad(b)) { held = b; held_next = platform_now() + REPEAT_DELAY; }
+            if (b != BTN_NONE) return b;
+        }
+        if (raw.value == 0 && b == held) held = BTN_NONE;
+    }
     SDL_Event e;
-    while (SDL_PollEvent(&e)) {
+    while (input_fd < 0 && SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) return BTN_QUIT;
         if (e.type == SDL_KEYDOWN) {
             Button b = map_key(e.key.keysym.sym);
@@ -366,8 +455,12 @@ int platform_grab(Image *out)
         (size_t)fix.line_length * (var.yoffset + SCREEN_H) <= fix.smem_len) {
         unsigned char *mem = mmap(NULL, fix.smem_len, PROT_READ, MAP_SHARED, fd, 0);
         if (mem != MAP_FAILED) {
-            // The visible page, turned the right way up (the panel is mounted rotated).
+            // Read the visible page from video memory once; fb_init reuses the copy.
+            fb_snapshot_free(&grabbed);
             const unsigned char *page = mem + (size_t)fix.line_length * var.yoffset;
+            if (!fb_snapshot_take(&grabbed, mem, fix.smem_len, fix.line_length, SCREEN_H, var.yoffset))
+                page = grabbed.pixels;
+            // The visible page, turned the right way up (the panel is mounted rotated).
             for (int y = 0; y < SCREEN_H; y++) {
                 const uint32_t *src = (const uint32_t *)(page + (size_t)(SCREEN_H - 1 - y) * fix.line_length);
                 uint32_t *dst = out->px + y * SCREEN_W;
@@ -380,6 +473,8 @@ int platform_grab(Image *out)
     close(fd);
     return rc;
 }
+
+void platform_keep_last_frame(void) { fb_snapshot_free(&game_page); }
 
 int platform_vsync_paced(void) { return fb >= 0; }
 

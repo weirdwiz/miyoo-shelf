@@ -18,9 +18,15 @@ SIM_SRC := $(CORE_SRC) src/platform_sdl2.c
 SDL_CFLAGS = $(shell sdl2-config --cflags)
 SDL_LIBS = $(shell sdl2-config --libs)
 
-.PHONY: sim run fixture clean mm mm-inner push log test boot-on boot-off
+.PHONY: sim run fixture clean mm mm-inner push log test boot-on boot-off switcher-off
 
-test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUILD)/test-ui-cache $(BUILD)/test-ui-alloc $(BUILD)/test-switcher $(BUILD)/test-loop fixture/SDCARD/Emu
+test: $(BUILD)/test-switcher-lifecycle $(BUILD)/test-fb-snapshot $(BUILD)/test-overlay $(BUILD)/test-keymon $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUILD)/test-ui-cache $(BUILD)/test-ui-alloc $(BUILD)/test-switcher $(BUILD)/test-loop fixture/SDCARD/Emu
+	@for scene in resume play unknown delayed mismatch wake; do $(BUILD)/test-switcher-lifecycle $$scene "$(CURDIR)/fixture/SDCARD" "$(CURDIR)/assets/fonts" || exit 1; done
+	$(BUILD)/test-fb-snapshot
+	$(BUILD)/test-overlay legacy
+	$(BUILD)/test-overlay modern
+	$(BUILD)/test-keymon
+	python3 tools/test_boot.py
 	$(BUILD)/test-library
 	$(BUILD)/test-switcher "$(CURDIR)/fixture/SDCARD"
 	$(BUILD)/test-rrect
@@ -28,6 +34,22 @@ test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUIL
 	$(BUILD)/test-ui-cache "$(CURDIR)/fixture/SDCARD" "$(CURDIR)/assets/fonts"
 	$(BUILD)/test-loop "$(CURDIR)/fixture/SDCARD" "$(CURDIR)/assets/fonts"
 	$(BUILD)/test-ui-alloc "$(CURDIR)/fixture/SDCARD" "$(CURDIR)/assets/fonts"
+
+$(BUILD)/test-switcher-lifecycle: tools/test_switcher_lifecycle.c $(CORE_SRC) $(wildcard src/*.h)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tools/test_switcher_lifecycle.c $(filter-out src/main.c,$(CORE_SRC)) -lm -lpthread
+
+$(BUILD)/test-fb-snapshot: tools/test_fb_snapshot.c src/fb_snapshot.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tools/test_fb_snapshot.c
+
+$(BUILD)/test-overlay: tools/test_overlay.c src/switcher.c src/library.c src/gfx.c third_party/cJSON.c $(wildcard src/*.h)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tools/test_overlay.c src/switcher.c src/library.c src/gfx.c third_party/cJSON.c -lm -lpthread
+
+$(BUILD)/test-keymon: tools/test_keymon.c assets/compat/keymon-overlay.h src/evdev_keys.h src/platform.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tools/test_keymon.c
 
 $(BUILD)/test-loop: tools/test_loop.c src/loop.c src/ui.c src/icons.c src/library.c src/text.c src/gfx.c $(wildcard src/*.h)
 	@mkdir -p $(BUILD)
@@ -113,7 +135,34 @@ mm:
 		/bin/bash -c "source /root/.bashrc && make mm-inner"
 
 # Runs inside the toolchain container.
-mm-inner: $(MM_BUILD)/shelf
+.PHONY: keymon keymon-inner
+keymon:
+	python3 tools/prepare_keymon.py
+	$(CONTAINER) run --rm --platform linux/amd64 -v "$(CURDIR)":/root/workspace -w /root/workspace $(TOOLCHAIN) \
+		/bin/bash -c "source /root/.bashrc && make keymon-inner"
+
+keymon-inner:
+	@mkdir -p $(MM_BUILD)
+	$(MAKE) -B -C build/Onion-4.3.1-1/src/keymon PLATFORM=miyoomini VERSION=4.3.1-1-shelf BUILD_DIR=/root/workspace/$(MM_BUILD)
+	mv $(MM_BUILD)/keymon $(MM_BUILD)/keymon-overlay
+
+mm-inner: $(MM_BUILD)/shelf $(MM_BUILD)/ra-status $(MM_BUILD)/test-fb-idle $(MM_BUILD)/restore-display $(MM_BUILD)/device-probe
+
+$(MM_BUILD)/device-probe: tools/device_probe.c src/library.c src/library.h third_party/cJSON.c
+	@mkdir -p $(MM_BUILD)
+	$(CROSS_COMPILE)gcc -O2 -D_DEFAULT_SOURCE -o $@ tools/device_probe.c src/library.c third_party/cJSON.c
+
+$(MM_BUILD)/restore-display: tools/restore_display.c
+	@mkdir -p $(MM_BUILD)
+	$(CROSS_COMPILE)gcc -O2 -o $@ $<
+
+$(MM_BUILD)/test-fb-idle: tools/test_fb_idle.c
+	@mkdir -p $(MM_BUILD)
+	$(CROSS_COMPILE)gcc -O2 -o $@ $<
+
+$(MM_BUILD)/ra-status: tools/ra_status.c
+	@mkdir -p $(MM_BUILD)
+	$(CROSS_COMPILE)gcc -O2 -o $@ $<
 
 $(MM_BUILD)/shelf: $(MM_SRC) $(wildcard src/*.h) Makefile
 	@mkdir -p $(MM_BUILD)
@@ -122,16 +171,21 @@ $(MM_BUILD)/shelf: $(MM_SRC) $(wildcard src/*.h) Makefile
 
 APP_DIR := /mnt/SDCARD/App/Shelf
 
-push: $(MM_BUILD)/shelf
+push: $(MM_BUILD)/shelf keymon
 	tools/mm.sh 'mkdir -p $(APP_DIR)/fonts'
 	tools/mm.sh 'cat > $(APP_DIR)/shelf.new && chmod +x $(APP_DIR)/shelf.new && mv $(APP_DIR)/shelf.new $(APP_DIR)/shelf' < $(MM_BUILD)/shelf
+	tools/mm.sh 'cat > $(APP_DIR)/keymon-overlay.new && chmod +x $(APP_DIR)/keymon-overlay.new && mv $(APP_DIR)/keymon-overlay.new $(APP_DIR)/keymon-overlay' < $(MM_BUILD)/keymon-overlay
 	@for f in assets/fonts/*.ttf; do \
 		tools/mm.sh "[ -f $(APP_DIR)/fonts/$$(basename $$f) ] || cat > $(APP_DIR)/fonts/$$(basename $$f)" < $$f; done
+	tools/mm.sh 'cat > $(APP_DIR)/keymon-overlay-LICENSE' < assets/compat/LICENSE
 	tools/mm.sh 'cat > $(APP_DIR)/config.json' < assets/app/config.json
 	@for f in launch.sh boot.sh mainui.sh; do \
 		tools/mm.sh "cat > $(APP_DIR)/$$f && chmod +x $(APP_DIR)/$$f" < assets/app/$$f; done
 	tools/mm.sh 'sh $(APP_DIR)/boot.sh switcher' # the mounted switcher is the old binary
 	@echo "pushed: open Apps > Shelf on the device. Log: make log"
+
+switcher-off:
+	tools/mm.sh 'sh $(APP_DIR)/boot.sh switcher-off'
 
 boot-on:
 	tools/mm.sh 'sh $(APP_DIR)/boot.sh enable'

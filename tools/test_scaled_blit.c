@@ -90,6 +90,31 @@ int main(void)
         assert(!memcmp(a->px, b->px, (size_t)a->w * a->h * 4));
         img_free(src);
     }
+    // Run-accelerated blits (transparent pixels skipped) must equal plain blending too,
+    // with clear, opaque and translucent pixels mixed in runs of every length, and again
+    // after redrawing the same image (its run buffers are reused).
+    for (int n = 0; n < 300; n++) {
+        Image *src = img_new(1 + random_word() % 60, 1 + random_word() % 60);
+        for (int pass = 0; pass < 2; pass++) {
+            uint32_t kind = 0;
+            for (int i = 0; i < src->w * src->h; i++) {
+                if (random_word() % 4 == 0) kind = random_word() % 3;
+                src->px[i] = kind == 0 ? 0 : kind == 1 ? random_word() | 0xff000000u
+                                                       : argb(1 + random_word() % 254, random_word(), random_word(), random_word());
+            }
+            for (int i = 0; i < a->w * a->h; i++) a->px[i] = b->px[i] = random_word() | 0xff000000u;
+            int x = (int)(random_word() % 120) - 40, y = (int)(random_word() % 100) - 40;
+            Image *plain = img_new(src->w, src->h); // same pixels, no runs: the reference
+            memcpy(plain->px, src->px, (size_t)src->w * src->h * 4);
+            gfx_blit(a, plain, x, y, 255);
+            img_free(plain);
+            img_find_runs(src);
+            assert(src->run_row);
+            gfx_blit(b, src, x, y, 255);
+            assert(!memcmp(a->px, b->px, (size_t)a->w * a->h * 4));
+        }
+        img_free(src);
+    }
     // Fused fade: same pixels as copy-then-blend, within one level of rounding.
     for (int n = 0; n < 300; n++) {
         Image *under = img_new(a->w, a->h), *src = img_new(1 + random_word() % 90, 1 + random_word() % 70);
@@ -162,5 +187,5 @@ int main(void)
     img_free(mix);
     puts("upscale matches bilinear sampling within rounding; lerp matches per pixel");
     img_free(a); img_free(b);
-    puts("span blit matches blended blit (300 clipped cases)");
+    puts("span and run blits match blended blit (300 clipped cases each)");
 }
