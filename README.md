@@ -9,9 +9,6 @@ Remove the `.tmp_update` folder and the device boots the stock firmware again.
 Games run inside Shelf, through libretro cores cross-built for the device at pinned
 commits: gambatte for GB and GBC, mGBA for GBA (`make cores`).
 
-[Watch the demo, recorded in the test VM](docs/shelf-demo.mp4): home, a game, the card
-switcher, the library and options.
-
 | Home | Folders | Folder |
 |---|---|---|
 | ![](docs/screenshots/1-home.png) | ![](docs/screenshots/2-library.png) | ![](docs/screenshots/3-folder.png) |
