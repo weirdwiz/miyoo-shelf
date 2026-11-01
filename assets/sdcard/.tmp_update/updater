@@ -59,8 +59,14 @@ while :; do
 	log "exit $status after ${elapsed}s (crash $crashes of $MAX_CRASHES)"
 
 	if [ "$crashes" -ge "$MAX_CRASHES" ]; then
-		log "giving up, starting the stock UI"
 		sync
+		if [ ! -x "$STOCK_UI" ]; then
+			# Some firmware (the Mini Flip's) has no stock UI there: off is safer than a
+			# loop of restarts draining the battery.
+			log "giving up, and there is no stock UI at $STOCK_UI: powering off"
+			exec "$POWEROFF"
+		fi
+		log "giving up, starting the stock UI"
 		cd "$(dirname "$STOCK_UI")" || exit 1
 		exec "./$(basename "$STOCK_UI")"
 	fi
