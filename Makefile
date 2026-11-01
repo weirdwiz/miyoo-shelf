@@ -99,10 +99,10 @@ $(BUILD)/test-game: tools/test_game.c $(SESSION_SRC) $(SESSION_DEPS) $(BUILD)/fa
 	$(CC) $(CFLAGS) -o $@ tools/test_game.c $(SESSION_SRC) -lm -lpthread -ldl
 
 # Shelf from boot: main.c on the fake platform, with the session's sources.
-$(BUILD)/test-main: tools/test_main.c src/main.c $(SESSION_SRC) $(SESSION_DEPS) $(BUILD)/fake_core.so
+$(BUILD)/test-main: tools/test_main.c src/main.c src/probe.c $(SESSION_SRC) $(SESSION_DEPS) $(BUILD)/fake_core.so
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -Dmain=shelf_main -c -o $(BUILD)/test-main-shelf.o src/main.c
-	$(CC) $(CFLAGS) -o $@ tools/test_main.c $(BUILD)/test-main-shelf.o $(SESSION_SRC) -lm -lpthread -ldl
+	$(CC) $(CFLAGS) -o $@ tools/test_main.c $(BUILD)/test-main-shelf.o src/probe.c $(SESSION_SRC) -lm -lpthread -ldl
 
 # The in-game menu over a running fake-core game, headless, for docs/screenshots.
 $(BUILD)/shot-ingame: tools/shot_ingame.c $(SESSION_SRC) $(SESSION_DEPS)

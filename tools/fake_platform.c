@@ -223,6 +223,8 @@ void platform_performance(int game)
     note(game ? "perf_on" : "perf_off");
 }
 
+void platform_probe(FILE *out) { (void)out; }
+
 void platform_power_off(void)
 {
     F.counts.power_off++;

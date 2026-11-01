@@ -84,7 +84,7 @@ static void build_card(const char *work)
 
 /* ---------- the resume marker ---------- */
 
-static char marker[PATH_LEN * 2], data_dir[PATH_LEN * 2];
+static char data_dir[PATH_LEN * 2], marker[PATH_LEN * 2 + 16];
 
 static void set_marker(const char *rom)
 {
