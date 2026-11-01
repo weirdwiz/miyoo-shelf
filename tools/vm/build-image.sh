@@ -8,7 +8,7 @@ mkdir -p $VM "$SDCARD"
 for f in $BASE_IMG $KERNEL $INITRD; do
 	[ -s "$f" ] || curl -sfL -o "$f.part" "$BASE_URL/$( [ "$f" = $BASE_IMG ] || echo unpacked/)$(basename "$f")" && mv "$f.part" "$f" 2>/dev/null || true
 done
-sha=$(sha256sum $BASE_IMG 2>/dev/null || shasum -a 256 $BASE_IMG)
+sha=$(sha256sum $BASE_IMG 2>/dev/null || shasum -a 256 $BASE_IMG 2>/dev/null || true)
 [ "${sha%% *}" = $BASE_SHA ] || { echo "vm: base image checksum mismatch" >&2; exit 1; }
 [ -f $KEY ] || ssh-keygen -q -t ed25519 -N '' -C shelf-vm -f $KEY
 if [ ! -f $DISK ]; then
