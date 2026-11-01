@@ -29,8 +29,17 @@ commits: gambatte for GB and GBC, mGBA for GBA (`make cores`).
 - **MENU** in a game opens the card switcher. The paused game shrinks into the row of recent
   games, each card showing its screenshot. A resumes the selected card, A on another card
   switches to that game, B goes back to Shelf, SELECT restarts (and asks first).
-- **POWER** sleeps and wakes. Holding it for two seconds saves everything and powers off;
-  Shelf also powers off after 30 minutes asleep. Options → Power off asks for a second press.
+- **POWER** sleeps and wakes; the screen goes dark at once and the game is saved while it
+  sleeps. Holding it for two seconds saves everything and powers off; Shelf also powers off
+  after 10 minutes asleep. Powered off from a game, by either, the next boot goes straight
+  back into that game; from the home screen it boots to home. Options → Power off asks for a
+  second press.
+- **Idle**: the home screen and the in-game menu dim after 45 seconds without a press and
+  sleep after 3 minutes. The press that wakes a dimmed screen does nothing else. A game
+  sleeps after 10 minutes with no change in the buttons held.
+- **Battery**: read every 30 seconds, in games too. At 10 % the home screen or in-game menu
+  says so once. At 4 %, three readings in a row and not charging, Shelf saves the game and
+  powers off, to resume it once charged.
 - **Options** (START, or MENU outside a game): brightness, volume, screen scaling, dark mode,
   power off. Changes are applied at once and saved to `.shelf/data/settings.json`.
   Screen scaling is Sharp (sharp-bilinear fill), Smooth (bilinear fill) or Integer (whole
@@ -58,7 +67,9 @@ BIOS/               optional gba_bios.bin; mGBA's built-in HLE BIOS works withou
 Subfolders are scanned, extensions are case-insensitive, and MinUI-style system folder names
 such as `Roms/Game Boy Advance (GBA)` work too. Box art is also found in an `Imgs` folder
 beside the ROM. Shelf's own files are `.shelf/data/settings.json`, `recents.json`,
-`favorites.json`, `playtime.json` and `shelf.log`.
+`favorites.json`, `playtime.json`, `shelf.log`, and `resume`: the game to go back into on
+the next boot, deleted as soon as it is read so a game that won't start can't take over
+every boot.
 
 ## Install
 

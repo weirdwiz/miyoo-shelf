@@ -314,6 +314,38 @@ int lib_write_json(const char *dev_path, const char *json)
     return 0;
 }
 
+#define RESUME DATA_DIR "/resume"
+
+int lib_set_resume(const Library *lib, int game)
+{
+    if (!lib || game < 0 || game >= lib->ngames) return -1;
+    char line[PATH_LEN + 2];
+    snprintf(line, sizeof line, "%s\n", lib->games[game].path);
+    return lib_write_json(RESUME, line); // temp file, fsync, rename
+}
+
+int lib_take_resume(const Library *lib)
+{
+    char host[PATH_LEN], want[PATH_LEN] = "";
+    host_path(RESUME, host, sizeof host);
+    FILE *f = fopen(host, "rb");
+    if (!f) return -1;
+    if (!fgets(want, sizeof want, f)) want[0] = 0;
+    fclose(f);
+    // Gone before anything is started, and on the card: a game that crashes or hangs on
+    // the way in must not come back on every boot.
+    if (unlink(host) && errno != ENOENT) {
+        fprintf(stderr, "shelf: can't remove %s: %s; not resuming\n", host, strerror(errno));
+        return -1;
+    }
+    sync();
+    want[strcspn(want, "\r\n")] = 0;
+    for (int i = 0; lib && want[0] && i < lib->ngames; i++)
+        if (!strcmp(lib->games[i].path, want)) return i;
+    if (want[0]) fprintf(stderr, "shelf: %s is no longer on the card; not resuming\n", want);
+    return -1;
+}
+
 // Prints and saves `j`, which it releases: 0 or -1.
 static int save_json(cJSON *j, const char *dev_path)
 {

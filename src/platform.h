@@ -61,11 +61,15 @@ void platform_audio_source(int (*pull)(int16_t *out, int frames));
 void platform_set_brightness(int level);
 void platform_set_volume(int level);
 int platform_volume(void);
+// Idle dimming: on = backlight at its lowest, off = the brightness set again. Waking from
+// standby also ends it.
+void platform_dim(int on);
 // Battery percent 0-100, or -1 when unknown; *charging set to 0/1.
 int platform_battery(int *charging);
 // Standby: on = backlight and panel off, audio muted, CPU in powersave. off restores.
 void platform_standby(int on);
-// CPU policy: nonzero while a game runs (full speed), zero in menus (on demand).
+// CPU policy: nonzero while a game runs (full speed), zero in menus, the paused in-game
+// menu included (on demand).
 void platform_performance(int game);
 // Hardware probe (SHELF_PROBE, src/probe.c): writes what the platform knows about its
 // display and input to `out` and logs every raw input event there until called with NULL.

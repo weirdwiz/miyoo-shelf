@@ -45,7 +45,8 @@ void ui_set_settings(const Settings *s);
 Settings ui_settings(void);
 // Status bar: battery percent (-1 hides it) and whether it is charging.
 void ui_set_status(int battery, int charging);
-// A one-line message over the home screen ("Couldn't start …"), shown for a few seconds.
+// A one-line message over the home screen or the in-game menu ("Couldn't start …"),
+// shown for a few seconds.
 void ui_set_toast(const char *text);
 
 // The in-game menu: the paused game and the recents as screenshot cards. With `running`,

@@ -10,16 +10,18 @@
 #include "library.h"
 #include "loop.h"
 #include "platform.h"
+#include "power.h"
 #include "probe.h"
 #include "settings.h"
 #include "ui.h"
 
-// Battery and charging state, polled while the home screen is up.
-static void status_poll(void)
+// Battery and charging state, for the status bar and the power policy.
+static PowerBattery status_poll(void)
 {
     int charging = 0;
     int battery = platform_battery(&charging);
     ui_set_status(battery, charging);
+    return (PowerBattery){battery, charging, battery >= 0};
 }
 
 static int write_ppm(const Image *img, const char *out)
@@ -128,7 +130,9 @@ typedef struct {
     Library *lib;
     Settings *set;
     int quit, launch, power_off;
-    double next_status;
+    PowerState power;
+    double last_input;
+    PowerBattery battery;
 } HomeLoop;
 
 // Saves what the Options panel changed and applies it to the hardware.
@@ -141,42 +145,95 @@ static void settings_apply(HomeLoop *l)
     if (settings_save(&s)) fprintf(stderr, "shelf: couldn't save the settings\n");
 }
 
-// POWER on the home screen: blank the panel and sleep until POWER wakes it (or the sleep
-// limit powers off). Returns 1 when Shelf should power off.
+// Blanks the panel and sleeps until POWER wakes it, or powers off once the policy's
+// limit passes. Returns 1 when Shelf should power off.
 static int home_standby(void)
 {
     platform_standby(1);
-    double until = platform_now() + 30 * 60;
+    PowerState asleep;
+    power_init(&asleep);
+    double since = platform_now();
     int off = 0;
     for (;;) {
-        platform_wait(until);
+        PowerDecision d = power_step(&asleep, platform_now(), since, POWER_ASLEEP, (PowerBattery){0});
+        if (d.action == POWER_OFF_RESUMABLE) { off = 1; break; }
+        platform_wait(d.next); // no polling: the next input, or the limit, ends the sleep
         Button b;
         while ((b = platform_poll()) != BTN_NONE) {
             if (b == BTN_POWER) goto woke;
             if (b == BTN_POWER_OFF || b == BTN_QUIT) { off = 1; goto woke; }
         }
-        if (platform_now() >= until) { off = 1; goto woke; }
     }
 woke:
     platform_standby(0);
     return off;
 }
 
+// Off from the home screen: the next boot starts at home.
+static void home_power_off(HomeLoop *l)
+{
+    settings_save(l->set);
+    l->power_off = 1;
+    platform_power_off();
+}
+
+// Carries out what the power policy asks for until it asks for nothing. Returns when it
+// next wants to run; *undimmed says whether this woke a dimmed screen.
+static double home_power(HomeLoop *l, int *undimmed)
+{
+    for (int i = 0; i < 8 && !l->power_off; i++) {
+        double now = platform_now();
+        if (power_battery_due(&l->power, now)) l->battery = status_poll();
+        PowerDecision d = power_step(&l->power, now, l->last_input, POWER_HOME, l->battery);
+        switch (d.action) {
+        case POWER_NONE:
+            return d.next;
+        case POWER_DIM:
+            platform_dim(1);
+            break;
+        case POWER_UNDIM:
+            platform_dim(0);
+            if (undimmed) *undimmed = 1;
+            break;
+        case POWER_STANDBY:
+            if (home_standby()) { home_power_off(l); break; }
+            l->last_input = platform_now();
+            ui_button(BTN_REDRAW);
+            break;
+        case POWER_OFF_RESUMABLE: // the battery is nearly flat
+            home_power_off(l);
+            break;
+        case POWER_LOW_BATTERY_WARNING:
+            ui_set_toast("Battery low");
+            break;
+        }
+    }
+    return platform_now();
+}
+
 static void home_button(void *ud, Button b)
 {
     HomeLoop *l = ud;
     if (b == BTN_QUIT) { l->quit = 1; return; } // the window closed
+    if (b != BTN_REDRAW) {
+        int undimmed = 0;
+        l->last_input = platform_now();
+        home_power(l, &undimmed);
+        if (l->power_off) return;
+        // A dimmed screen: the press only wakes it, unless it was POWER or the volume.
+        if (undimmed && b != BTN_POWER && b != BTN_POWER_OFF && b != BTN_VOLUME) return;
+    }
     if (b == BTN_POWER) {
-        if (!home_standby()) { ui_button(BTN_REDRAW); return; }
-        settings_save(l->set);
-        l->power_off = 1;
-        platform_power_off();
+        if (!home_standby()) {
+            l->last_input = platform_now();
+            ui_button(BTN_REDRAW);
+            return;
+        }
+        home_power_off(l);
         return;
     }
     if (b == BTN_POWER_OFF) { // held: save everything and go
-        settings_save(l->set);
-        l->power_off = 1;
-        platform_power_off();
+        home_power_off(l);
         return;
     }
     if (b == BTN_VOLUME) { // the hardware keys moved the volume: remember it
@@ -193,13 +250,10 @@ static void home_button(void *ud, Button b)
 static double home_tick(void *ud, double now)
 {
     HomeLoop *l = ud;
-    if (now >= l->next_status) {
-        status_poll();
-        l->next_status = now + 30;
-    }
+    double next = home_power(l, NULL); // battery, dimming and sleeping
     icons_pump(2); // only without the worker; new art makes ui_idle draw
     icons_trim();
-    return l->next_status;
+    return icons_pending() && now < next ? now : next;
 }
 
 static int home_after(void *ud)
@@ -210,9 +264,7 @@ static int home_after(void *ud)
     if (action == UI_SETTINGS) {
         settings_apply(l);
     } else if (action == UI_POWER_OFF) {
-        settings_save(l->set);
-        l->power_off = 1;
-        platform_power_off();
+        home_power_off(l);
         return 1;
     }
     int gi = ui_take_launch();
@@ -290,6 +342,10 @@ int main(void)
         return rc;
     }
 
+    // Powered off from a game last time: straight back into it. Taking the marker deletes
+    // it, first thing, so a game that can't start doesn't come back on every boot.
+    int resume = lib_take_resume(&lib);
+
     if (platform_init()) return 1;
     platform_set_brightness(set.brightness);
     platform_set_volume(set.volume);
@@ -305,31 +361,37 @@ int main(void)
     int quit = 0, power_off = 0;
     char toast[192] = ""; // a failure the home screen should show
     while (!quit && !power_off) {
-        ui_set_dark(set.dark);
-        if (ui_init(&lib, font_dir)) {
-            fprintf(stderr, "shelf: fonts missing in %s\n", font_dir);
-            break;
+        int want = resume;
+        resume = -1;
+        if (want < 0) { // the home screen, until it launches a game
+            ui_set_dark(set.dark);
+            if (ui_init(&lib, font_dir)) {
+                fprintf(stderr, "shelf: fonts missing in %s\n", font_dir);
+                break;
+            }
+            ui_set_settings(&set);
+            if (toast[0]) {
+                ui_set_toast(toast);
+                toast[0] = 0;
+            }
+            HomeLoop hl = {&lib, &set, 0, -1, 0};
+            power_init(&hl.power);
+            hl.last_input = platform_now();
+            LoopScreen screen = {&hl, home_button, home_tick, screen_update, screen_idle, screen_draw, home_after};
+            LoopIO io = loop_platform();
+            if (getenv("SHELF_STATS")) {
+                stats.t0 = platform_now();
+                screen.draw = stats_draw;
+                io.present = stats_present;
+            }
+            loop_run(&io, &screen, canvas, &stats.loop);
+            set = ui_settings();
+            ui_free();
+            if (hl.quit || hl.power_off) break;
+            want = hl.launch;
         }
-        ui_set_settings(&set);
-        if (toast[0]) {
-            ui_set_toast(toast);
-            toast[0] = 0;
-        }
-        HomeLoop hl = {&lib, &set, 0, -1, 0, platform_now() + 30};
-        LoopScreen screen = {&hl, home_button, home_tick, screen_update, screen_idle, screen_draw, home_after};
-        LoopIO io = loop_platform();
-        if (getenv("SHELF_STATS")) {
-            stats.t0 = platform_now();
-            screen.draw = stats_draw;
-            io.present = stats_present;
-        }
-        loop_run(&io, &screen, canvas, &stats.loop);
-        set = ui_settings();
-        ui_free();
-        if (hl.quit || hl.power_off) break;
 
         // A game, and then whichever game its in-game menu asked for.
-        int want = hl.launch;
         for (;;) {
             if (want < 0) break;
             if (lib_mark_played(&lib, want)) fprintf(stderr, "shelf: couldn't save recents\n");

@@ -18,6 +18,7 @@ static SDL_Texture *tex;
 static Image *game_canvas; // platform_present_game's scaled frame
 static Uint32 wake_event;  // platform_wake's user event
 static int standby_on;     // the panel is blank while asleep
+static int dim_on;         // idle: the window is darkened like the backlight would be
 
 // D-pad auto-repeat, same feel as on the device.
 static Button repeat_button = BTN_NONE;
@@ -247,6 +248,12 @@ void platform_present(const Image *frame)
     SDL_UpdateTexture(tex, NULL, frame->px, frame->w * 4);
     SDL_RenderClear(ren);
     SDL_RenderCopy(ren, tex, NULL, NULL);
+    if (dim_on) {
+        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 200);
+        SDL_RenderFillRect(ren, NULL);
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+    }
     SDL_RenderPresent(ren);
 }
 
@@ -322,11 +329,31 @@ int platform_battery(int *charging)
     return percent;
 }
 
+// The loops draw nothing new while idle, so the change is shown at once from the last
+// frame the window kept.
+void platform_dim(int on)
+{
+    on = on != 0;
+    if (on == dim_on) return;
+    dim_on = on;
+    if (!ren || !tex || standby_on) return;
+    SDL_RenderClear(ren);
+    SDL_RenderCopy(ren, tex, NULL, NULL);
+    if (on) {
+        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 200);
+        SDL_RenderFillRect(ren, NULL);
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+    }
+    SDL_RenderPresent(ren);
+}
+
 void platform_standby(int on)
 {
     on = on != 0;
     if (on == standby_on) return;
     standby_on = on;
+    if (!on) dim_on = 0; // waking restores the brightness
     if (audio_dev) SDL_PauseAudioDevice(audio_dev, on ? 1 : 0);
     if (on && ren) { // the panel goes dark
         SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);

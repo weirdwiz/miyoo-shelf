@@ -8,11 +8,17 @@
 #include <string.h>
 
 #define FP_MAX_EVENTS 32
+#define FP_LOG 4096
 
 typedef struct {
     double at;
     Button button;
 } Event;
+
+typedef struct {
+    double at;
+    int percent, charging;
+} Battery;
 
 static struct {
     double clock;
@@ -20,12 +26,30 @@ static struct {
     int nevents, next;
     unsigned held;
     double limit;
+    double watch_from, watch_to;
+    Battery battery[FP_MAX_EVENTS];
+    int nbattery;
     int asleep;
     FakePlatform counts;
     Image *frame, *first; // the last and the first game frame presented
     Image *captured;      // the canvas asked for with fp_capture_at
     double capture_at;    // < 0: not capturing
+    char log[FP_LOG];     // see fp_log
+    size_t loglen;
+    void (*hook)(const char *call);
 } F;
+
+// Records a call that changes the device's state, in order, and tells the test's hook.
+static void note(const char *call)
+{
+    size_t n = strlen(call);
+    if (F.loglen + n + 2 < FP_LOG) {
+        if (F.loglen) F.log[F.loglen++] = ' ';
+        memcpy(F.log + F.loglen, call, n + 1);
+        F.loglen += n;
+    }
+    if (F.hook) F.hook(call);
+}
 
 void fp_reset(void)
 {
@@ -38,6 +62,8 @@ void fp_reset(void)
 }
 
 const FakePlatform *fp(void) { return &F.counts; }
+const char *fp_log(void) { return F.log; }
+void fp_on_call(void (*hook)(const char *call)) { F.hook = hook; }
 
 void fp_press_at(double at, Button b)
 {
@@ -55,8 +81,23 @@ void fp_press_at(double at, Button b)
     F.nevents++;
 }
 
+void fp_battery_at(double at, int percent, int charging)
+{
+    if (F.nbattery == FP_MAX_EVENTS) {
+        fprintf(stderr, "fake platform: the battery script is full\n");
+        exit(2);
+    }
+    int i = F.nbattery++;
+    while (i > 0 && F.battery[i - 1].at > at) { // in time order, like the presses
+        F.battery[i] = F.battery[i - 1];
+        i--;
+    }
+    F.battery[i] = (Battery){at, percent, charging};
+}
+
 void fp_hold(unsigned mask) { F.held = mask; }
 void fp_limit(double at) { F.limit = at; }
+void fp_watch_waits(double from, double to) { F.watch_from = from; F.watch_to = to; }
 void fp_capture_at(double at) { F.capture_at = at; }
 const Image *fp_capture(void) { return F.captured; }
 const Image *fp_frame(void) { return F.frame; }
@@ -83,6 +124,8 @@ void platform_sleep_until(double t)
 
 void platform_wait(double until)
 {
+    F.counts.waits++;
+    if (F.clock >= F.watch_from && F.clock < F.watch_to) F.counts.watched_waits++;
     double t = until;
     if (F.next < F.nevents && F.events[F.next].at < t) t = F.events[F.next].at;
     if (F.limit < t) t = F.limit;
@@ -138,6 +181,7 @@ void platform_audio_source(int (*pull)(int16_t *out, int frames))
 {
     if (pull) F.counts.audio_on++;
     else F.counts.audio_off++;
+    note(pull ? "audio_on" : "audio_off");
 }
 
 void platform_set_brightness(int level) { F.counts.brightness = level; }
@@ -146,20 +190,44 @@ int platform_volume(void) { return F.counts.volume; }
 
 int platform_battery(int *charging)
 {
-    if (charging) *charging = 0;
-    return 76;
+    int percent = 76, plugged = 0;
+    for (int i = 0; i < F.nbattery && F.battery[i].at <= F.clock; i++) {
+        percent = F.battery[i].percent;
+        plugged = F.battery[i].charging;
+    }
+    F.counts.battery_reads++;
+    if (charging) *charging = plugged;
+    return percent;
+}
+
+void platform_dim(int on)
+{
+    if (on) F.counts.dims++;
+    F.counts.dimmed = on != 0;
+    note(on ? "dim_on" : "dim_off");
 }
 
 void platform_standby(int on)
 {
+    if ((on != 0) == F.asleep) return; // as on the device: already in that state
     F.asleep = on != 0;
+    if (!F.asleep) F.counts.dimmed = 0;
     if (F.asleep) F.counts.standby_on++;
     else F.counts.standby_off++;
+    note(F.asleep ? "standby_on" : "standby_off");
 }
 
 void platform_performance(int game)
 {
     if (game) F.counts.performance_on++;
+    else F.counts.performance_off++;
+    note(game ? "perf_on" : "perf_off");
 }
 
-void platform_power_off(void) { F.counts.power_off++; }
+void platform_probe(FILE *out) { (void)out; }
+
+void platform_power_off(void)
+{
+    F.counts.power_off++;
+    note("power_off");
+}

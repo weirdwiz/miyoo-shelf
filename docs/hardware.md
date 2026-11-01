@@ -45,7 +45,8 @@ the frame rate. Shelf then starts as usual.
 
 Backlight: PWM. `echo 0 > /sys/class/pwm/pwmchip0/export`, then in
 `/sys/class/pwm/pwmchip0/pwm0/`: `period` 800, `duty_cycle` 0-100, `enable` 1.
-Brightness level 0-10 maps to duty `round(3 * exp(0.350656 * level))` (3..100).
+Brightness level 0-10 maps to duty `round(3 * exp(0.350656 * level))` (3..100). Idle
+dimming sets level 0's duty, 3, and puts the level back on the next press.
 
 Panel power: GPIO 4 (`/sys/class/gpio/export` "4", `gpio4/direction` "out",
 `gpio4/value` 0 off / 1 on). After turning it on, re-enable the PWM (write `enable` 0
@@ -89,6 +90,8 @@ Volume in dB, -60..+30: `MI_AO_SetVolume(0, db)`, or the `/dev/mi_ao` ioctls
 
 There's no kernel suspend (`/sys/power/state` offers none). Standby is a software job:
 pause emulation, mute audio, backlight 0, panel off (GPIO 4), CPU governor `powersave`
-(`/sys/devices/system/cpu/cpufreq/policy0/scaling_governor`), then wait for POWER.
+(`/sys/devices/system/cpu/cpufreq/policy0/scaling_governor`), then wait for POWER. Shelf
+saves the game after the panel is off, and powers off after 10 minutes asleep. Games run
+on `performance`; the home screen and the paused in-game menu on `ondemand`.
 Power off: `sync`, then `poweroff` (*unverified* on the Plus, where Onion uses its own
-`shutdown` script).
+`shutdown` script). Every save, and the resume marker, is written and `fsync`ed before.
