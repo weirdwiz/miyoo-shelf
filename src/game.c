@@ -41,6 +41,10 @@ typedef struct {
     char shot[PATH_LEN * 2];
     double played;           // seconds actually spent playing, menu and standby excluded
     int switch_to;           // the game picked in the in-game menu
+    PowerState power;        // dimming, idle standby and the battery, across play and menu
+    PowerBattery battery;    // the newest reading
+    double last_input;       // the last press, or change in the buttons held while playing
+    int undimmed;            // the last power step woke a dimmed menu
 } Session;
 
 static char problem[192]; // see game_error()
@@ -190,6 +194,32 @@ woke:
     return off;
 }
 
+// Reads the battery when the policy wants it and takes one decision, carrying out the
+// ones that need no more than the platform: dimming and the low-battery message. The
+// caller handles standby and powering off.
+static PowerAction session_power(Session *s, PowerContext ctx, double *next)
+{
+    double now = platform_now();
+    if (power_battery_due(&s->power, now)) {
+        int charging = 0, percent = platform_battery(&charging);
+        s->battery = (PowerBattery){percent, charging, percent >= 0};
+        ui_set_status(percent, charging); // the menu's status bar; ignored while playing
+    }
+    PowerDecision d = power_step(&s->power, now, s->last_input, ctx, s->battery);
+    if (next) *next = d.next;
+    switch (d.action) {
+    case POWER_DIM: platform_dim(1); break;
+    case POWER_UNDIM: platform_dim(0); s->undimmed = 1; break;
+    case POWER_LOW_BATTERY_WARNING: ui_set_toast("Battery low"); break;
+    case POWER_OFF_RESUMABLE:
+        if (s->battery.valid && s->battery.percent <= POWER_OFF_PERCENT)
+            fprintf(stderr, "shelf: battery at %d%%; saving %s and powering off\n", s->battery.percent, s->stem);
+        break;
+    default: break;
+    }
+    return d.action;
+}
+
 /* ---------- the in-game menu's screenshots ---------- */
 
 // The paused game's live frame plus each recent's <stem>.png, read a few at a time while
@@ -297,15 +327,49 @@ typedef struct {
     int done;       // a MENU_* result, 0 while the menu is open
 } Menu;
 
+// The power policy while the menu is up; returns when it next wants to run.
+static double menu_power(Menu *m)
+{
+    Session *s = m->s;
+    for (int i = 0; i < 8 && !m->done; i++) {
+        double next;
+        switch (session_power(s, POWER_MENU, &next)) {
+        case POWER_NONE:
+            return next;
+        case POWER_STANDBY: // as if POWER was pressed
+            if (standby(s)) { m->done = MENU_POWER_OFF; break; }
+            platform_audio_source(NULL);
+            s->last_input = platform_now();
+            ui_button(BTN_REDRAW);
+            break;
+        case POWER_OFF_RESUMABLE:
+            m->done = MENU_POWER_OFF;
+            break;
+        default:
+            break;
+        }
+    }
+    return platform_now();
+}
+
 static void menu_button(void *ud, Button b)
 {
     Menu *m = ud;
     Session *s = m->s;
     if (m->done) return;
+    if (b != BTN_REDRAW) {
+        s->last_input = platform_now();
+        s->undimmed = 0;
+        menu_power(m);
+        if (m->done) return;
+        // A dimmed screen: the press only wakes it, unless it was POWER or the volume.
+        if (s->undimmed && b != BTN_POWER && b != BTN_POWER_OFF && b != BTN_VOLUME) return;
+    }
     switch (b) {
     case BTN_POWER: // asleep and back: the game stays paused
         if (standby(s)) { m->done = MENU_POWER_OFF; return; }
         platform_audio_source(NULL);
+        s->last_input = platform_now();
         ui_button(BTN_REDRAW);
         return;
     case BTN_POWER_OFF:
@@ -341,12 +405,12 @@ static void menu_button(void *ud, Button b)
 
 static double menu_tick(void *ud, double now)
 {
-    (void)ud;
+    double next = menu_power(ud); // battery, dimming and sleeping
     icons_pump(2);
     icons_trim();
     // Art made here (no worker) needs the next pass. Otherwise nothing outside the screen
     // changes: the worker's art wakes the loop itself and ui_idle has the clock's minute.
-    return icons_pending() ? now : now + 3600;
+    return icons_pending() && now < next ? now : next;
 }
 
 static void menu_update(void *ud, float dt)
@@ -407,6 +471,8 @@ static int run_menu(Session *s)
     }
 
     platform_performance(0); // a paused game needs no more than the home screen
+    ui_set_status(s->battery.valid ? s->battery.percent : -1, s->battery.charging);
+    s->last_input = platform_now(); // MENU was just pressed
     Menu menu = {s, &cards, canvas, 0, 0};
     LoopIO io = {platform_now, platform_poll, platform_wait, platform_present, platform_vsync_paced()};
     LoopScreen screen = {&menu, menu_button, menu_tick, menu_update, menu_idle, menu_draw, menu_after};
@@ -421,15 +487,26 @@ static int run_menu(Session *s)
 
 /* ---------- playing ---------- */
 
-// Runs frames until the player leaves the game with the menu or POWER.
+// Back from the menu or standby: sound on, and the time away isn't idle or play time.
+static void play_resume(Session *s, double *last, double *next)
+{
+    platform_audio_source(player_audio_read);
+    player_audio_flush();
+    *last = *next = s->last_input = platform_now();
+}
+
+// Runs frames until the player leaves the game with the menu or POWER, or the power
+// policy ends it.
 static int play(Session *s)
 {
     double last = platform_now(), next = last, flush_at = last + SRAM_SECONDS;
-    unsigned shown = 0;
+    unsigned shown = 0, held = 0;
     int redraw = 1;
+    s->last_input = last;
     for (;;) {
         Button b;
         while ((b = platform_poll()) != BTN_NONE) {
+            if (b != BTN_REDRAW) s->last_input = platform_now();
             switch (b) {
             case BTN_MENU: {
                 platform_audio_source(NULL);
@@ -440,19 +517,13 @@ static int play(Session *s)
                 if (result == MENU_POWER_OFF) return GAME_POWER_OFF;
                 if (result == MENU_RESTART) player_reset();
                 platform_performance(1);
-                platform_audio_source(player_audio_read);
-                player_audio_flush();
-                last = platform_now();
-                next = last;
+                play_resume(s, &last, &next);
                 redraw = 1; // the menu's last frame is on screen
                 break;
             }
             case BTN_POWER:
                 if (standby(s)) return GAME_POWER_OFF;
-                platform_audio_source(player_audio_read);
-                player_audio_flush();
-                last = platform_now();
-                next = last;
+                play_resume(s, &last, &next);
                 redraw = 1;
                 break;
             case BTN_POWER_OFF:
@@ -466,7 +537,12 @@ static int play(Session *s)
             }
         }
 
-        player_set_input(player_input());
+        unsigned input = player_input();
+        if (input != held) { // holding the same buttons for ten minutes is idle too
+            held = input;
+            s->last_input = platform_now();
+        }
+        player_set_input(input);
         player_run();
         const PlayerFrame *f = player_frame();
         if (redraw || f->serial != shown) { // a core that dupes a frame keeps the last one
@@ -480,6 +556,15 @@ static int play(Session *s)
         if (now >= flush_at) {
             if (player_save_sram()) report_as("Couldn't save the game", "couldn't save %s's saved game", s->stem);
             flush_at = now + SRAM_SECONDS;
+        }
+        for (PowerAction a; (a = session_power(s, POWER_GAMEPLAY, NULL)) != POWER_NONE;) {
+            if (a == POWER_OFF_RESUMABLE) return GAME_POWER_OFF; // the battery is nearly flat
+            if (a == POWER_STANDBY) { // idle: as if POWER was pressed
+                platform_audio_source(NULL);
+                if (standby(s)) return GAME_POWER_OFF;
+                play_resume(s, &last, &next);
+                redraw = 1;
+            }
         }
         if (!platform_vsync_paced()) { // otherwise presenting already waits for the panel
             next += 1.0 / player_fps();
@@ -505,6 +590,7 @@ int game_play(Library *lib, int game, const GameSettings *set, int *switch_to)
     s.game = game;
     s.set = set;
     s.switch_to = -1;
+    power_init(&s.power);
     session_paths(&s);
     make_dirs(s.save_dir);
 

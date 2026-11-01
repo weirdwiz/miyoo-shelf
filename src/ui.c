@@ -515,6 +515,7 @@ static void scene_step(Spring *s, float dt, float k, float damping)
 }
 
 static int sw_animating(void);
+static int sw_asking(void);
 static unsigned sw_revision(void);
 static int sw_prebuild_next(void);
 static void sw_prebuild(void);
@@ -599,7 +600,8 @@ void ui_reset_home(void)
 
 /* ---------- drawing ---------- */
 
-// A message over the home screen: a dark pill that fades in and out.
+// A message over the home screen: a dark pill that fades in and out. Over the in-game
+// menu it takes the light pill a question uses, at the top, unless a question is up.
 static void draw_toast(Image *c)
 {
     if (!S.toast[0]) return;
@@ -607,6 +609,15 @@ static void draw_toast(Image *c)
     if (t < .12f) a = t / .12f;
     else if (t > TOAST_FOR - .45f) a = (TOAST_FOR - t) / .45f;
     if (a <= 0) return;
+    if (sw_on()) {
+        if (sw_asking()) return;
+        int tw = text_width(S.small, S.toast), th = font_height(S.small) + 8;
+        float x = SCREEN_W / 2.f - (tw + 24) / 2.f;
+        gfx_fill_rrect(c, x, 8, tw + 24, th, th / 2.f, argb((uint8_t)(a * 255), 255, 255, 255));
+        text_draw(c, S.small, S.toast, (int)x + 12, 8 + (th - font_height(S.small)) / 2,
+                  argb((uint8_t)(a * 255), 0x26, 0x2a, 0x35));
+        return;
+    }
     char text[128];
     text_fit(S.body, S.toast, SCREEN_W - 120, text, sizeof text);
     int tw = text_width(S.body, text), th = font_height(S.body) + 16;
@@ -1381,7 +1392,7 @@ void ui_draw(Image *c)
     S.redraw = 0;
     S.drawn_art = icons_revision();
     S.drawn_minute = (long)(wall() / 60);
-    if (sw_on()) { S.drawn_cards = sw_revision(); sw_draw(c); return; }
+    if (sw_on()) { S.drawn_cards = sw_revision(); sw_draw(c); draw_toast(c); return; }
     float e = S.enter.x;
     // Compose straight into the final canvas except when a zoom needs a source layer.
     Image *composed = e > .995f ? c : S.layer;
@@ -1466,6 +1477,8 @@ void ui_switch_hooks(const Image *(*card)(int), const Image *(*full)(int), void 
 {
     W.card = card; W.full = full; W.select = select; W.revision = revision;
 }
+
+static int sw_asking(void) { return W.notice[0] != 0; }
 
 void ui_switch_notice(const char *text)
 {

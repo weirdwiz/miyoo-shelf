@@ -146,8 +146,11 @@ static int game_index(const char *stem)
 // What the saved state held at the moments the platform blanked, woke and powered off.
 static int watched;
 static long at_blank, at_wake, at_off;
+static double slept_at, off_at; // clock times
 static void watch_saves(const char *call)
 {
+    if (!strcmp(call, "standby_on")) slept_at = platform_now();
+    if (!strcmp(call, "power_off")) off_at = platform_now();
     if (!strcmp(call, "standby_on")) at_blank = state_counter(watched);
     if (!strcmp(call, "standby_off")) at_wake = state_counter(watched);
     if (!strcmp(call, "power_off")) at_off = state_counter(watched);
@@ -269,18 +272,23 @@ int main(int argc, char **argv)
 
     // The paused menu runs on the menu's CPU governor and gives the game back full speed
     // when it resumes. Settled, it sleeps until the status clock's minute turns instead of
-    // waking every second.
+    // waking every second. Left alone it dims 45 s after MENU, and the press that wakes it
+    // does nothing else.
     ui_set_wall_clock(fake_wall);
     fp_reset();
     fp_limit(120);
     fp_press_at(1.0, BTN_MENU);
-    fp_press_at(100.0, BTN_A); // resume after a long rest
-    fp_press_at(101.0, BTN_MENU);
-    fp_press_at(101.6, BTN_B);
+    fp_press_at(100.0, BTN_A); // wakes the screen
+    fp_press_at(100.5, BTN_A); // resumes
+    fp_press_at(101.5, BTN_MENU);
+    fp_press_at(102.1, BTN_B);
     fp_watch_waits(5.0, 99.9);
     CHECK(session(alpha, &next) == GAME_HOME);
     CHECK(!strcmp(calls("perf"), "perf_on perf_off perf_on perf_off perf_off"));
-    CHECK(fp()->watched_waits >= 1 && fp()->watched_waits <= 2); // the minute at 55 s
+    CHECK(!strcmp(calls("dim"), "dim_on dim_off"));
+    // Battery reads at 30, 60 and 90 s, the dim at 46 s and the clock's minute at 55 s
+    // (it used to be ~95: one a second).
+    CHECK(fp()->watched_waits >= 1 && fp()->watched_waits <= 5);
     ui_set_wall_clock(NULL);
 
     // POWER sleeps (nothing presented, no player running) and POWER wakes it again. The
@@ -326,6 +334,74 @@ int main(int argc, char **argv)
     CHECK(session(beta, &next) == GAME_POWER_OFF);
     CHECK(fp()->power_off == 1);
     CHECK(state_counter(beta) > beta_before && exists(beta, ".png"));
+
+    // Playing with the same buttons held for ten minutes is idle: standby, and ten
+    // minutes asleep powers off. A press in between starts the ten minutes again. The
+    // battery is read every 30 s while playing.
+    fp_reset();
+    fp_limit(1600);
+    slept_at = off_at = -1;
+    fp_on_call(watch_saves);
+    fp_hold(1u << BTN_RIGHT);
+    fp_press_at(300, BTN_START);
+    CHECK(session(beta, &next) == GAME_POWER_OFF);
+    CHECK(slept_at > 899.9 && slept_at < 900.1);
+    CHECK(off_at > 1499.9 && off_at < 1500.1);
+    CHECK(fp()->battery_reads >= 30); // 0, 30, ... 870 s
+    CHECK(fp()->standby_off == 1 && fp()->power_off == 1);
+    fp_hold(0);
+
+    // The paused menu left alone: dim at 45 s, standby at 3 minutes, off 10 minutes later.
+    fp_reset();
+    fp_limit(1000);
+    slept_at = off_at = -1;
+    fp_on_call(watch_saves);
+    fp_press_at(1.0, BTN_MENU);
+    CHECK(session(beta, &next) == GAME_POWER_OFF);
+    CHECK(!strcmp(calls("dim"), "dim_on"));
+    CHECK(slept_at > 180.9 && slept_at < 181.1 && off_at > 780.9 && off_at < 781.1);
+
+    // The battery nearly flat: three readings in a row at 4 % or less save the game and
+    // power off.
+    long beta_low = state_counter(beta);
+    fp_reset();
+    fp_limit(200);
+    off_at = -1;
+    fp_on_call(watch_saves);
+    fp_battery_at(10, 3, 0);
+    CHECK(session(beta, &next) == GAME_POWER_OFF);
+    CHECK(off_at > 89.9 && off_at < 90.1); // read at 30, 60 and 90 s
+    CHECK(fp()->standby_on == 0 && fp()->power_off == 1);
+    CHECK(at_off > beta_low);
+
+    // At 10 % or less the in-game menu says so, once, in the pill at the top.
+    ui_set_wall_clock(fake_wall);
+    for (int low = 0; low < 2; low++) {
+        fp_reset();
+        fp_limit(20);
+        if (low) fp_battery_at(0, 8, 0);
+        fp_press_at(1.0, BTN_MENU);
+        fp_capture_at(2.5);
+        fp_press_at(3.0, BTN_B);
+        CHECK(session(beta, &next) == GAME_HOME);
+        const Image *menu = fp_capture();
+        CHECK(menu != NULL);
+        if (menu) {
+            uint32_t p = menu->px[10 * menu->w + menu->w / 2];
+            int light = ((p >> 16) & 0xff) > 200 && ((p >> 8) & 0xff) > 200;
+            CHECK(light == low);
+        }
+    }
+    ui_set_wall_clock(NULL);
+
+    // Not while it charges.
+    fp_reset();
+    fp_limit(200);
+    fp_battery_at(10, 3, 1);
+    fp_press_at(150, BTN_MENU);
+    fp_press_at(151, BTN_B);
+    CHECK(session(beta, &next) == GAME_HOME);
+    CHECK(fp()->power_off == 0);
 
     // A missing core fails with a message, and writes nothing.
     char bad[PATH_LEN * 2];
