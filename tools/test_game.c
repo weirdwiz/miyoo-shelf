@@ -142,6 +142,16 @@ static int game_index(const char *stem)
     return -1;
 }
 
+// What the saved state held at the moments the platform blanked, woke and powered off.
+static int watched;
+static long at_blank, at_wake, at_off;
+static void watch_saves(const char *call)
+{
+    if (!strcmp(call, "standby_on")) at_blank = state_counter(watched);
+    if (!strcmp(call, "standby_off")) at_wake = state_counter(watched);
+    if (!strcmp(call, "power_off")) at_off = state_counter(watched);
+}
+
 // One session with the script the caller queued; returns game_play's result.
 static int session(int game, int *next)
 {
@@ -239,9 +249,15 @@ int main(int argc, char **argv)
     CHECK(session(alpha, &next) == GAME_HOME);
     CHECK(state_counter(alpha) - resumed_from > 100); // ~1 s before the menu + ~1.2 s after resuming
 
-    // POWER sleeps (nothing presented, no player running) and POWER wakes it again.
+    // POWER sleeps (nothing presented, no player running) and POWER wakes it again. The
+    // panel goes dark and the sound stops before the save is written, so the press feels
+    // instant; the save is done before the device wakes.
+    long beta_unsaved = state_counter(beta);
     fp_reset();
     fp_limit(25);
+    watched = beta;
+    at_blank = at_wake = -2;
+    fp_on_call(watch_saves);
     fp_press_at(0.5, BTN_POWER);
     fp_press_at(2.0, BTN_POWER);
     fp_press_at(2.4, BTN_MENU);
@@ -250,6 +266,23 @@ int main(int argc, char **argv)
     CHECK(fp()->standby_on == 1 && fp()->standby_off == 1);
     CHECK(fp()->asleep_presents == 0);
     CHECK(fp()->audio_off >= 2 && fp()->audio_on >= 2);
+    CHECK(strstr(fp_log(), "audio_off standby_on standby_off") != NULL);
+    CHECK(at_blank == beta_unsaved);
+    CHECK(at_wake > 0 && at_wake != beta_unsaved);
+
+    // POWER held while asleep: the save made on the way into standby is on the card
+    // before the power goes.
+    fp_reset();
+    fp_limit(25);
+    at_blank = at_off = -2;
+    fp_on_call(watch_saves);
+    fp_press_at(0.5, BTN_POWER);
+    fp_press_at(2.0, BTN_POWER_OFF);
+    long beta_before_sleep = state_counter(beta);
+    CHECK(session(beta, &next) == GAME_POWER_OFF);
+    CHECK(fp()->power_off == 1);
+    CHECK(at_blank == beta_before_sleep);
+    CHECK(at_off > beta_before_sleep);
 
     // POWER held: everything is saved before Shelf powers off.
     long beta_before = state_counter(beta);

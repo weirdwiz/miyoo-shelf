@@ -161,15 +161,16 @@ static unsigned player_input(void)
 
 /* ---------- standby ---------- */
 
-// Saves, blanks the panel and sleeps until POWER wakes it. Returns 0 when it woke up and 1
-// when Shelf should power off (POWER held, or the sleep limit). The caller resumes audio:
-// the menu stays paused across a standby.
+// Blanks the panel, saves and sleeps until POWER wakes it. Returns 0 when it woke up and 1
+// when Shelf should power off (POWER held, or the sleep limit). The panel and sound go
+// first so the press feels instant; the save is written before anything can power off.
+// The caller resumes audio: the menu stays paused across a standby.
 static int standby(Session *s)
 {
     platform_audio_source(NULL);
     player_audio_flush();
-    save_session(s);
     platform_standby(1);
+    save_session(s);
     double until = platform_now() + STANDBY_SECONDS;
     int off = 0;
     for (;;) {

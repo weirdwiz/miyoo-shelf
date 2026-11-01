@@ -22,6 +22,11 @@ typedef struct {
 
 void fp_reset(void); // forget the clock, the script and the counters
 const FakePlatform *fp(void);
+// The calls that change the device's state, in order, space separated: audio_on,
+// audio_off, standby_on, standby_off, perf_on, perf_off, power_off.
+const char *fp_log(void);
+// Calls `hook` with each logged call as it happens (NULL: none); fp_reset clears it.
+void fp_on_call(void (*hook)(const char *call));
 // Queues a press the fake delivers once, when the clock reaches `at`; the test scripts
 // presses in time order (fp_press_at sorts them).
 void fp_press_at(double at, Button b);
