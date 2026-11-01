@@ -25,11 +25,12 @@ FIXTURE_READY := $(FIXTURE)/.shelf/data/recents.json
 .PHONY: sim run fixture clean test shots mm mm-inner
 
 test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUILD)/test-scale \
-      $(BUILD)/test-ui-cache $(BUILD)/test-loop $(BUILD)/test-ui-alloc $(BUILD)/test-game $(FIXTURE_READY)
+      $(BUILD)/test-ui-cache $(BUILD)/test-loop $(BUILD)/test-ui-alloc $(BUILD)/test-game $(BUILD)/test-palette $(FIXTURE_READY)
 	$(BUILD)/test-scale
 	$(BUILD)/test-library
 	$(BUILD)/test-rrect
 	$(BUILD)/test-scaled-blit
+	$(BUILD)/test-palette "$(CURDIR)/$(FIXTURE)" "$(CURDIR)/assets/fonts"
 	$(BUILD)/test-ui-cache "$(CURDIR)/$(FIXTURE)" "$(CURDIR)/assets/fonts"
 	$(BUILD)/test-loop "$(CURDIR)/$(FIXTURE)" "$(CURDIR)/assets/fonts"
 	$(BUILD)/test-ui-alloc "$(CURDIR)/$(FIXTURE)" "$(CURDIR)/assets/fonts"
@@ -42,6 +43,10 @@ $(BUILD)/test-library: tools/test_library.c src/library.c src/library.h third_pa
 $(BUILD)/test-loop: tools/test_loop.c src/loop.c src/ui.c src/icons.c src/library.c src/settings.c src/text.c src/gfx.c $(wildcard src/*.h)
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tools/test_loop.c src/loop.c src/ui.c src/icons.c src/library.c src/settings.c src/text.c src/gfx.c third_party/cJSON.c -lm -lpthread
+
+$(BUILD)/test-palette: tools/test_palette.c src/ui.c src/library.c src/icons.c src/settings.c src/text.c src/gfx.c third_party/cJSON.c third_party/cJSON.h $(wildcard src/*.h)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tools/test_palette.c src/icons.c src/settings.c src/text.c src/gfx.c third_party/cJSON.c -lm
 
 $(BUILD)/test-ui-cache: tools/test_ui_cache.c src/ui.c src/icons.c src/library.c src/settings.c src/text.c src/gfx.c $(wildcard src/*.h)
 	@mkdir -p $(BUILD)

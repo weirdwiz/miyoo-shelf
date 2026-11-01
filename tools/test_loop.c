@@ -108,11 +108,11 @@ int main(int argc, char **argv)
     Image *canvas = img_new(SCREEN_W, SCREEN_H);
     LoopStats st = {0};
 
-    // Start-up: art loads (pumped from tick), the cursor pulses for a few seconds, then
-    // the home screen stops presenting until the clock's minute turns.
-    int n = run_until(canvas, 10, &st);
-    CHECK(n > 60 && n < 10 * 60);
-    CHECK(last_present < 8);
+    // Start-up: the first frame plus the art it asks for, pumped in at the loop's tick.
+    // With the cursor pulse gone that is a handful of frames, not 60 fps, and then the
+    // home screen stops presenting until the clock's minute turns.
+    int n = run_until(canvas, 11, &st);
+    CHECK(n >= 1 && n < 66);
     n = run_until(canvas, 54.9, &st);
     CHECK(n == 0);
     st.waits = 0;
@@ -120,11 +120,12 @@ int main(int argc, char **argv)
     CHECK(n == 1 && fabs(last_present - 55) < .05);
     CHECK(st.waits < 5); // sleeps, doesn't spin
 
-    // Input wakes at once, animates, then settles again.
+    // Input wakes at once; the retuned springs settle a 184 px hop in ~0.7 s (the tail
+    // down to the spring's rest threshold), then the screen is idle again.
     press(60, BTN_RIGHT);
     n = run_until(canvas, 70, &st);
     CHECK(first_present_after >= 60 && first_present_after < 60.01);
-    CHECK(n > 30 && last_present < 68);
+    CHECK(n > 20 && last_present < 60.8);
 
     // Status changes draw one frame; unchanged polls none.
     status_at = 75;
@@ -147,6 +148,16 @@ int main(int argc, char **argv)
     run_until(canvas, 128, &st);
     n = run_until(canvas, 170, &st);
     CHECK(n == 0); // the clock's minutes turn at 115 and 175
+
+    // A toast fades in and out but is otherwise static: the middle of its stay presents
+    // nothing, and the whole thing costs roughly the fade frames, not 60 fps x TOAST_FOR.
+    ui_set_toast("Couldn't start Gamma");
+    n = run_until(canvas, 171, &st);
+    CHECK(n > 3 && n < 20); // the ~0.12 s fade-in
+    n = run_until(canvas, 173.3, &st);
+    CHECK(n == 0); // the static middle: ui_idle sleeps through it
+    n = run_until(canvas, 174.7, &st);
+    CHECK(n > 10 && n < 45); // the ~0.45 s fade-out and the frame that clears it
     ui_free();
     icons_free();
 
@@ -157,7 +168,7 @@ int main(int argc, char **argv)
     CHECK(ui_init_switcher(&lib, argv[2], 0, 0) == 0);
     double t0 = clock_now;
     n = run_until(canvas, t0 + 10, &st);
-    CHECK(n > 30 && last_present < t0 + 8);
+    CHECK(n >= 1 && n <= 3 && last_present < t0 + 8); // one frame, then the clock's minute
     card_at = t0 + 12;
     n = run_until(canvas, t0 + 14, &st);
     CHECK(n == 1 && first_present_after >= t0 + 12 && first_present_after < t0 + 12.01);
@@ -166,8 +177,8 @@ int main(int argc, char **argv)
     CHECK(n > 30 && first_present_after < t0 + 20.01 && last_present < t0 + 28);
     ui_free();
 
-    // Screenshots arriving while settled: the backdrop cross-fades to them, the nearby
-    // sprites are built between frames (no presents), and the loop goes back to sleep.
+    // Screenshots arriving while settled: the cards redraw with them, the nearby sprites
+    // are built between frames (no presents), and the loop goes back to sleep.
     shot = img_new(248, 186);
     CHECK(shot != NULL);
     card_rev = 0;

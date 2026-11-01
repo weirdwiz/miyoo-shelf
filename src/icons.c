@@ -6,7 +6,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#define CACHE_VERSION 3
+#define CACHE_VERSION 4
 
 typedef struct {
     Image *img[2];   // [0] small, [1] big
@@ -140,7 +140,8 @@ static void blur_line(uint32_t *buf, uint32_t *tmp, int n, int stride, int r)
     }
 }
 
-// Three box passes approximate a gaussian; then push saturation like the mock's saturate(1.3).
+// Three box passes approximate a gaussian; then mute the blur into a recessed backdrop
+// (desaturate to 0.5, darken to 0.75) so the sharp art on top is the only bright thing.
 static void blur_saturate(Image *img, int r)
 {
     int n = img->w > img->h ? img->w : img->h;
@@ -155,10 +156,8 @@ static void blur_saturate(Image *img, int r)
         uint32_t p = img->px[i];
         int r8 = (p >> 16) & 255, g8 = (p >> 8) & 255, b8 = p & 255;
         int l = (r8 * 77 + g8 * 150 + b8 * 29) >> 8, c[3] = {r8, g8, b8};
-        for (int k = 0; k < 3; k++) {
-            int v = l + (c[k] - l) * 13 / 10;
-            c[k] = v < 0 ? 0 : v > 255 ? 255 : v;
-        }
+        for (int k = 0; k < 3; k++)
+            c[k] = (l + (c[k] - l) / 2) * 3 / 4;
         img->px[i] = rgb((uint32_t)(c[0] << 16 | c[1] << 8 | c[2]));
     }
 }

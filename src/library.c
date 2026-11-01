@@ -74,9 +74,9 @@ static const struct {
     const char *dir, *label, *name, *core, *exts;
     uint32_t color;
 } SYSTEMS[] = {
-    {"GB", "GB", "Game Boy", "gambatte", "gb|gbc|dmg|sgb", 0x6f8f2f},
-    {"GBC", "GBC", "Game Boy Color", "gambatte", "gb|gbc|dmg|sgb", 0x13a39a},
-    {"GBA", "GBA", "Game Boy Advance", "mgba", "gba", 0x5b4fd0},
+    {"GB", "GB", "Game Boy", "gambatte", "gb|gbc|dmg|sgb", 0x5a7040},
+    {"GBC", "GBC", "Game Boy Color", "gambatte", "gb|gbc|dmg|sgb", 0x0e6e68},
+    {"GBA", "GBA", "Game Boy Advance", "mgba", "gba", 0x4a4396},
 };
 #define NSYS ((int)(sizeof SYSTEMS / sizeof *SYSTEMS))
 

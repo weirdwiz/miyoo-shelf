@@ -1,6 +1,7 @@
 // Exercise the real UI and cache with a fixture library (no SDL/window required).
 #include "../src/ui.c"
 #include <assert.h>
+#include <string.h>
 
 static unsigned checksum(const Image *im)
 {
@@ -16,27 +17,55 @@ int main(int argc, char **argv)
     Library lib;
     assert(lib_load(&lib) == 0);
     assert(lib.ngames && lib.nrecent);
+
+    // Play time formatting: minutes under an hour, whole hours without minutes.
+    static const struct { int secs; const char *want; } PLAY[] = {
+        {0, "<1 m"}, {30, "<1 m"}, {20 * 60, "20 m"},
+        {60 * 60, "1 h"}, {90 * 60, "1 h 30 m"}, {2 * 60 * 60, "2 h"},
+    };
+    for (size_t i = 0; i < sizeof PLAY / sizeof *PLAY; i++) {
+        Game g = {0};
+        g.play_count = 1;
+        g.play_time = PLAY[i].secs;
+        char out[32];
+        format_play_time(&g, out, sizeof out);
+        assert(!strcmp(out, PLAY[i].want));
+    }
     icons_init(&lib);
     assert(ui_init(&lib, argv[2]) == 0);
     Image *canvas = img_new(SCREEN_W, SCREEN_H);
     assert(canvas);
 
-    // A sprite built before its art loads must be replaced when art arrives.
+    // A sprite built before its art loads must be replaced when art arrives. A folder
+    // sprite is built the same way: its single thumb is the folder's first game with art.
     int gi = lib.recent[0];
     const Image *initial = tile_sprite(0, gi, TILE, 1);
     assert(initial);
     assert(icon_get(gi, 1) == NULL);
+    const Folder *af = &S.folders[0]; // "All games"; its first game has art in the fixture
+    assert(af->ngames && !icon_get(af->games[0], 0));
+    assert(tile_sprite(1, 0, TILE, 1));
     while (icons_pump(64)) {}
     assert(icon_get(gi, 1));
     assert(tile_sprite(0, gi, TILE, 1));
     int updated = 0;
     for (int i = 0; i < TILE_CACHE_CAP; i++)
         if (tiles[i].image && tiles[i].kind == 0 && tiles[i].id == gi &&
-            tiles[i].size == TILE && tiles[i].sources[0] == icon_get(gi, 1))
+            tiles[i].size == TILE && tiles[i].source == icon_get(gi, 1))
             updated = 1;
     assert(updated);
+    const Image *thumb = icon_get(af->games[0], 0);
+    assert(thumb);
+    assert(tile_sprite(1, 0, TILE, 1));
+    int folder_updated = 0;
+    for (int i = 0; i < TILE_CACHE_CAP; i++)
+        if (tiles[i].image && tiles[i].kind == 1 && tiles[i].id == 0 &&
+            tiles[i].size == TILE && tiles[i].source == thumb)
+            folder_updated = 1;
+    assert(folder_updated);
 
-    // Settle requests/animation. The cursor must animate without rebuilding content.
+    // Settle requests/animation. The cursor sits still once settled, so frames are
+    // identical and the retained scene is never rebuilt.
     for (int i = 0; i < 120; i++) {
         icons_pump(64); ui_update(1.f / 60); ui_draw(canvas);
     }
@@ -44,7 +73,7 @@ int main(int argc, char **argv)
     for (int i = 0; i < 60; i++) { ui_update(1.f / 60); ui_draw(canvas); }
     assert(S.scene_builds == builds);
     assert(checksum(S.scene) == scene);
-    assert(checksum(canvas) != frame);
+    assert(checksum(canvas) == frame);
 
     // Navigation, folder entry, and sort changes must invalidate the scene.
     ui_button(BTN_R); ui_update(1.f / 60); ui_draw(canvas);
@@ -131,6 +160,6 @@ int main(int argc, char **argv)
     icons_set_budget(0);
 
     ui_free(); img_free(canvas); icons_free(); lib_free(&lib);
-    puts("UI cache: art invalidation, retained scene, cursor animation, navigation, options and icon budget passed");
+    puts("UI cache: art invalidation, retained scene, static cursor, navigation, options and icon budget passed");
     return 0;
 }

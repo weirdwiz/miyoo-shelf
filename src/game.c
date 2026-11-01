@@ -53,6 +53,18 @@ static void report(const char *fmt, ...)
     fprintf(stderr, "shelf: %s\n", problem);
 }
 
+// The player-facing message drops detail like the file name; the log keeps it.
+static void report_as(const char *toast, const char *fmt, ...)
+{
+    snprintf(problem, sizeof problem, "%s", toast);
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "shelf: ");
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+    va_end(ap);
+}
+
 const char *game_error(void) { return problem; }
 
 /* ---------- files ---------- */
@@ -125,9 +137,9 @@ static void save_session(Session *s)
     // Each is attempted whatever happened to the others; the cartridge save first, as
     // it's the one a player can't get back. The first failure is the one reported.
     problem[0] = 0;
-    if (player_save_sram()) report("couldn't save %s's saved game", s->stem);
-    if (player_save_state(s->state) && !problem[0]) report("couldn't save %s's state", s->stem);
-    if (save_shot(s) && !problem[0]) report("couldn't save %s's screenshot", s->stem);
+    if (player_save_sram()) report_as("Couldn't save the game", "couldn't save %s's saved game", s->stem);
+    if (player_save_state(s->state) && !problem[0]) report_as("Couldn't save the game state", "couldn't save %s's state", s->stem);
+    if (save_shot(s) && !problem[0]) report_as("Couldn't save the screenshot", "couldn't save %s's screenshot", s->stem);
 }
 
 /* ---------- input ---------- */
@@ -381,7 +393,7 @@ static int run_menu(Session *s)
     menu_cards = &cards;
     ui_switch_hooks(menu_card, menu_full, menu_select, menu_rev);
     if (!canvas || ui_init_switcher(s->lib, s->set->font_dir, 1, 1)) {
-        report("couldn't open the in-game menu");
+        report("Couldn't open the in-game menu");
         menu_cards = NULL;
         cards_free(&cards);
         img_free(canvas);
@@ -458,7 +470,7 @@ static int play(Session *s)
         s->played += now - last;
         last = now;
         if (now >= flush_at) {
-            if (player_save_sram()) report("couldn't save %s's saved game", s->stem);
+            if (player_save_sram()) report_as("Couldn't save the game", "couldn't save %s's saved game", s->stem);
             flush_at = now + SRAM_SECONDS;
         }
         if (!platform_vsync_paced()) { // otherwise presenting already waits for the panel

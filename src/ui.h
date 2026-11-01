@@ -13,10 +13,10 @@ void ui_free(void);
 void ui_button(Button b);
 void ui_update(float dt);
 void ui_draw(Image *canvas);
-// Seconds until the screen changes by itself (the status clock's next minute); 0 when
-// ui_draw would now draw something new: after input, while anything animates, and when
-// art, screenshots, status or the clock changed. Until then frames needn't be drawn.
-// The cursor pulses for a few seconds after each button, then rests.
+// Seconds until the screen changes by itself (the status clock's next minute, or a
+// toast's fade-out); 0 when ui_draw would now draw something new: after input, while
+// anything animates, and when art, screenshots, status or the clock changed. Until then
+// frames needn't be drawn.
 double ui_idle(void);
 // Tests: wall-clock seconds for the status clock (NULL restores the real clock).
 void ui_set_wall_clock(double (*now)(void));

@@ -15,7 +15,7 @@ typedef struct {
     uint8_t footer_a, shadow_a;
 } Palette;
 static const Palette PALETTES[2] = {
-    {0xeceff4, 0xd3d8e2, 0x262a35, 0x6b7184, 0xffffff, 0xd5dae4, 0xc9cfda, 0x3a3f4d, 0xffffff, 0xffffff, 0xffffff, 190, 38},
+    {0xeceff4, 0xd3d8e2, 0x262a35, 0x5c6374, 0xffffff, 0xd5dae4, 0xc9cfda, 0x3a3f4d, 0xffffff, 0xffffff, 0xffffff, 190, 38},
     {0x14171f, 0x222734, 0xe6e9f0, 0x8d94a7, 0x14171f, 0x2f3544, 0x3a4152, 0x4a5163, 0x262b38, 0x1c2029, 0x20242f, 215, 90},
 };
 static const Palette *P = &PALETTES[0];
@@ -23,28 +23,30 @@ static const Palette *P = &PALETTES[0];
 #define C_DOT (P->dot)
 #define C_INK (P->ink)
 #define C_SUB (P->sub)
-#define C_SEL 0x19a4f0
-#define C_SEL2 0x7fd3ff
+#define C_SEL 0x1668d8
 
 // Home row geometry.
-#define ROW_Y 146
+#define ROW_Y 144
 #define TILE 168
 #define STEP 184         // tile + gap
 #define DIVIDER_GAP 20   // extra space between Recent and Library
-#define CENTER_X 236     // (640 - 168) / 2
+#define CENTER_X ((SCREEN_W - TILE) / 2)
 
 // Folder view: the grid on the left, the selected game's detail panel on the right.
 // Three rows of small tiles, or two rows of big ones when the folder fits in a 2x2 block.
 typedef struct { int tile, col, row, rows, vis; } Grid;
-static const Grid GRIDS[2] = {{88, 100, 98, 3, 3}, {136, 152, 152, 2, 2}};
+// One gap everywhere: column and row steps derive from the tile size.
+#define G_GAP 16
+#define GRID(tile, rows, vis) {tile, tile + G_GAP, tile + G_GAP, rows, vis}
+static const Grid GRIDS[2] = {GRID(88, 3, 3), GRID(136, 2, 2)};
 #define G_X 24
 #define G_Y 100
 #define G_EDGE 320       // tiles scrolling right slide under the panel from here
-#define PANEL_X 330
+#define PANEL_X 332
 #define PANEL_Y 40
-#define PANEL_W 290
-#define PANEL_H 382
-#define FOOTER_H 46
+#define PANEL_W 288
+#define PANEL_H 384
+#define FOOTER_H 48
 
 typedef struct { float x, v, t; } Spring;
 
@@ -62,15 +64,9 @@ static void spring_step(Spring *s, float dt, float k, float c)
         dt -= h;
     }
 }
-// Bouncy: ~8% overshoot, settles in ~0.4s. That's the DS feel.
-#define BOUNCE 320.f, 22.f
+// Firm but springy: ~1.4% overshoot, settles in ~0.22s. Still a nod to the DS feel.
+#define BOUNCE 500.f, 36.f
 #define SNAPPY 500.f, 40.f
-
-// The selection cursor pulses while the user is around, then rests. It runs whole cycles
-// from and back to the rest colour, so starting and stopping never jumps.
-#define PULSE_RATE 5.7f   // radians per second
-#define PULSE_FOR 6.f     // seconds of pulsing after the last button
-#define PULSE_PERIOD (6.2831853f / PULSE_RATE)
 
 // How long a home-screen message (ui_set_toast) stays up.
 #define TOAST_FOR 4.f
@@ -96,7 +92,6 @@ static struct {
     int nfolders;
 
     int view;
-    float pulse, pulse_end;  // cursor pulse clock; it stops (at rest colour) at pulse_end
     int redraw;              // the next ui_draw would differ from the last one
     long drawn_minute;       // status clock minute, art and card revisions last drawn
     unsigned drawn_art, drawn_cards;
@@ -128,14 +123,14 @@ static struct {
     int action;              // pending UiAction
     int battery, charging;   // see ui_set_status
     char toast[128];         // message over the home screen, "" when none
-    float toast_t;           // seconds it has been up
+    double toast_set;         // wall seconds when it was set; it lives on wall time
 } S;
 
 // Options rows, top to bottom.
 enum { O_BRIGHT, O_VOLUME, O_SCREEN, O_DARK, O_OFF, O_COUNT };
 static const char *const OPT_TITLE[O_COUNT] = {"Brightness", "Volume", "Screen", "Dark mode", "Power off"};
 static const char *const OPT_SUB[O_COUNT] = {
-    "Left / right adjusts", "Left / right adjusts", "How games fill the screen",
+    NULL, NULL, "How games fill the screen",
     "Easier on the eyes at night", "Saves everything first",
 };
 
@@ -150,18 +145,6 @@ static void sw_draw(Image *c);
 static void sw_free(void);
 
 static int home_count(void) { return S.lib->nrecent + S.nfolders; }
-
-static void pulse_wake(void)
-{
-    if (S.pulse >= S.pulse_end) S.pulse = 0;
-    S.pulse_end = ceilf((S.pulse + PULSE_FOR) / PULSE_PERIOD) * PULSE_PERIOD;
-}
-
-// 0 at rest (C_SEL) .. 1 (C_SEL2).
-static float pulse_level(void)
-{
-    return S.pulse >= S.pulse_end ? 0 : .5f - .5f * cosf(S.pulse * PULSE_RATE);
-}
 
 // Wall-clock seconds, for the status clock; tests substitute their own.
 static double wall_real(void)
@@ -225,14 +208,14 @@ int ui_init(Library *lib, const char *font_dir)
     snprintf(xbold, sizeof xbold, "%s/Shelf-ExtraBold.ttf", font_dir);
     // Sized for a 2.8" 640x480 panel held at arm's length.
     S.title = font_load(xbold, 32);
-    S.label = font_load(xbold, 20);
-    S.body = font_load(bold, 19);
-    S.small = font_load(bold, 17);
+    S.label = font_load(bold, 20);
+    S.body = font_load(bold, 18);
+    S.small = font_load(bold, 18);
     S.layer = img_new(SCREEN_W, SCREEN_H);
     S.scene = img_new(SCREEN_W, SCREEN_H);
     S.scene_dirty = 1;
     int bad = !S.title || !S.body || !S.small || !S.label || !S.layer || !S.scene || build_bg() ||
-              add_folder(F_ALL, -1, "All games", 0x2b3040) || add_folder(F_FAV, -1, "Favorites", 0xf0a020);
+              add_folder(F_ALL, -1, "All games", 0x2b3040) || add_folder(F_FAV, -1, "Favorites", 0xa8610a);
     for (int i = 0; !bad && i < lib->nsys; i++) bad = add_folder(F_SYS, i, lib->sys[i].label, lib->sys[i].color);
     if (bad) { ui_free(); return -1; } // ui_free undoes any part of this
 
@@ -245,7 +228,6 @@ int ui_init(Library *lib, const char *font_dir)
     for (int i = 0; i < home_count(); i++) S.hscale[i].x = S.hscale[i].t = 1;
     S.track.x = S.track.t = CENTER_X;
     S.redraw = 1;
-    pulse_wake();
     return 0;
 }
 
@@ -365,8 +347,7 @@ static void favorite_toggle(void)
 void ui_button(Button b)
 {
     S.redraw = 1;
-    if (b == BTN_REDRAW) return; // exposure/wake, not navigation or new pulse activity
-    pulse_wake();
+    if (b == BTN_REDRAW) return; // exposure/wake, not navigation
     if (sw_on()) {
         int sel = S.sel;
         sw_button(b);
@@ -429,7 +410,7 @@ Settings ui_settings(void)
 void ui_set_toast(const char *text)
 {
     snprintf(S.toast, sizeof S.toast, "%s", text ? text : "");
-    S.toast_t = 0;
+    S.toast_set = wall();
     S.redraw = 1;
 }
 
@@ -533,65 +514,64 @@ static void scene_step(Spring *s, float dt, float k, float damping)
     if (before != s->x) S.scene_dirty = 1;
 }
 
-static int cursor_shown(void)
-{
-    if (sw_on()) return S.lib->nrecent > 0;
-    return !S.options && (S.view == V_HOME || S.nfg);
-}
-
 static int sw_animating(void);
 static unsigned sw_revision(void);
 static int sw_prebuild_next(void);
 static void sw_prebuild(void);
 
+// The toast's life runs on wall time: the frame loop sleeps through its static middle,
+// so animation time (dt) stands still while it is up.
+static double toast_age(void) { return wall() - S.toast_set; }
+
+// The toast only moves while fading in or out; in between the screen is idle.
+static int toast_fading(void)
+{
+    double age = toast_age();
+    return S.toast[0] && (age < .12 || age > TOAST_FOR - .45);
+}
+
 // Whether the next update changes what's on screen.
 static int animating(void)
 {
-    if (S.pulse < S.pulse_end && cursor_shown()) return 1;
-    if (S.toast[0]) return 1; // the message fades out on its own
+    if (toast_fading()) return 1; // the message fades in and out on its own
     if (sw_on()) return sw_animating();
     return scene_moving() || spring_moving(&S.enter) || S.launching >= 0;
 }
 
 void ui_update(float dt)
 {
-    if (S.toast[0]) {
-        S.toast_t += dt;
-        if (S.toast_t > TOAST_FOR) S.toast[0] = 0;
-        S.redraw = 1; // including the frame that takes it away
+    if (S.toast[0] && toast_age() > TOAST_FOR) {
+        S.toast[0] = 0;
+        S.redraw = 1; // the frame that takes it away
     }
     if (animating()) S.redraw = 1;
-    if (S.pulse < S.pulse_end && cursor_shown()) {
-        S.pulse += dt;
-        if (S.pulse > S.pulse_end) S.pulse = S.pulse_end;
-    }
     if (sw_on()) { sw_update(dt); return; }
     spring_step(&S.enter, dt, SNAPPY);
     // Opening or closing a folder rebuilds the scene anyway (any button dirties it), so
     // the home row moving out of sight mustn't redraw the folder view every frame.
     void (*home_step)(Spring *, float, float, float) = S.view == V_HOME ? scene_step : spring_step;
     home_step(&S.track, dt, BOUNCE);
-    for (int i = 0; i < home_count(); i++) home_step(&S.hscale[i], dt, 400.f, 18.f);
+    for (int i = 0; i < home_count(); i++) home_step(&S.hscale[i], dt, 480.f, 40.f);
     if (S.view == V_FOLDER) {
         scene_step(&S.ftrack, dt, BOUNCE);
         if (S.fall) {
             S.fall = 0;
             for (int i = 0; i < S.nfg; i++) {
-                scene_step(&S.fscale[i], dt, 400.f, 18.f);
+                scene_step(&S.fscale[i], dt, 480.f, 40.f);
                 S.fall |= spring_moving(&S.fscale[i]);
             }
             if (!S.fall) S.nfactive = 0;
         } else {
             for (int i = 0; i < S.nfactive; i++) {
                 Spring *sp = &S.fscale[S.factive[i]];
-                scene_step(sp, dt, 400.f, 18.f);
+                scene_step(sp, dt, 480.f, 40.f);
                 if (!spring_moving(sp)) S.factive[i--] = S.factive[--S.nfactive];
             }
         }
     }
     if (S.launching >= 0) {
         S.launch_t += dt;
-        spring_step(&S.launch_scale, dt, 260.f, 16.f);
+        spring_step(&S.launch_scale, dt, 260.f, 26.f);
         if (S.launch_t > 0.95f && !S.launch_ready) S.launch_ready = 1;
     }
 }
@@ -623,24 +603,16 @@ void ui_reset_home(void)
 static void draw_toast(Image *c)
 {
     if (!S.toast[0]) return;
-    float t = S.toast_t, a = 1;
+    float t = (float)toast_age(), a = 1;
     if (t < .12f) a = t / .12f;
     else if (t > TOAST_FOR - .45f) a = (TOAST_FOR - t) / .45f;
     if (a <= 0) return;
     char text[128];
     text_fit(S.body, S.toast, SCREEN_W - 120, text, sizeof text);
-    int tw = text_width(S.body, text), th = font_height(S.body) + 18;
-    float x = (SCREEN_W - tw - 36) / 2.f, y = SCREEN_H - FOOTER_H - th - 22;
-    gfx_fill_rrect(c, x, y, tw + 36, th, th / 2.f, argb((uint8_t)(a * 235), 22, 25, 33));
-    text_draw(c, S.body, text, (int)x + 18, (int)y + 8, argb((uint8_t)(a * 255), 255, 255, 255));
-}
-
-static uint32_t lerp_rgb(uint32_t a, uint32_t b, float t)
-{
-    int r = ((a >> 16) & 255) + (int)((((int)(b >> 16) & 255) - ((int)(a >> 16) & 255)) * t);
-    int g = ((a >> 8) & 255) + (int)((((int)(b >> 8) & 255) - ((int)(a >> 8) & 255)) * t);
-    int bl = (a & 255) + (int)((((int)b & 255) - ((int)a & 255)) * t);
-    return rgb((uint32_t)(r << 16 | g << 8 | bl));
+    int tw = text_width(S.body, text), th = font_height(S.body) + 16;
+    float x = (SCREEN_W - tw - 32) / 2.f, y = SCREEN_H - FOOTER_H - th - 24;
+    gfx_fill_rrect(c, x, y, tw + 32, th, th / 2.f, argb((uint8_t)(a * 235), 22, 25, 33));
+    text_draw(c, S.body, text, (int)x + 16, (int)y + 8, argb((uint8_t)(a * 255), 255, 255, 255));
 }
 
 static void text_center(Image *c, Font *f, const char *s, int cx, int y, uint32_t col, int max_w)
@@ -652,50 +624,117 @@ static void text_center(Image *c, Font *f, const char *s, int cx, int y, uint32_
 
 static int wrap_text(Font *f, const char *s, int max_w, char out[][128], int max);
 
+// Cartridge silhouettes for games without art, as unit-square polygons: GB/GBC carts are
+// tall with the top-right corner cut diagonally, GBA carts wider and shorter.
+static const float CART_GB[][2] = {{.04f, 0}, {.8f, 0}, {1, .18f}, {1, 1}, {0, 1}, {0, .04f}};
+static const float CART_GBA[][2] = {{.05f, 0}, {.95f, 0}, {1, .1f}, {1, .9f}, {.95f, 1}, {.05f, 1}, {0, .9f}, {0, .1f}};
+
+// Fills a polygon scaled to a w x h box, supersampled 4x4 per pixel like the battery
+// bolt's mask so the edges anti-alias at any tile size.
+static void fill_cart(Image *c, const float (*pt)[2], int npt, float x, float y, float w, float h, uint32_t col)
+{
+    int mw = (int)(w + .5f), mh = (int)(h + .5f);
+    if (mw < 1 || mh < 1) return;
+    uint8_t *mask = malloc((size_t)mw * mh);
+    if (!mask) return;
+    for (int py = 0; py < mh; py++)
+        for (int px = 0; px < mw; px++) {
+            int n = 0;
+            for (int s = 0; s < 16; s++) {
+                float u = (px + (s % 4 + .5f) / 4) / w, v = (py + (s / 4 + .5f) / 4) / h;
+                int in = 0;
+                for (int i = 0, j = npt - 1; i < npt; j = i++)
+                    if ((pt[i][1] > v) != (pt[j][1] > v) &&
+                        u < (pt[j][0] - pt[i][0]) * (v - pt[i][1]) / (pt[j][1] - pt[i][1]) + pt[i][0])
+                        in = !in;
+                n += in;
+            }
+            mask[py * mw + px] = (uint8_t)(n * 255 / 16);
+        }
+    gfx_mask_a8(c, mask, mw, mh, (int)x, (int)y, col);
+    free(mask);
+}
+
+// A game without box art: a neutral tile (so real art stays the brightest thing on screen)
+// carrying a grey cartridge with the system's label on it, and the title wrapped below.
 static void draw_placeholder(Image *c, const Game *g, float x, float y, float w)
 {
     const System *s = &S.lib->sys[g->sys];
-    gfx_fill_rrect(c, x, y, w, w, w * 0.085f, rgb(s->color));
-    gfx_fill_rrect(c, x + w * .08f, y + w * .08f, w * .84f, w * .84f, w * .06f, argb(40, 255, 255, 255));
+    gfx_fill_rrect(c, x, y, w, w, w * .085f, rgb(C_DOT));
     Font *f = w > 120 ? S.label : S.small;
-    text_center(c, f, s->label, (int)(x + w / 2), (int)(y + w * .2f), argb(200, 255, 255, 255), (int)(w * .8f));
-    // Title, wrapped into as many lines as fit inside the inner card, centred below the label.
-    int lh = font_height(f), top = (int)(y + w * .2f) + lh + (int)(w * .03f);
-    int bottom = (int)(y + w * .88f), max = (bottom - top) / lh;
-    if (max > 3) max = 3;
-    if (max < 1) max = 1;
-    char lines[3][128];
-    int n = wrap_text(f, g->title, (int)(w * .74f), lines, max);
-    int ly = top + (bottom - top - n * lh) / 2;
-    for (int i = 0; i < n; i++, ly += lh)
-        text_center(c, f, lines[i], (int)(x + w / 2), ly, rgb(0xffffff), (int)(w * .74f));
+    int lh = font_height(f);
+    // The title block is pinned to the tile's bottom; the cart centres in the room left
+    // above it, which keeps a workable cart at every size despite the fixed-height fonts.
+    char lines[2][128];
+    int n = wrap_text(f, g->title, (int)(w * .9f), lines, 2);
+    float top = y + w * .06f, bot = y + w * .95f - n * lh - w * .03f;
+    int gba = !strcmp(s->dir, "GBA");
+    float ch = gba ? (bot - top) * .72f : bot - top; // cart height
+    if (ch > w * (gba ? .42f : .55f)) ch = w * (gba ? .42f : .55f);
+    float cw = gba ? ch * 1.5f : ch * .82f;
+    float cy = top + (bot - top - ch) / 2;
+    if (ch >= 8) {
+        fill_cart(c, gba ? CART_GBA : CART_GB, gba ? 8 : 6, x + (w - cw) / 2, cy, cw, ch, rgb(0x9aa1b0));
+        // The label window on the cart: the system colour with its short label in white.
+        float lab_h = lh + w * .05f;
+        if (lab_h < ch - 4) {
+            float lab_w = cw * .8f, lx = x + (w - lab_w) / 2;
+            gfx_fill_rrect(c, lx, cy + (ch - lab_h) / 2, lab_w, lab_h, lab_h * .18f, rgb(s->color));
+            text_center(c, f, s->label, (int)(lx + lab_w / 2),
+                        (int)(cy + (ch - lab_h) / 2 + (lab_h - lh) / 2), rgb(0xffffff), (int)lab_w);
+        }
+    }
+    int ty = (int)(y + w * .95f) - n * lh;
+    for (int i = 0; i < n; i++, ty += lh)
+        text_center(c, f, lines[i], (int)(x + w / 2), ty, rgb(C_INK), (int)(w * .9f));
 }
 
 static void draw_game_raw(Image *c, int gi, float cx, float cy, float w, int big)
 {
     float x = cx - w / 2, y = cy - w / 2;
-    gfx_fill_rrect(c, x + 1, y + 4, w - 2, w - 1, w * .085f, argb(P->shadow_a, 20, 30, 60));
+    gfx_fill_rrect(c, x + 1, y + 4, w - 2, w - 1, w * .085f, argb(P->shadow_a, 0, 0, 0));
     const Image *ic = icon_get(gi, big);
     if (ic) gfx_blit_scaled(c, ic, x, y, w, w, 255);
     else draw_placeholder(c, &S.lib->games[gi], x, y, w);
 }
 
+// The folder tile's one art source: its first game with art. Scanning in order also
+// drives sprite invalidation — an earlier game's art arriving changes the answer.
+static const Image *folder_thumb(const Folder *f)
+{
+    for (int k = 0; k < f->ngames; k++) {
+        const Image *ic = icon_get(f->games[k], 0);
+        if (ic) return ic;
+    }
+    return NULL;
+}
+
+// A folder: a neutral tile (real art stays the brightest thing on screen) with its first
+// game's art centred up top, a thin system-colour stripe over the footer band, and the
+// name with the game count as quiet text after it.
 static void draw_folder_raw(Image *c, const Folder *f, float cx, float cy, float w)
 {
-    float x = cx - w / 2, y = cy - w / 2, pad = w * .085f, gap = w * .036f, foot = w * .21f;
-    gfx_fill_rrect(c, x + 1, y + 4, w - 2, w - 1, w * .085f, argb(P->shadow_a, 20, 30, 60));
-    gfx_fill_rrect(c, x, y, w, w, w * .085f, rgb(f->color));
-    float cell = (w - 2 * pad - gap) / 2, cellh = (w - pad - foot - gap) / 2;
-    if (cellh < cell) cell = cellh;
-    float gx = x + (w - (2 * cell + gap)) / 2;
-    for (int k = 0; k < 4; k++) {
-        float mx = gx + (k % 2) * (cell + gap), my = y + pad + (k / 2) * (cell + gap);
-        const Image *ic = k < f->ngames ? icon_get(f->games[k], 0) : NULL;
-        if (ic) gfx_blit_scaled(c, ic, mx, my, cell, cell, 255);
-        else gfx_fill_rrect(c, mx, my, cell, cell, cell * .12f, argb(60, 255, 255, 255));
+    float x = cx - w / 2, y = cy - w / 2, pad = w * .085f, foot = w * .21f, band = y + w - foot;
+    gfx_fill_rrect(c, x + 1, y + 4, w - 2, w - 1, w * .085f, argb(P->shadow_a, 0, 0, 0));
+    gfx_fill_rrect(c, x, y, w, w, w * .085f, rgb(C_DOT));
+    const Image *ic = folder_thumb(f);
+    if (ic) { // one large thumb, centred in the room above the footer band
+        float side = band - pad - (y + pad) - pad * .5f;
+        if (side > w - 2 * pad) side = w - 2 * pad;
+        gfx_blit_scaled(c, ic, x + (w - side) / 2, y + pad + (band - pad - (y + pad) - side) / 2,
+                        side, side, 255);
     }
+    gfx_fill_rect(c, x, band, w, 4, rgb(f->color));
     Font *lf = w > 120 ? S.label : S.small;
-    text_center(c, lf, f->label, (int)cx, (int)(y + w - foot + (foot - font_height(lf)) / 2), rgb(0xffffff), (int)(w - 12));
+    char count[16], name[128];
+    snprintf(count, sizeof count, "%d", f->ngames);
+    int lh = font_height(lf), avail = (int)(w - 2 * pad), gap = 8;
+    int cw = text_width(lf, count);
+    text_fit(lf, f->label, avail - gap - cw, name, sizeof name);
+    int tw = text_width(lf, name) + gap + cw;
+    int tx = (int)cx - tw / 2, ty = (int)(band + 4 + (foot - 4 - lh) / 2);
+    text_draw(c, lf, name, tx, ty, rgb(C_INK));
+    text_draw(c, lf, count, tx + tw - cw, ty, rgb(C_SUB));
 }
 
 // A bounded working set of reusable sprites, not one surface per ROM.
@@ -705,7 +744,7 @@ static void draw_folder_raw(Image *c, const Folder *f, float cx, float cy, float
 #define TILE_PAD 8
 typedef struct {
     int kind, id, size, big;
-    const Image *sources[4];
+    const Image *source; // icon the sprite was built from: the game's art, or a folder's first with art
     Image *image;
     unsigned used;
 } TileSprite;
@@ -738,19 +777,13 @@ static void tiles_free(void)
 
 static const Image *tile_sprite(int kind, int id, int size, int big)
 {
-    const Image *sources[4] = {0};
-    if (kind == 0) sources[0] = icon_get(id, big);
-    else {
-        const Folder *f = &S.folders[id];
-        for (int k = 0; k < 4 && k < f->ngames; k++)
-            sources[k] = icon_get(f->games[k], 0);
-    }
+    const Image *source = kind == 0 ? icon_get(id, big) : folder_thumb(&S.folders[id]);
     TileSprite *slot = NULL;
     for (int i = 0; i < TILE_CACHE_CAP; i++) {
         TileSprite *t = &tiles[i];
         if (t->image && t->kind == kind && t->id == id &&
             t->size == size && t->big == big) {
-            if (!memcmp(t->sources, sources, sizeof sources)) {
+            if (t->source == source) {
                 t->used = ++tile_clock;
                 return t->image;
             }
@@ -764,7 +797,7 @@ static const Image *tile_sprite(int kind, int id, int size, int big)
     if (!slot->image) return NULL;
     slot->kind = kind; slot->id = id; slot->size = size; slot->big = big;
     slot->used = ++tile_clock;
-    memcpy(slot->sources, sources, sizeof sources);
+    slot->source = source;
     float center = TILE_PAD + size / 2.f;
     if (kind == 0) draw_game_raw(slot->image, id, center, center, size, big);
     else draw_folder_raw(slot->image, &S.folders[id], center, center, size);
@@ -806,21 +839,8 @@ static void draw_folder(Image *c, const Folder *f, float cx, float cy, float w)
     draw_tile(c, 1, (int)(f - S.folders), cx, cy, w, TILE);
 }
 
-// Game count bubble on a folder's corner; drawn after the cursor so it stays readable.
-static void draw_folder_badge(Image *c, const Folder *f, float cx, float cy, float w)
-{
-    float x = cx - w / 2, y = cy - w / 2;
-    char n[16];
-    snprintf(n, sizeof n, "%d", f->ngames);
-    int tw = text_width(S.small, n), bw = tw + 16, bh = font_height(S.small) + 4;
-    gfx_fill_rrect(c, x + w - bw + 10, y - 10, bw, bh, bh / 2.f, rgb(P->chip));
-    gfx_stroke_rrect(c, x + w - bw + 10, y - 10, bw, bh, bh / 2.f, 1, rgb(P->line));
-    text_draw(c, S.small, n, (int)(x + w - bw + 18), (int)(y - 8), rgb(C_INK));
-}
-
 static void draw_cursor(Image *c, float cx, float cy, float w, int base)
 {
-    float p = pulse_level();
     int size = zoomed(base);
     CursorMask *m = NULL;
     for (int k = 0; k < 3 && !m; k++)
@@ -855,7 +875,7 @@ static void draw_cursor(Image *c, float cx, float cy, float w, int base)
     int x = (int)lroundf(cx - ring / 2.f) - m->pad;
     int y = (int)lroundf(cy - ring / 2.f) - m->pad;
     gfx_mask_a8_9slice(c, m->outer, m->extent, m->extent, m->corner, x, y, extent, extent,
-                       lerp_rgb(C_SEL, C_SEL2, p));
+                       rgb(C_SEL));
     gfx_mask_a8_9slice(c, m->inner, m->extent, m->extent, m->corner, x, y, extent, extent,
                        argb(230, 255, 255, 255));
 }
@@ -889,22 +909,23 @@ static void build_status_masks(void)
         }
 }
 
-// Right-aligned at `right`.
-static void draw_battery(Image *c, int right, int y)
+// Right-aligned at `right`, with the percentage text's top at `ty`: the body hangs
+// 4px below it so text and body share a bottom edge.
+static void draw_battery(Image *c, int right, int ty)
 {
     const int bw = 27, bh = 14;
-    int x = right - bw - 3;
+    int y = ty + 4, x = right - bw - 3;
     uint32_t ink = rgb(C_SUB);
     uint32_t fill = S.charging ? rgb(0x30a46c) : S.battery <= 15 ? rgb(0xe5484d) : ink;
     gfx_stroke_rrect(c, x, y, bw, bh, 4, 1.6f, ink);
     gfx_fill_rrect(c, x + bw + .5f, y + 4, 2.5f, bh - 8, 1, ink);
     float w = (bw - 6) * (S.battery < 0 ? 0 : S.battery > 100 ? 100 : S.battery) / 100.f;
     if (w > .5f) gfx_fill_rrect(c, x + 3, y + 3, w < 2 ? 2 : w, bh - 6, 1.5f, fill);
-    if (S.charging) gfx_mask_a8(c, bolt_mask, BOLT_W, BOLT_H, x - BOLT_W - 5, y, fill);
+    if (S.charging) gfx_mask_a8(c, bolt_mask, BOLT_W, BOLT_H, x - BOLT_W - 4, y, fill);
     char pct[8];
     snprintf(pct, sizeof pct, "%d%%", S.battery);
-    int tx = x - (S.charging ? BOLT_W + 9 : 6) - text_width(S.small, pct);
-    text_draw(c, S.small, pct, tx, y - 4, rgb(C_SUB));
+    int tx = x - (S.charging ? BOLT_W + 8 : 4) - text_width(S.small, pct);
+    text_draw(c, S.small, pct, tx, ty, rgb(C_SUB));
 }
 
 static void status_clock(char *buf, int n)
@@ -922,13 +943,16 @@ static void status_key(char *out, int n)
     snprintf(out, n, "%s|%d|%d|%p", clock, S.battery, S.charging, (const void *)P);
 }
 
+// Clock, battery and Wi-Fi along the top of a STATUS_H-tall band.
+#define STATUS_H 32
 static void draw_status_raw(Image *c)
 {
     char buf[64];
     status_clock(buf, sizeof buf);
-    text_draw(c, S.small, buf, 16, 7, rgb(C_SUB));
+    int ty = (STATUS_H - font_height(S.small)) / 2;
+    text_draw(c, S.small, buf, 16, ty, rgb(C_SUB));
     build_status_masks();
-    if (S.battery >= 0) draw_battery(c, SCREEN_W - 16, 11);
+    if (S.battery >= 0) draw_battery(c, SCREEN_W - 16, ty);
 }
 
 // Chrome that changes rarely: drawn once onto a transparent band of the screen and blended
@@ -961,8 +985,7 @@ static void band_end(Band *b) { img_find_runs(b->img); }
 
 static void status_free(void) { band_free(&status_band); }
 
-// Clock, battery and Wi-Fi along the top, re-rendered only when one of them changes.
-#define STATUS_H 32
+// The status band, re-rendered only when what it shows changes.
 static void draw_status(Image *c)
 {
     char key[256];
@@ -980,13 +1003,13 @@ static void draw_footer_raw(Image *c, int top, const char *const *hints, int n)
     gfx_fill_rect(c, 0, top, SCREEN_W, FOOTER_H, argb(P->footer_a, P->footer >> 16, P->footer >> 8 & 255, P->footer & 255));
     gfx_fill_rect(c, 0, top, SCREEN_W, 1, rgb(P->line));
     int th = font_height(S.small), bh = th + 4;
-    int x = 14, y = top + (FOOTER_H - bh) / 2;
+    int x = 16, y = top + (FOOTER_H - bh) / 2;
     for (int i = 0; i < n; i += 2) {
-        int bw = hints[i][1] ? text_width(S.small, hints[i]) + 14 : bh;
+        int bw = hints[i][1] ? text_width(S.small, hints[i]) + 16 : bh;
         gfx_fill_rrect(c, x, y, bw, bh, bh / 2.f, rgb(P->key));
-        text_center(c, S.small, hints[i], x + bw / 2, y + 2, rgb(0xffffff), bw);
-        x += bw + 7;
-        x += text_draw(c, S.small, hints[i + 1], x, y + 2, rgb(C_SUB)) + 18;
+        text_center(c, S.small, hints[i], x + bw / 2, y + (bh - th) / 2, rgb(0xffffff), bw);
+        x += bw + 8;
+        x += text_draw(c, S.small, hints[i + 1], x, y + (bh - th) / 2, rgb(C_SUB)) + 16;
     }
 }
 
@@ -1011,6 +1034,32 @@ static void draw_footer(Image *c, const char *const *hints, int n)
     gfx_blit(c, footer_img, 0, SCREEN_H - FOOTER_H, 255);
 }
 
+static void format_play_time(const Game *g, char *out, int n);
+static void format_last_played(const Game *g, char *out, int n);
+
+// The quiet line under the home page dots, describing the selection: a game's system,
+// when it was last played and for how long, or a folder's size and favorite count.
+// Parts the library doesn't know (never played, no favorites) drop out.
+static void format_home_facts(char *out, int n)
+{
+    const Library *L = S.lib;
+    if (S.sel < L->nrecent) {
+        const Game *g = &L->games[L->recent[S.sel]];
+        if (!g->play_count) { snprintf(out, n, "%s", L->sys[g->sys].name); return; }
+        char last[32], play[32];
+        format_last_played(g, last, sizeof last);
+        format_play_time(g, play, sizeof play);
+        snprintf(out, n, "%s · %s · %s", L->sys[g->sys].name, last, play);
+    } else {
+        const Folder *f = &S.folders[S.sel - L->nrecent];
+        int fav = 0;
+        for (int k = 0; k < f->ngames; k++) fav += L->games[f->games[k]].fav != 0;
+        if (fav) snprintf(out, n, "%d game%s · %d favorite%s", f->ngames, f->ngames == 1 ? "" : "s",
+                          fav, fav == 1 ? "" : "s");
+        else snprintf(out, n, "%d game%s", f->ngames, f->ngames == 1 ? "" : "s");
+    }
+}
+
 static void draw_home(Image *c)
 {
     Library *L = S.lib;
@@ -1025,8 +1074,8 @@ static void draw_home(Image *c)
         snprintf(meta, sizeof meta, "Folder · %d game%s", f->ngames, f->ngames == 1 ? "" : "s");
         text_center(c, S.title, f->label, SCREEN_W / 2, 44, rgb(C_INK), SCREEN_W - 60);
     }
-    text_center(c, S.body, meta, SCREEN_W / 2, 86, rgb(C_SUB), SCREEN_W - 60);
-    text_draw(c, S.small, L->nrecent && !inlib ? "RECENT" : "LIBRARY", 18, 114, rgb(C_SUB));
+    text_center(c, S.body, meta, SCREEN_W / 2, 88, rgb(C_SUB), SCREEN_W - 60);
+    text_draw(c, S.small, L->nrecent && !inlib ? "Recent" : "Library", 16, 116, rgb(C_SUB));
 
     float tx = S.track.x, cy = ROW_Y + TILE / 2.f;
     if (L->nrecent) {
@@ -1040,15 +1089,19 @@ static void draw_home(Image *c)
             if (cx + w < -20 || cx - w > SCREEN_W + 20) continue;
             if (i < L->nrecent) draw_game(c, L->recent[i], cx, cy, w, TILE);
             else draw_folder(c, &S.folders[i - L->nrecent], cx, cy, w);
-            if (i >= L->nrecent) draw_folder_badge(c, &S.folders[i - L->nrecent], cx, cy, w);
         }
 
     // Position dots: round for Recent, square for Library.
-    float dw = 15, x0 = SCREEN_W / 2.f - (n - 1) * dw / 2;
+    float dw = 16, x0 = SCREEN_W / 2.f - (n - 1) * dw / 2;
     for (int i = 0; i < n; i++) {
-        float s = i == S.sel ? 12 : 8, x = x0 + i * dw - s / 2, y = 362 - s / 2;
-        gfx_fill_rrect(c, x, y, s, s, i < L->nrecent ? s / 2 : 2.5f, rgb(i == S.sel ? C_SEL : P->dim_dot));
+        float s = i == S.sel ? 12 : 8, x = x0 + i * dw - s / 2, y = 360 - s / 2;
+        gfx_fill_rrect(c, x, y, s, s, i < L->nrecent ? s / 2 : 2.5f, rgb(i == S.sel ? C_INK : P->dim_dot));
     }
+    // One quiet facts line in the empty band between the dots and the footer. Like the
+    // meta line at the top it lives in the retained scene, so it changes with S.sel.
+    char facts[160];
+    format_home_facts(facts, sizeof facts);
+    text_center(c, S.small, facts, SCREEN_W / 2, 392, rgb(C_SUB), SCREEN_W - 60);
     const char *const H[] = {"A", inlib ? "Open" : "Play", "L1", "Recent", "R1", "Library", "START", "Options"};
     draw_footer(c, H, 8);
 }
@@ -1080,9 +1133,10 @@ static void format_play_time(const Game *g, char *out, int n)
 {
     int m = g->play_time / 60;
     if (!g->play_count) snprintf(out, n, "None yet");
-    else if (m < 1) snprintf(out, n, "< 1 m");
+    else if (m < 1) snprintf(out, n, "<1 m");
     else if (m < 60) snprintf(out, n, "%d m", m);
-    else snprintf(out, n, "%d h %d m", m / 60, m % 60);
+    else if (m % 60) snprintf(out, n, "%d h %d m", m / 60, m % 60);
+    else snprintf(out, n, "%d h", m / 60);
 }
 
 static time_t day_start(time_t t)
@@ -1116,6 +1170,13 @@ static void format_last_played(const Game *g, char *out, int n)
     else snprintf(out, n, g->play_count ? "A while ago" : "Never");
 }
 
+// A five-pointed star in unit-square coordinates, for the favorite mark in the detail
+// panel (it replaced the old grid's Favorite cell).
+static const float STAR[][2] = {
+    {.5f, 0}, {.612f, .346f}, {.976f, .346f}, {.682f, .559f}, {.794f, .904f},
+    {.5f, .691f}, {.206f, .904f}, {.318f, .559f}, {.024f, .346f}, {.388f, .346f},
+};
+
 // The selected game's art, title, system and play stats. The panel is opaque over the
 // background, so it's kept as one pre-composited image per selection and copied in; the
 // empty card is rasterized once. Its left margin also covers grid tiles that have
@@ -1133,7 +1194,7 @@ static void draw_detail(Image *c, int gi)
         if (!panel_base) return;
         for (int y = 0; y < ih; y++)
             memcpy(panel_base->px + y * iw, S.bg->px + (y0 + y) * SCREEN_W + x0, iw * sizeof *panel_base->px);
-        gfx_fill_rrect(panel_base, px + 1, py + 3, PANEL_W - 2, PANEL_H - 1, 16, argb(P->shadow_a / 2, 20, 30, 60));
+        gfx_fill_rrect(panel_base, px + 1, py + 3, PANEL_W - 2, PANEL_H - 1, 16, argb(P->shadow_a / 2, 0, 0, 0));
         gfx_fill_rrect(panel_base, px, py, PANEL_W, PANEL_H, 16, rgb(P->panel));
     }
     if (!panel_img || panel_game != gi || panel_art != (icon != NULL)) {
@@ -1146,27 +1207,39 @@ static void draw_detail(Image *c, int gi)
         if (icon) gfx_blit(p, icon, (int)ax, (int)ay, 255); // already TILE square, rounded
         else draw_placeholder(p, g, ax, ay, TILE);
 
-        int tx = (int)px + 18, tw = PANEL_W - 36, ty = (int)py + TILE + 30;
+        int tx = (int)px + 16, tw = PANEL_W - 32, ty = (int)py + TILE + 32;
         char lines[2][128];
         int nl = wrap_text(S.label, g->title, tw, lines, 2);
         for (int i = 0; i < nl; i++, ty += font_height(S.label))
             text_draw(p, S.label, lines[i], tx, ty, rgb(C_INK));
         char buf[128];
         text_fit(S.small, S.lib->sys[g->sys].name, tw, buf, sizeof buf);
-        text_draw(p, S.small, buf, tx, ty + 2, rgb(C_SUB));
+        text_draw(p, S.small, buf, tx, ty + 4, rgb(C_SUB));
+        if (g->fav) // favorite star, right after the system name
+            fill_cart(p, STAR, 10, tx + text_width(S.small, buf) + 8,
+                      ty + 4 + (font_height(S.small) - 12) / 2.f, 12, 12, rgb(0xa8610a));
 
-        char play[32], last[32], sessions[16];
-        format_play_time(g, play, sizeof play);
-        format_last_played(g, last, sizeof last);
-        snprintf(sessions, sizeof sessions, "%d", g->play_count);
-        const char *const LABEL[4] = {"PLAY TIME", "LAST PLAYED", "SESSIONS", "FAVORITE"};
-        const char *value[4] = {play, last, sessions, g->fav ? "Yes" : "No"};
-        for (int i = 0; i < 4; i++) {
-            int sx = tx + (i % 2) * (tw / 2 + 4), sy = (int)py + 282 + (i / 2) * 50;
-            text_draw(p, S.small, LABEL[i], sx, sy, rgb(C_SUB));
-            uint32_t ink = i == 3 && g->fav ? rgb(0xf0a020) : rgb(C_INK);
-            text_fit(S.body, value[i], tw / 2 - 4, buf, sizeof buf);
-            text_draw(p, S.body, buf, sx, sy + 21, ink);
+        // The play stats as one quiet block instead of the old 2x2 grid.
+        char facts[128];
+        int fy = (int)py + 284, fh = (font_height(S.small) + 3) & ~3; // line spacing on the 4px grid
+        if (g->play_count) {
+            char play[32], last[32];
+            format_play_time(g, play, sizeof play);
+            format_last_played(g, last, sizeof last);
+            snprintf(facts, sizeof facts, "Played %s · %d session%s", play, g->play_count,
+                     g->play_count == 1 ? "" : "s");
+            text_fit(S.small, facts, tw, buf, sizeof buf);
+            text_draw(p, S.small, buf, tx, fy, rgb(C_INK));
+            // Words continue the sentence in lower case; dates ("22 Sep") keep theirs.
+            if (!strcmp(last, "Most recent")) snprintf(last, sizeof last, "most recently");
+            else if (!strcmp(last, "Today") || !strcmp(last, "Yesterday") ||
+                     !strcmp(last, "Recently") || !strcmp(last, "A while ago"))
+                last[0] = (char)(last[0] - 'A' + 'a');
+            snprintf(facts, sizeof facts, "Last played %s", last);
+            text_fit(S.small, facts, tw, buf, sizeof buf);
+            text_draw(p, S.small, buf, tx, fy + fh, rgb(C_SUB));
+        } else {
+            text_draw(p, S.small, "Never played", tx, fy, rgb(C_SUB));
         }
         img_find_spans(p);
         panel_game = gi;
@@ -1180,7 +1253,7 @@ static void draw_folder_view(Image *c)
     const Folder *f = &S.folders[S.folder];
     const Grid *g = S.grid;
     gfx_fill_rrect(c, 24, 36, 48, 48, 12, rgb(f->color));
-    text_draw(c, S.label, f->label, 84, 34, rgb(C_INK));
+    text_draw(c, S.label, f->label, 84, 36, rgb(C_INK));
     char n[64];
     snprintf(n, sizeof n, "%d game%s · %s", f->ngames, f->ngames == 1 ? "" : "s", SORTS[S.sort]);
     text_draw(c, S.small, n, 84, 60, rgb(C_SUB));
@@ -1206,65 +1279,70 @@ static void draw_folder_view(Image *c)
 }
 
 // Options sheet over the dimmed view; drawn into the retained scene since it's static.
-static void draw_level(Image *c, int right, int cy, int value, int max, int sel)
+static void draw_level(Image *c, int right, int cy, int value, int max)
 {
     char n[8];
     snprintf(n, sizeof n, "%d", value);
-    const int bar_w = 132, bar_h = 10;
-    int bx = right - bar_w, by = cy - bar_h / 2;
-    gfx_fill_rrect(c, bx, by, bar_w, bar_h, bar_h / 2.f, sel ? argb(70, 255, 255, 255) : rgb(P->line));
-    int fill = bar_w * value / max;
-    if (fill > 0) gfx_fill_rrect(c, bx, by, fill < bar_h ? bar_h : (float)fill, bar_h, bar_h / 2.f,
-                                 sel ? rgb(0xffffff) : rgb(C_SEL));
-    text_draw(c, S.small, n, right - bar_w - 10 - text_width(S.small, n),
-              cy - font_height(S.small) / 2, sel ? rgb(0xffffff) : rgb(C_INK));
+    const int bar_w = 132, h = 8, gap = 4;
+    int segs = max > 12 ? 10 : max; // one segment per step, grouped when there are many
+    int lit = value * segs / max;
+    float sw = (bar_w - (segs - 1) * gap) / (float)segs;
+    int bx = right - bar_w, by = cy - h / 2;
+    for (int i = 0; i < segs; i++)
+        gfx_fill_rrect(c, bx + i * (sw + gap), by, sw, h, 2,
+                       i < lit ? rgb(C_INK) : rgb(P->line));
+    text_draw(c, S.small, n, right - bar_w - 8 - text_width(S.small, n),
+              cy - font_height(S.small) / 2, rgb(C_INK));
 }
 
-// The three scale modes as pills, the current one filled in.
-static void draw_scale_pills(Image *c, int right, int cy, int sel)
+// The three scale modes as one joined segmented control, the chosen segment filled.
+static void draw_scale_pills(Image *c, int right, int cy)
 {
     static const char *const NAME[SCALE_MODES] = {"Sharp", "Smooth", "Integer"};
     int width[SCALE_MODES], total = 0, h = font_height(S.small) + 8;
     for (int i = 0; i < SCALE_MODES; i++) {
-        width[i] = text_width(S.small, NAME[i]) + 18;
-        total += width[i] + (i ? 4 : 0);
+        width[i] = text_width(S.small, NAME[i]) + 16;
+        total += width[i];
     }
     int x = right - total, y = cy - h / 2;
+    gfx_fill_rrect(c, x, y, total, h, 8, rgb(P->line));
     for (int i = 0; i < SCALE_MODES; i++) {
         int on = i == (int)S.set.scale;
-        uint32_t bg = on ? (sel ? rgb(0xffffff) : rgb(C_SEL)) : (sel ? argb(50, 255, 255, 255) : rgb(P->line));
-        uint32_t ink = on ? (sel ? rgb(C_SEL) : rgb(0xffffff)) : (sel ? argb(220, 255, 255, 255) : rgb(C_SUB));
-        gfx_fill_rrect(c, x, y, width[i], h, h / 2.f, bg);
-        text_draw(c, S.small, NAME[i], x + 9, y + 4, ink);
-        x += width[i] + 4;
+        if (on) gfx_fill_rrect(c, x + 2, y + 2, width[i] - 4, h - 4, 6, rgb(C_INK));
+        if (i) gfx_fill_rect(c, x, y + 4, 1, h - 8, rgb(P->panel));
+        text_center(c, S.small, NAME[i], x + width[i] / 2, y + 4,
+                    on ? rgb(P->on_ink) : rgb(C_SUB), width[i]);
+        x += width[i];
     }
 }
 
 static void draw_options(Image *c)
 {
     gfx_fill_rect(c, 0, 0, SCREEN_W, SCREEN_H - FOOTER_H, argb(S.dark ? 150 : 110, 10, 12, 18));
-    const int w = 452, row = 66, h = 58 + O_COUNT * row + 10;
+    const int w = 452, row = 64, h = 56 + O_COUNT * row + 12;
     int x = (SCREEN_W - w) / 2, y = (SCREEN_H - FOOTER_H - h) / 2;
     gfx_fill_rrect(c, x + 2, y + 6, w - 4, h - 2, 18, argb(60, 0, 0, 0));
     gfx_fill_rrect(c, x, y, w, h, 18, rgb(P->panel));
-    text_draw(c, S.label, "Options", x + 24, y + 18, rgb(C_INK));
+    text_draw(c, S.label, "Options", x + 24, y + 16, rgb(C_INK));
     for (int i = 0; i < O_COUNT; i++) {
-        int ry = y + 58 + i * row, sel = i == S.osel;
-        if (sel) gfx_fill_rrect(c, x + 10, ry, w - 20, row - 6, 12, rgb(C_SEL));
-        uint32_t ink = sel ? rgb(0xffffff) : rgb(C_INK), sub_ink = sel ? argb(220, 255, 255, 255) : rgb(C_SUB);
-        text_draw(c, S.body, OPT_TITLE[i], x + 24, ry + 7, ink);
+        int ry = y + 56 + i * row, sel = i == S.osel;
+        if (sel) { // quiet fill plus an accent bar; inks stay as they are when unselected
+            gfx_fill_rrect(c, x + 10, ry, w - 20, row - 8, 8, rgb(P->dim_dot));
+            gfx_fill_rrect(c, x + 10, ry, 4, row - 8, 2, rgb(C_SEL));
+        }
+        uint32_t ink = rgb(C_INK), sub_ink = rgb(C_SUB);
+        int cy = ry + (row - 8) / 2, right = x + w - 24;
         const char *sub = OPT_SUB[i];
-        if (i == O_OFF && S.oconfirm) sub = "Press A again to power off, B to cancel";
-        text_draw(c, S.small, sub, x + 24, ry + 32, sub_ink);
-        int cy = ry + (row - 6) / 2, right = x + w - 24;
-        if (i == O_BRIGHT) draw_level(c, right, cy, S.set.brightness, BRIGHTNESS_MAX, sel);
-        if (i == O_VOLUME) draw_level(c, right, cy, S.set.volume, VOLUME_MAX, sel);
-        if (i == O_SCREEN) draw_scale_pills(c, right, cy, sel);
+        if (i == O_OFF && S.oconfirm) sub = "Press A again to power off";
+        text_draw(c, S.body, OPT_TITLE[i], x + 24, sub ? ry + 8 : cy - font_height(S.body) / 2, ink);
+        if (sub) text_draw(c, S.small, sub, x + 24, ry + 32, sub_ink);
+        if (i == O_BRIGHT) draw_level(c, right, cy, S.set.brightness, BRIGHTNESS_MAX);
+        if (i == O_VOLUME) draw_level(c, right, cy, S.set.volume, VOLUME_MAX);
+        if (i == O_SCREEN) draw_scale_pills(c, right, cy);
         if (i == O_DARK) { // switch
-            float sw = 52, sh = 30, sx = right - sw, sy = cy - sh / 2;
-            uint32_t track = S.dark ? (sel ? argb(90, 255, 255, 255) : rgb(C_SEL)) : (sel ? argb(60, 0, 0, 0) : rgb(P->line));
-            gfx_fill_rrect(c, sx, sy, sw, sh, sh / 2, track);
-            gfx_fill_rrect(c, sx + (S.dark ? sw - sh : 0) + 3, sy + 3, sh - 6, sh - 6, (sh - 6) / 2, rgb(0xffffff));
+            float sw = 52, sh = 32, sx = right - sw, sy = cy - sh / 2;
+            gfx_fill_rrect(c, sx, sy, sw, sh, sh / 2, S.dark ? rgb(C_INK) : rgb(P->line));
+            gfx_fill_rrect(c, sx + (S.dark ? sw - sh : 0) + 4, sy + 4, sh - 8, sh - 8, (sh - 8) / 2, rgb(S.dark ? P->on_ink : 0xffffff));
         }
     }
 }
@@ -1290,7 +1368,12 @@ double ui_idle(void)
     if (sw_on() && sw_prebuild_next() >= 0) return .001; // update, not redraw, builds it
     double now = wall();
     if ((long)(now / 60) != S.drawn_minute) return 0;
-    return 60 - fmod(now, 60) + .01; // the status clock's next minute
+    double rest = 60 - fmod(now, 60) + .01; // the status clock's next minute
+    if (S.toast[0]) { // asleep through the static middle, awake again for the fade-out
+        double fade = TOAST_FOR - .45 - toast_age();
+        if (fade < rest) rest = fade;
+    }
+    return rest;
 }
 
 void ui_draw(Image *c)
@@ -1328,8 +1411,6 @@ void ui_draw(Image *c)
         float cx = S.track.x + item_x(S.sel) + TILE / 2.f;
         float w = TILE * S.hscale[S.sel].x;
         draw_cursor(composed, cx, ROW_Y + TILE / 2.f, w, TILE);
-        if (S.sel >= S.lib->nrecent)
-            draw_folder_badge(composed, &S.folders[S.sel - S.lib->nrecent], cx, ROW_Y + TILE / 2.f, w);
     } else if (S.nfg) {
         const Grid *g = S.grid;
         float cx = S.ftrack.x + (S.fsel / g->rows) * g->col + g->tile / 2.f;
@@ -1356,7 +1437,7 @@ void ui_draw(Image *c)
 #define SW_W (SW_SHOT_W + 2 * SW_FRAME)
 #define SW_H (SW_SHOT_H + 2 * SW_FRAME)
 #define SW_STEP 280
-#define SW_CY 250
+#define SW_CY 248
 #define SW_SMALL .86f
 #define SW_SPRITE_PAD 8
 
@@ -1370,13 +1451,6 @@ static struct {
     uint8_t *ring;             // selection ring coverage at full card size, 9-sliced
     const Image *sprite_src[MAX_RECENT], *sprite_icon[MAX_RECENT];
     Image *home_bg;           // Shelf's own background: B fades to it, as Shelf starts on it
-    // Backdrops are kept small (blurred, so nothing is lost) and cross-faded at that size;
-    // only the result is upscaled to the screen.
-    Image *backdrop, *old_backdrop, *mixed;
-    Image *backdrop_full;     // backdrop at screen size, NULL until the fade settles
-    int backdrop_for;         // recent the backdrop was made from, -1 none
-    const Image *backdrop_src;
-    float fade;               // 0..1 cross-fade from old_backdrop
     Spring zoom;              // 0: selected card fills the screen, 1: in the row
     int closing, close_to;    // UI_SW_* being animated to, and the recent
     float home_t;             // B: fade-out progress
@@ -1415,7 +1489,7 @@ static unsigned sw_revision(void) { return W.revision ? W.revision() : 0; }
 static int sw_animating(void)
 {
     for (int i = 0; i < S.lib->nrecent; i++) if (spring_moving(&S.hscale[i])) return 1;
-    return spring_moving(&W.zoom) || spring_moving(&S.track) || W.fade < 1 || (W.closing && !W.fired);
+    return spring_moving(&W.zoom) || spring_moving(&S.track) || (W.closing && !W.fired);
 }
 
 void ui_switch_reopen(void)
@@ -1437,7 +1511,6 @@ int ui_init_switcher(Library *lib, const char *font_dir, int from_game, int runn
     if (ui_init(lib, font_dir)) return -1;
     W.on = 1;
     W.running = running;
-    W.backdrop_for = -1;
     W.home_bg = S.bg;     // in the user's palette
     P = &PALETTES[1];     // the switcher is always dark: it sits over a dimmed game
     S.bg = NULL;
@@ -1456,8 +1529,7 @@ static void sw_free(void)
 {
     for (int i = 0; i < MAX_RECENT; i++) { img_free(W.sprites[i]); img_free(W.small[i]); }
     free(W.ring);
-    img_free(W.home_bg); img_free(W.backdrop); img_free(W.old_backdrop);
-    img_free(W.mixed); img_free(W.backdrop_full);
+    img_free(W.home_bg);
     band_free(&W.top); band_free(&W.bottom);
     memset(&W, 0, sizeof W);
 }
@@ -1495,8 +1567,7 @@ static void sw_update(float dt)
 {
     spring_step(&W.zoom, dt, SNAPPY);
     spring_step(&S.track, dt, BOUNCE);
-    for (int i = 0; i < S.lib->nrecent; i++) spring_step(&S.hscale[i], dt, 400.f, 22.f);
-    if (W.fade < 1) { W.fade += dt / .22f; if (W.fade > 1) W.fade = 1; }
+    for (int i = 0; i < S.lib->nrecent; i++) spring_step(&S.hscale[i], dt, 480.f, 40.f);
     if (W.closing == UI_SW_HOME) {
         W.home_t += dt / .25f;
         if (W.home_t >= 1 && !W.fired) { S.action = UI_SW_HOME; W.fired = 1; }
@@ -1507,85 +1578,9 @@ static void sw_update(float dt)
     sw_prebuild();
 }
 
-// One box-blur pass along a row or column of opaque pixels, edges clamped.
-static void blur_line(uint32_t *buf, uint32_t *tmp, int n, int stride, int r)
-{
-    for (int i = 0; i < n; i++) tmp[i] = buf[i * stride];
-    int win = 2 * r + 1, sum[3] = {0};
-    for (int i = -r; i <= r; i++) {
-        uint32_t p = tmp[i < 0 ? 0 : (i >= n ? n - 1 : i)];
-        for (int c = 0; c < 3; c++) sum[c] += (p >> (c * 8)) & 255;
-    }
-    for (int i = 0; i < n; i++) {
-        buf[i * stride] = 0xff000000u | (sum[0] / win) | ((sum[1] / win) << 8) | ((sum[2] / win) << 16);
-        int out = i - r, in = i + r + 1;
-        uint32_t po = tmp[out < 0 ? 0 : out], pi = tmp[in >= n ? n - 1 : in];
-        for (int c = 0; c < 3; c++) sum[c] += (int)((pi >> (c * 8)) & 255) - (int)((po >> (c * 8)) & 255);
-    }
-}
-
-static void box_blur(Image *img, int r)
-{
-    int n = img->w > img->h ? img->w : img->h;
-    uint32_t *tmp = malloc((size_t)n * 4);
-    if (!tmp) return;
-    for (int pass = 0; pass < 3; pass++) {
-        for (int y = 0; y < img->h; y++) blur_line(img->px + y * img->w, tmp, img->w, 1, r);
-        for (int x = 0; x < img->w; x++) blur_line(img->px + x, tmp, img->h, img->w, r);
-    }
-    free(tmp);
-}
-
-// The selected game's screenshot, blurred and dimmed, at SW_BD_W x SW_BD_H; without one,
-// the colour its card shows instead.
-#define SW_BD_W 64
-#define SW_BD_H 48
-static Image *make_backdrop(const Image *shot, uint32_t color)
-{
-    Image *small = shot ? img_resize(shot, SW_BD_W, SW_BD_H) : img_new(SW_BD_W, SW_BD_H);
-    if (!small) return NULL;
-    if (shot) box_blur(small, 3);
-    else gfx_clear(small, rgb(color));
-    for (int i = 0; i < SW_BD_W * SW_BD_H; i++) {
-        uint32_t p = small->px[i];
-        int r = (p >> 16 & 255) * 2 / 5 + 10, g = (p >> 8 & 255) * 2 / 5 + 12, b = (p & 255) * 2 / 5 + 20;
-        small->px[i] = rgb((uint32_t)(r << 16 | g << 8 | b));
-    }
-    return small;
-}
-
-static void sw_update_backdrop(void)
-{
-    if (!S.lib->nrecent) return;
-    const Image *src = W.card ? W.card(S.sel) : NULL;
-    if (W.backdrop_for == S.sel && W.backdrop_src == src) return;
-    const Game *g = &S.lib->games[S.lib->recent[S.sel]];
-    Image *next = make_backdrop(src, S.lib->sys[g->sys].color);
-    if (!next) return;
-    img_free(W.old_backdrop);
-    W.old_backdrop = W.backdrop;
-    W.backdrop = next;
-    img_free(W.backdrop_full);
-    W.backdrop_full = NULL;
-    W.fade = W.old_backdrop ? 0 : 1;
-    W.backdrop_for = S.sel;
-    W.backdrop_src = src;
-}
-
 static void sw_draw_backdrop(Image *c)
 {
-    if (!W.backdrop) { memcpy(c->px, S.bg->px, (size_t)SCREEN_W * SCREEN_H * 4); return; }
-    if (W.fade < 1 && W.old_backdrop) {
-        if (!W.mixed) W.mixed = img_new(SW_BD_W, SW_BD_H);
-        if (W.mixed) {
-            gfx_lerp(W.mixed, W.old_backdrop, W.backdrop, (uint8_t)(W.fade * 255));
-            gfx_upscale(c, W.mixed);
-            return;
-        }
-    }
-    if (!W.backdrop_full && (W.backdrop_full = img_new(SCREEN_W, SCREEN_H))) gfx_upscale(W.backdrop_full, W.backdrop);
-    if (W.backdrop_full) memcpy(c->px, W.backdrop_full->px, (size_t)SCREEN_W * SCREEN_H * 4);
-    else gfx_upscale(c, W.backdrop);
+    gfx_clear(c, rgb(0x14171f)); // one flat scrim: the screenshot shows in the focused card
 }
 
 // One card at full size with its frame, shadow and system chip, rebuilt when its
@@ -1620,22 +1615,23 @@ static const Image *sw_sprite(int i)
     } else {
         // Never left through the switcher, so no screenshot: its box art on its colour.
         gfx_fill_rrect(s, sx, sy, SW_SHOT_W, SW_SHOT_H, 7, rgb(sys->color));
-        float a = 150, ax = sx + (SW_SHOT_W - a) / 2, ay = sy + (SW_SHOT_H - a) / 2;
+        float a = 152, ax = sx + (SW_SHOT_W - a) / 2, ay = sy + (SW_SHOT_H - a) / 2;
         if (icon) gfx_blit_scaled(s, icon, ax, ay, a, a, 255);
         else draw_placeholder(s, g, ax, ay, a);
     }
     if (shot && sys->label[0]) { // system chip, bottom left
         int tw = text_width(S.small, sys->label), ch = font_height(S.small) + 4;
-        gfx_fill_rrect(s, sx + 8, sy + SW_SHOT_H - ch - 8, tw + 16, ch, ch / 2.f, rgb(sys->color));
-        text_draw(s, S.small, sys->label, (int)sx + 16, (int)(sy + SW_SHOT_H - ch - 6), rgb(0xffffff));
+        float chy = sy + SW_SHOT_H - ch - 8;
+        gfx_fill_rrect(s, sx + 8, chy, tw + 16, ch, ch / 2.f, rgb(sys->color));
+        text_draw(s, S.small, sys->label, (int)sx + 16, (int)(chy + (ch - font_height(S.small)) / 2), rgb(0xffffff));
     }
     if (i == 0 && W.running) { // the paused game, chip on the top edge
-        const char *t = "PAUSED";
-        int tw = text_width(S.small, t), ch = font_height(S.small) + 6;
-        float cx = x + SW_W / 2.f - (tw + 22) / 2.f, cy = y - 4;
-        gfx_fill_rrect(s, cx - 3, cy - 3, tw + 28, ch + 6, (ch + 6) / 2.f, rgb(0xffffff));
-        gfx_fill_rrect(s, cx, cy, tw + 22, ch, ch / 2.f, rgb(0x262a35));
-        text_draw(s, S.small, t, (int)cx + 11, (int)cy + 3, rgb(0xffffff));
+        const char *t = "Paused";
+        int tw = text_width(S.small, t), ch = font_height(S.small) + 8;
+        float cx = x + SW_W / 2.f - (tw + 24) / 2.f, cy = y - 4;
+        gfx_fill_rrect(s, cx - 4, cy - 4, tw + 32, ch + 8, (ch + 8) / 2.f, rgb(0xffffff));
+        gfx_fill_rrect(s, cx, cy, tw + 24, ch, ch / 2.f, rgb(0x262a35));
+        text_draw(s, S.small, t, (int)cx + 12, (int)(cy + (ch - font_height(S.small)) / 2), rgb(0xffffff));
     }
     img_find_spans(s);
     return s;
@@ -1709,7 +1705,7 @@ static void sw_card_rect(int i, float *x, float *y, float *w, float *h)
 // status, save notification and the selection's title; along the bottom the position
 // dots and the footer. Each is redrawn only when what it shows changes.
 #define SW_TOP_H 120
-#define SW_BOTTOM_Y 370
+#define SW_BOTTOM_Y 368
 static void sw_draw_chrome(Image *c)
 {
     Library *L = S.lib;
@@ -1724,14 +1720,14 @@ static void sw_draw_chrome(Image *c)
             char meta[160];
             snprintf(meta, sizeof meta, "%s%s", L->sys[g->sys].name, resume ? " · Paused" : "");
             text_center(b, S.title, g->title, SCREEN_W / 2, 44, rgb(0xffffff), SCREEN_W - 60);
-            text_center(b, S.body, meta, SCREEN_W / 2, 86, argb(255, 0xb8, 0xbf, 0xd0), SCREEN_W - 60);
+            text_center(b, S.body, meta, SCREEN_W / 2, 88, argb(255, 0xb8, 0xbf, 0xd0), SCREEN_W - 60);
         }
         draw_status_raw(b);
         if (W.notice[0]) { // the question a confirming press answers
             int tw = text_width(S.small, W.notice), th = font_height(S.small) + 8;
             float tx = SCREEN_W / 2.f - (tw + 24) / 2.f;
-            gfx_fill_rrect(b, tx, 6, tw + 24, th, th / 2.f, rgb(0xffffff));
-            text_draw(b, S.small, W.notice, (int)tx + 12, 10, rgb(0x262a35));
+            gfx_fill_rrect(b, tx, 8, tw + 24, th, th / 2.f, rgb(0xffffff));
+            text_draw(b, S.small, W.notice, (int)tx + 12, 8 + (th - font_height(S.small)) / 2, rgb(0x262a35));
         }
         band_end(&W.top);
     }
@@ -1739,11 +1735,11 @@ static void sw_draw_chrome(Image *c)
     if ((b = band_begin(&W.bottom, SCREEN_H - SW_BOTTOM_Y, key))) {
         const int y0 = SW_BOTTOM_Y;
         if (L->nrecent > 1) {
-            float dw = 15, x0 = SCREEN_W / 2.f - (L->nrecent - 1) * dw / 2;
+            float dw = 16, x0 = SCREEN_W / 2.f - (L->nrecent - 1) * dw / 2;
             for (int i = 0; i < L->nrecent; i++) {
                 float sz = i == S.sel ? 12 : 8;
                 gfx_fill_rrect(b, x0 + i * dw - sz / 2, 380 - y0 - sz / 2, sz, sz, sz / 2,
-                               i == S.sel ? rgb(C_SEL) : argb(70, 255, 255, 255));
+                               i == S.sel ? rgb(0xffffff) : argb(70, 255, 255, 255));
             }
         }
         // A question owns the footer while it is up: A answers yes, B no.
@@ -1782,17 +1778,13 @@ static void sw_draw_scene(Image *c, int skip_sel)
             if (fabsf(k - 1) < .004f) gfx_blit(c, s, (int)lroundf(x) - SW_SPRITE_PAD, (int)lroundf(y) - SW_SPRITE_PAD, 255);
             else if (rest) gfx_blit(c, rest, (int)lroundf(x + w / 2 - rest->w / 2.f), (int)lroundf(y + h / 2 - rest->h / 2.f), 255);
             else gfx_blit_scaled_nearest(c, s, x - pad, y - pad, s->w * k, s->h * k); // moving
-            if (pass) { // selection ring
-                float p = pulse_level();
-                sw_ring(c, x, y, w, h, lerp_rgb(C_SEL, C_SEL2, p));
-            }
+            if (pass) sw_ring(c, x, y, w, h, rgb(C_SEL));
         }
     sw_draw_chrome(c);
 }
 
 static void sw_draw(Image *c)
 {
-    sw_update_backdrop();
     if (W.closing == UI_SW_HOME) {
         sw_draw_scene(S.layer, 0);
         W.layer_ok = 0;
@@ -1804,7 +1796,7 @@ static void sw_draw(Image *c)
     if (z > .996f || !S.lib->nrecent) { sw_draw_scene(c, 0); W.layer_ok = 0; return; }
     // Zooming between the selected card and the full screen: the scene without that card
     // (kept while nothing in it moves), its white frame, and the screenshot scaled into it.
-    int still = W.fade >= 1 && !spring_moving(&S.track);
+    int still = !spring_moving(&S.track);
     for (int i = 0; i < S.lib->nrecent && still; i++) still = !spring_moving(&S.hscale[i]);
     unsigned rev = (W.revision ? W.revision() : 0) * 31u + icons_revision();
     if (!W.layer_ok || !still || rev != W.layer_rev) {
