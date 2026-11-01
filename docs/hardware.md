@@ -90,6 +90,8 @@ Volume in dB, -60..+30: `MI_AO_SetVolume(0, db)`, or the `/dev/mi_ao` ioctls
 
 There's no kernel suspend (`/sys/power/state` offers none). Standby is a software job:
 pause emulation, mute audio, backlight 0, panel off (GPIO 4), CPU governor `powersave`
-(`/sys/devices/system/cpu/cpufreq/policy0/scaling_governor`), then wait for POWER.
+(`/sys/devices/system/cpu/cpufreq/policy0/scaling_governor`), then wait for POWER. Shelf
+saves the game after the panel is off, and powers off after 10 minutes asleep. Games run
+on `performance`; the home screen and the paused in-game menu on `ondemand`.
 Power off: `sync`, then `poweroff` (*unverified* on the Plus, where Onion uses its own
-`shutdown` script).
+`shutdown` script). Every save, and the resume marker, is written and `fsync`ed before.

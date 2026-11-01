@@ -69,6 +69,13 @@ int lib_add_play(Library *lib, int game, int seconds, long long now);
 // Where the player keeps this game's <stem>.srm/.state/.png: /mnt/SDCARD/Saves/<SYS>.
 void lib_save_dir(const Library *lib, int game, char *out, int n);
 
+// The game to resume on the next boot: .shelf/data/resume names its ROM. Shelf sets it
+// when it powers off from a game, after the save. lib_take_resume deletes the marker
+// (and syncs) before it answers, so a game that can't start doesn't boot again: the game's
+// index, or -1 for none, an unknown game, or a marker that couldn't be deleted.
+int lib_set_resume(const Library *lib, int game);
+int lib_take_resume(const Library *lib);
+
 // Writes `json` to a device path atomically (creating its folder); 0 or -1. Shelf keeps
 // its own files this way, settings.json included.
 int lib_write_json(const char *dev_path, const char *json);

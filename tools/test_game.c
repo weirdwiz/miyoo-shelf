@@ -143,14 +143,32 @@ static int game_index(const char *stem)
     return -1;
 }
 
+// .shelf/data/resume: the game the next boot resumes. resumes() is the ROM it names, ""
+// when there is none.
+static char resume_path[PATH_LEN * 2];
+static const char *resumes(void)
+{
+    static char line[PATH_LEN];
+    line[0] = 0;
+    FILE *f = fopen(resume_path, "rb");
+    if (!f) return line;
+    if (!fgets(line, sizeof line, f)) line[0] = 0;
+    fclose(f);
+    line[strcspn(line, "\n")] = 0;
+    return line;
+}
+static int resumes_game(int game) { return !strcmp(resumes(), lib.games[game].path); }
+
 // What the saved state held at the moments the platform blanked, woke and powered off.
 static int watched;
 static long at_blank, at_wake, at_off;
 static double slept_at, off_at; // clock times
+static int marked_at_off;       // the resume marker named the game when the power went
 static void watch_saves(const char *call)
 {
     if (!strcmp(call, "standby_on")) slept_at = platform_now();
     if (!strcmp(call, "power_off")) off_at = platform_now();
+    if (!strcmp(call, "power_off")) marked_at_off = resumes_game(watched);
     if (!strcmp(call, "standby_on")) at_blank = state_counter(watched);
     if (!strcmp(call, "standby_off")) at_wake = state_counter(watched);
     if (!strcmp(call, "power_off")) at_off = state_counter(watched);
@@ -190,6 +208,7 @@ int main(int argc, char **argv)
     setenv("SHELF_CORE", core, 1);
 
     build_card(argv[1]);
+    snprintf(resume_path, sizeof resume_path, "%s/.shelf/data/resume", sd);
     lib_set_root(sd);
     CHECK(lib_load(&lib) == 0);
     CHECK(lib.ngames == 3 && lib.nrecent == 3);
@@ -215,6 +234,7 @@ int main(int argc, char **argv)
     CHECK(fp()->game_presents > 20);
     CHECK(fp()->presents > 20); // the menu's frames
     CHECK(fp()->performance_on >= 1);
+    CHECK(!resumes()[0]); // back home: the next boot starts at home
 
     // The next session resumes from the state instead of a fresh boot.
     long counter = state_counter(alpha);
@@ -313,10 +333,11 @@ int main(int argc, char **argv)
     CHECK(at_wake > 0 && at_wake != beta_unsaved);
 
     // POWER held while asleep: the save made on the way into standby is on the card
-    // before the power goes.
+    // before the power goes, and so is the marker that resumes it on the next boot.
     fp_reset();
     fp_limit(25);
     at_blank = at_off = -2;
+    marked_at_off = 0;
     fp_on_call(watch_saves);
     fp_press_at(0.5, BTN_POWER);
     fp_press_at(2.0, BTN_POWER_OFF);
@@ -325,6 +346,8 @@ int main(int argc, char **argv)
     CHECK(fp()->power_off == 1);
     CHECK(at_blank == beta_before_sleep);
     CHECK(at_off > beta_before_sleep);
+    CHECK(marked_at_off && resumes_game(beta));
+    unlink(resume_path);
 
     // POWER held: everything is saved before Shelf powers off.
     long beta_before = state_counter(beta);
@@ -334,6 +357,8 @@ int main(int argc, char **argv)
     CHECK(session(beta, &next) == GAME_POWER_OFF);
     CHECK(fp()->power_off == 1);
     CHECK(state_counter(beta) > beta_before && exists(beta, ".png"));
+    CHECK(resumes_game(beta));
+    unlink(resume_path);
 
     // Playing with the same buttons held for ten minutes is idle: standby, and ten
     // minutes asleep powers off. A press in between starts the ten minutes again. The
@@ -347,6 +372,8 @@ int main(int argc, char **argv)
     CHECK(session(beta, &next) == GAME_POWER_OFF);
     CHECK(slept_at > 899.9 && slept_at < 900.1);
     CHECK(off_at > 1499.9 && off_at < 1500.1);
+    CHECK(resumes_game(beta));
+    unlink(resume_path);
     CHECK(fp()->battery_reads >= 30); // 0, 30, ... 870 s
     CHECK(fp()->standby_off == 1 && fp()->power_off == 1);
     fp_hold(0);
@@ -360,6 +387,8 @@ int main(int argc, char **argv)
     CHECK(session(beta, &next) == GAME_POWER_OFF);
     CHECK(!strcmp(calls("dim"), "dim_on"));
     CHECK(slept_at > 180.9 && slept_at < 181.1 && off_at > 780.9 && off_at < 781.1);
+    CHECK(resumes_game(beta));
+    unlink(resume_path);
 
     // The battery nearly flat: three readings in a row at 4 % or less save the game and
     // power off.
@@ -367,12 +396,15 @@ int main(int argc, char **argv)
     fp_reset();
     fp_limit(200);
     off_at = -1;
+    marked_at_off = 0;
     fp_on_call(watch_saves);
     fp_battery_at(10, 3, 0);
     CHECK(session(beta, &next) == GAME_POWER_OFF);
     CHECK(off_at > 89.9 && off_at < 90.1); // read at 30, 60 and 90 s
     CHECK(fp()->standby_on == 0 && fp()->power_off == 1);
     CHECK(at_off > beta_low);
+    CHECK(marked_at_off);
+    unlink(resume_path);
 
     // At 10 % or less the in-game menu says so, once, in the pill at the top.
     ui_set_wall_clock(fake_wall);
@@ -439,6 +471,15 @@ int main(int argc, char **argv)
     CHECK(session(gamma, &next) == GAME_HOME);
     CHECK(game_error()[0] != 0);
     CHECK(state_counter(gamma) == good);
+
+    // Powering off with a save that failed: no resume, the next boot starts at home.
+    fp_reset();
+    fp_limit(20);
+    fp_press_at(0.4, BTN_POWER_OFF);
+    CHECK(session(gamma, &next) == GAME_POWER_OFF);
+    CHECK(game_error()[0] != 0);
+    CHECK(fp()->power_off == 1);
+    CHECK(!resumes()[0]);
     CHECK(chmod(dir, 0755) == 0);
 
     icons_free();

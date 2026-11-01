@@ -342,6 +342,10 @@ int main(void)
         return rc;
     }
 
+    // Powered off from a game last time: straight back into it. Taking the marker deletes
+    // it, first thing, so a game that can't start doesn't come back on every boot.
+    int resume = lib_take_resume(&lib);
+
     if (platform_init()) return 1;
     platform_set_brightness(set.brightness);
     platform_set_volume(set.volume);
@@ -357,33 +361,37 @@ int main(void)
     int quit = 0, power_off = 0;
     char toast[192] = ""; // a failure the home screen should show
     while (!quit && !power_off) {
-        ui_set_dark(set.dark);
-        if (ui_init(&lib, font_dir)) {
-            fprintf(stderr, "shelf: fonts missing in %s\n", font_dir);
-            break;
+        int want = resume;
+        resume = -1;
+        if (want < 0) { // the home screen, until it launches a game
+            ui_set_dark(set.dark);
+            if (ui_init(&lib, font_dir)) {
+                fprintf(stderr, "shelf: fonts missing in %s\n", font_dir);
+                break;
+            }
+            ui_set_settings(&set);
+            if (toast[0]) {
+                ui_set_toast(toast);
+                toast[0] = 0;
+            }
+            HomeLoop hl = {&lib, &set, 0, -1, 0};
+            power_init(&hl.power);
+            hl.last_input = platform_now();
+            LoopScreen screen = {&hl, home_button, home_tick, screen_update, screen_idle, screen_draw, home_after};
+            LoopIO io = loop_platform();
+            if (getenv("SHELF_STATS")) {
+                stats.t0 = platform_now();
+                screen.draw = stats_draw;
+                io.present = stats_present;
+            }
+            loop_run(&io, &screen, canvas, &stats.loop);
+            set = ui_settings();
+            ui_free();
+            if (hl.quit || hl.power_off) break;
+            want = hl.launch;
         }
-        ui_set_settings(&set);
-        if (toast[0]) {
-            ui_set_toast(toast);
-            toast[0] = 0;
-        }
-        HomeLoop hl = {&lib, &set, 0, -1, 0};
-        power_init(&hl.power);
-        hl.last_input = platform_now();
-        LoopScreen screen = {&hl, home_button, home_tick, screen_update, screen_idle, screen_draw, home_after};
-        LoopIO io = loop_platform();
-        if (getenv("SHELF_STATS")) {
-            stats.t0 = platform_now();
-            screen.draw = stats_draw;
-            io.present = stats_present;
-        }
-        loop_run(&io, &screen, canvas, &stats.loop);
-        set = ui_settings();
-        ui_free();
-        if (hl.quit || hl.power_off) break;
 
         // A game, and then whichever game its in-game menu asked for.
-        int want = hl.launch;
         for (;;) {
             if (want < 0) break;
             if (lib_mark_played(&lib, want)) fprintf(stderr, "shelf: couldn't save recents\n");

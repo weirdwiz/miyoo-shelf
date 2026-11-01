@@ -622,6 +622,10 @@ int game_play(Library *lib, int game, const GameSettings *set, int *switch_to)
 
     platform_audio_source(NULL);
     save_session(&s);
+    // Powering off from a game: the next boot comes straight back to it. Not when the save
+    // failed; then home, with the previous state still there to resume by hand.
+    if (result == GAME_POWER_OFF && !problem[0] && lib_set_resume(lib, game))
+        fprintf(stderr, "shelf: couldn't mark %s to resume\n", s.stem);
     player_close();
     platform_performance(0);
     if (lib_add_play(lib, game, (int)s.played, (long long)time(NULL)))

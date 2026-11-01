@@ -82,13 +82,50 @@ static void build_card(const char *work)
     CHECK(write_file(path, recents, sizeof recents - 1) == 0);
 }
 
+/* ---------- the resume marker ---------- */
+
+static char marker[PATH_LEN * 2], data_dir[PATH_LEN * 2];
+
+static void set_marker(const char *rom)
+{
+    char line[PATH_LEN + 2];
+    snprintf(line, sizeof line, "%s\n", rom);
+    CHECK(write_file(marker, line, strlen(line)) == 0);
+}
+
+static int marked(const char *rom) // the marker names `rom` ("": there is none)
+{
+    char line[PATH_LEN] = "";
+    FILE *f = fopen(marker, "rb");
+    if (!f) return !rom[0];
+    if (!fgets(line, sizeof line, f)) line[0] = 0;
+    fclose(f);
+    line[strcspn(line, "\n")] = 0;
+    return rom[0] && !strcmp(line, rom);
+}
+
+#define ALPHA "/mnt/SDCARD/Roms/GB/Alpha.gb"
+
+// The fake core paints the low byte of its frame counter into row 3, one bit per pixel:
+// a game resumed from its state doesn't start at 0.
+static int frame_counter(const Image *f)
+{
+    if (!f) return -1;
+    int v = 0;
+    for (int i = 0; i < 8; i++)
+        if (((f->px[3 * f->w + i] >> 16) & 0xff) > 127) v |= 1 << i;
+    return v;
+}
+
 /* ---------- scenarios ---------- */
 
 // When each logged call first happened, for the checks.
 static double at_dim, at_undim, at_standby, at_wake, at_off, at_game;
+static int marker_at_game = -1; // the marker still existed when the game started
 static void times(const char *call)
 {
     double now = platform_now();
+    if (!strcmp(call, "perf_on") && at_game < 0) marker_at_game = access(marker, F_OK) == 0;
     if (!strcmp(call, "dim_on") && at_dim < 0) at_dim = now;
     if (!strcmp(call, "dim_off") && at_undim < 0) at_undim = now;
     if (!strcmp(call, "standby_on") && at_standby < 0) at_standby = now;
@@ -165,6 +202,91 @@ static void home_wakes(void)
     CHECK(fp()->standby_on == 1 && fp()->power_off == 0);
 }
 
+// Holding POWER in a game saves it, marks it and powers off...
+static void game_powers_off(void)
+{
+    start(60);
+    fp_press_at(1, BTN_A); // Alpha, the newest recent
+    fp_press_at(8, BTN_POWER_OFF);
+    CHECK(shelf_main() == 0);
+    CHECK(at_game > 1 && at_game < 8);
+    CHECK(at_off >= 8);
+    CHECK(marked(ALPHA));
+}
+
+// ...and the next boot goes straight back into it, from its saved state, having deleted
+// the marker before the game started.
+static void boots_into_the_game(void)
+{
+    start(60);
+    fp_press_at(2, BTN_MENU);
+    fp_press_at(3, BTN_B); // home
+    fp_press_at(6, BTN_QUIT);
+    CHECK(shelf_main() == 0);
+    CHECK(at_game >= 0 && at_game < .1);
+    CHECK(marker_at_game == 0);
+    CHECK(frame_counter(fp_first_frame()) > 0);
+    CHECK(marked(""));
+}
+
+// No marker: home.
+static void boots_home(void)
+{
+    start(60);
+    fp_press_at(2, BTN_QUIT);
+    CHECK(shelf_main() == 0);
+    CHECK(at_game < 0 && fp()->presents > 0);
+}
+
+// Powering off from home leaves no marker.
+static void home_powers_off(void)
+{
+    start(60);
+    fp_press_at(2, BTN_POWER_OFF);
+    CHECK(shelf_main() == 0);
+    CHECK(fp()->power_off == 1 && at_game < 0);
+    CHECK(marked(""));
+}
+
+// A game that can't start (here: its core is missing) is tried once; the marker is gone,
+// so the boot after that starts at home rather than failing the same way forever.
+static void bad_resume_tried_once(void)
+{
+    set_marker(ALPHA);
+    char missing[PATH_LEN * 2];
+    snprintf(missing, sizeof missing, "%s/missing_libretro.so", sd);
+    setenv("SHELF_CORE", missing, 1);
+    start(60);
+    fp_press_at(3, BTN_QUIT);
+    CHECK(shelf_main() == 0);
+    CHECK(fp()->presents > 0); // home, with the failure as a toast
+    CHECK(marked(""));
+}
+
+// A marker naming a game that is no longer on the card: deleted, home.
+static void unknown_game(void)
+{
+    set_marker("/mnt/SDCARD/Roms/GB/Gone.gb");
+    start(60);
+    fp_press_at(2, BTN_QUIT);
+    CHECK(shelf_main() == 0);
+    CHECK(at_game < 0);
+    CHECK(marked(""));
+}
+
+// A marker that can't be deleted could boot into the same game forever: home instead.
+static void stuck_marker(void)
+{
+    set_marker(ALPHA);
+    CHECK(chmod(data_dir, 0555) == 0);
+    start(60);
+    fp_press_at(2, BTN_QUIT);
+    CHECK(shelf_main() == 0);
+    CHECK(at_game < 0);
+    CHECK(chmod(data_dir, 0755) == 0);
+    unlink(marker);
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 4) {
@@ -172,6 +294,8 @@ int main(int argc, char **argv)
         return 2;
     }
     build_card(argv[1]);
+    snprintf(data_dir, sizeof data_dir, "%s/.shelf/data", sd);
+    snprintf(marker, sizeof marker, "%s/resume", data_dir);
     setenv("SHELF_ROOT", sd, 1);
     setenv("SHELF_FONTS", argv[2], 1);
     setenv("SHELF_CORE", argv[3], 1);
@@ -182,8 +306,17 @@ int main(int argc, char **argv)
     run("home dims", home_dims);
     run("home sleeps, then powers off", home_sleeps_then_powers_off);
     run("home wakes", home_wakes);
+    run("a game powers off", game_powers_off);
+    run("the next boot resumes it", boots_into_the_game);
+    run("then home again", boots_home);
+    run("home powers off", home_powers_off);
+    run("and boots home", boots_home);
+    run("a resume that fails is tried once", bad_resume_tried_once);
+    run("then home", boots_home);
+    run("an unknown game isn't resumed", unknown_game);
+    if (geteuid() != 0) run("nor a marker that can't be deleted", stuck_marker); // root ignores 0555
 
     if (failures) return 1;
-    puts("main: the home screen dims, sleeps, wakes and powers off on its own");
+    puts("main: home dims, sleeps and powers off; a game powered off resumes once on the next boot");
     return 0;
 }
