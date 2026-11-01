@@ -55,6 +55,19 @@ void platform_click(void);
 // at PLATFORM_AUDIO_RATE from it (player_audio_read fits). NULL stops pulling; clicks
 // still play. The source must be safe to call from that thread.
 #define PLATFORM_AUDIO_RATE 48000
+// The audio latency budget, in one place for retuning on hardware. Sound waits in two
+// buffers: the game's ring (player.c), whose rate control keeps it around
+// PLATFORM_AUDIO_RING_MS (it saws ~4 ms above that on average, as each frame's sound
+// arrives in one burst), then the device's. The audio thread pulls a period of
+// PLATFORM_AUDIO_PERIOD frames and hands it to MI_AO, which holds PLATFORM_AUDIO_PERIODS
+// of them, so a period is pulled about PERIODS * PERIOD before it plays. 28 ms + 3 *
+// 10.7 ms: ~60 ms in all, down from ~170 ms (an 85 ms ring and 4 * 1024 frames). The ring
+// is the cushion against a frame finishing late (test_player's latency test: no underruns
+// with frames done anywhere from 2 to 14 ms after they were due); the device's periods
+// only have to cover the audio thread's own scheduling.
+#define PLATFORM_AUDIO_PERIOD 512 // frames, 10.7 ms
+#define PLATFORM_AUDIO_PERIODS 3
+#define PLATFORM_AUDIO_RING_MS 24
 void platform_audio_source(int (*pull)(int16_t *out, int frames));
 
 // Hardware settings. Levels: brightness 0-10, volume 0-20 (0 mutes).

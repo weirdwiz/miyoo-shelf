@@ -16,6 +16,7 @@ typedef struct {
     const char *stem;         // ROM file name without extension
     const char *options_path; // RetroArch-style `key = "value"` lines; NULL or missing: core defaults
     int sample_rate;          // output rate player_audio_read produces, e.g. 48000
+    int buffer_ms;            // audio kept buffered ahead of the reader; 0: 32 ms
 } PlayerConfig;
 
 // The latest video frame, converted to XRGB8888. Valid until the next player_run or
@@ -60,7 +61,9 @@ int player_load_state(const char *path);
 int player_save_sram(void);
 
 // Resampled interleaved stereo at cfg->sample_rate. Fills `frames` frames, padding with
-// silence on underrun; returns how many were real audio. Safe on another thread.
+// silence on underrun; returns how many were real audio. After opening or a flush it
+// reads nothing until cfg->buffer_ms of sound is buffered, so playback starts with the
+// cushion it keeps instead of stuttering up to it. Safe on another thread.
 int player_audio_read(int16_t *out, int frames);
 // Discards buffered audio (after a pause, so resuming doesn't play stale sound).
 void player_audio_flush(void);

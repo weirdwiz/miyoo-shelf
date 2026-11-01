@@ -1,6 +1,7 @@
 // Tests for the libretro host (src/player.c), driven by tools/fake_core.so.
 // usage: test-player [core.so] [work-dir]
 #include "../src/player.h"
+#include "../src/platform.h" // the audio latency budget (constants only)
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -31,6 +32,7 @@ static char work[512], saves[600], saves_ro[600];
 static char rom[600], rom_srm[600], rom_refuse[600], rom_missing[600];
 static char bad_core[600], missing_core[600], tmp_file[600];
 static int check_count;
+static int buffer_ms; // what config() asks the player to keep buffered; 0: its default
 
 static void fail_at(int line, const char *fmt, ...)
 {
@@ -126,6 +128,7 @@ static void config(PlayerConfig *cfg, const char *core, const char *rom_path, co
     cfg->stem = stem;
     cfg->options_path = options;
     cfg->sample_rate = OUT_RATE;
+    cfg->buffer_ms = buffer_ms;
 }
 
 static void open_ok(const char *rom_path, const char *save_dir, const char *stem, const char *options)
@@ -578,8 +581,7 @@ static void test_audio_drc(void)
 {
     const int frames = 36000;
     const int warmup = 600;
-    const int cap_ms = 150;  // documented ring capacity
-    const long max_fill = (long)OUT_RATE * cap_ms / 1000;
+    const long max_fill = 2L * OUT_RATE * 32 / 1000;  // twice the default 32 ms target
     static const double skews[] = { 1.0045, 0.9955 };
 
     for (size_t i = 0; i < sizeof skews / sizeof *skews; i++) {
@@ -591,12 +593,109 @@ static void test_audio_drc(void)
                skews[i], run.got, run.padded, run.maxq, fill_end, run.underruns);
         CHECK(run.underruns == 0, "skew %.4f: the ring underran %d times after warm-up", skews[i],
               run.underruns);
-        CHECK(run.maxq <= max_fill, "skew %.4f: fill reached %lld frames, past the %ld-frame ring",
+        CHECK(run.maxq <= max_fill, "skew %.4f: fill reached %lld frames, past %ld",
               skews[i], run.maxq, max_fill);
         CHECK(fill_end > 0, "skew %.4f: the ring should still hold audio", skews[i]);
         player_close();
     }
     printf("dynamic rate control\n");
+}
+
+// The latency budget in platform.h, played out on a simulated clock: the audio thread
+// pulls PLATFORM_AUDIO_PERIOD frames each time the device frees a period, while game
+// frames are due every 1/fps on the game's clock and each finishes, making its sound in
+// one burst, 2-14 ms after it was due. The device's clock runs `skew` faster than the
+// game's. Single-threaded, so it is exact and repeatable. After a warm-up the ring must
+// never run dry and must hold about PLATFORM_AUDIO_RING_MS, not more.
+static void test_audio_latency(void)
+{
+    static const struct { double skew, cost_min, cost_max; } RUN[] = {
+        {1.0, .002, .006},    {1.0, .002, .014},    {1.0003, .002, .014},
+        {0.9997, .002, .014}, {1.0045, .002, .014}, {0.9955, .002, .014},
+    };
+    const double secs = 300, warm = 60, frame = 1.0 / CORE_FPS;
+    const int period = PLATFORM_AUDIO_PERIOD;
+    int16_t buf[PLATFORM_AUDIO_PERIOD * 2];
+
+    for (size_t r = 0; r < sizeof RUN / sizeof *RUN; r++) {
+        unsigned rng = 1;
+        long frames = 0, pulls = 0, underruns = 0, max_fill = 0, min_fill = 1L << 30;
+        double area = 0, since = warm, frame_at = RUN[r].cost_min, pull_every = period / (OUT_RATE * RUN[r].skew);
+        int started = 0;
+
+        buffer_ms = PLATFORM_AUDIO_RING_MS;
+        open_ok(rom, saves, "latency", NULL);
+        buffer_ms = 0;
+        for (;;) {
+            double pull_at = pulls * pull_every;
+            if (pull_at > secs) break;
+            if (frame_at <= pull_at) {
+                if (frame_at >= warm) { // the fill over time, for the average
+                    area += player_audio_queued() * (frame_at - since);
+                    since = frame_at;
+                }
+                player_run();
+                frames++;
+                rng = rng * 1103515245u + 12345u;
+                double u = (double)((rng >> 8) & 0xffff) / 65535.0;
+                frame_at = frames * frame + RUN[r].cost_min + (RUN[r].cost_max - RUN[r].cost_min) * u;
+                continue;
+            }
+            int queued = player_audio_queued();
+            if (pull_at >= warm) {
+                area += queued * (pull_at - since);
+                since = pull_at;
+            }
+            int real = player_audio_read(buf, period);
+            if (real > 0) started = 1;
+            if (started && real < period) underruns++;
+            if (pull_at >= warm) {
+                if (queued > max_fill) max_fill = queued;
+                if (queued - real < min_fill) min_fill = queued - real;
+            }
+            pulls++;
+        }
+        double mean_ms = 1000.0 * area / (since - warm) / OUT_RATE;
+        double total_ms = mean_ms + 1000.0 * PLATFORM_AUDIO_PERIODS * period / OUT_RATE;
+        printf("  skew %.4f, frames done %2.0f-%2.0f ms late: ring %.1f ms on average, %.1f-%.1f, "
+               "~%.0f ms to the speaker, %ld underruns\n",
+               RUN[r].skew, RUN[r].cost_min * 1e3, RUN[r].cost_max * 1e3, mean_ms,
+               1000.0 * min_fill / OUT_RATE, 1000.0 * max_fill / OUT_RATE, total_ms, underruns);
+        CHECK(started, "skew %.4f: no sound was ever read", RUN[r].skew);
+        CHECK(underruns == 0, "skew %.4f: the ring ran dry %ld times", RUN[r].skew, underruns);
+        CHECK(mean_ms < PLATFORM_AUDIO_RING_MS + 8, "skew %.4f: the ring held %.1f ms on average, want ~%d",
+              RUN[r].skew, mean_ms, PLATFORM_AUDIO_RING_MS);
+        CHECK(total_ms < 70, "skew %.4f: ~%.0f ms from the game to the speaker", RUN[r].skew, total_ms);
+        player_close();
+    }
+    printf("audio latency\n");
+}
+
+// Priming: after a flush nothing is read until the ring holds the target, so playback
+// restarts with its cushion rather than running dry on the first period.
+static void test_audio_priming(void)
+{
+    int16_t buf[PLATFORM_AUDIO_PERIOD * 2];
+    const int target = OUT_RATE * PLATFORM_AUDIO_RING_MS / 1000;
+
+    buffer_ms = PLATFORM_AUDIO_RING_MS;
+    open_ok(rom, saves, "priming", NULL);
+    buffer_ms = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        player_run(); // ~804 frames: less than the 24 ms target
+        CHECK(player_audio_queued() > 0 && player_audio_queued() < target, "one frame should be under the target");
+        CHECK(player_audio_read(buf, PLATFORM_AUDIO_PERIOD) == 0, "pass %d: read before the ring is primed", pass);
+        CHECK(player_audio_queued() > 0, "pass %d: an unprimed read must not take anything", pass);
+        player_run();
+        CHECK(player_audio_queued() >= target, "two frames should reach the target");
+        CHECK(player_audio_read(buf, PLATFORM_AUDIO_PERIOD) == PLATFORM_AUDIO_PERIOD, "pass %d: primed read", pass);
+        player_run(); // once primed it reads whatever there is
+        while (player_audio_read(buf, PLATFORM_AUDIO_PERIOD) == PLATFORM_AUDIO_PERIOD) {}
+        CHECK(player_audio_queued() == 0, "a primed ring reads to the end");
+        player_audio_flush();
+    }
+    player_close();
+    printf("audio priming\n");
 }
 
 int main(int argc, char **argv)
@@ -644,6 +743,8 @@ int main(int argc, char **argv)
     test_reopen_cycles();
     test_audio_timing();
     test_audio_drc();
+    test_audio_latency();
+    test_audio_priming();
 
     rm_rf(work);
     printf("all %d checks passed\n", check_count);

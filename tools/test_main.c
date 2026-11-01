@@ -127,7 +127,8 @@ static int game_starts;
 static void times(const char *call)
 {
     double now = platform_now();
-    if (!strcmp(call, "perf_on")) game_starts++;
+    // A game starting turns its sound on; the CPU clock also goes up for the exit save.
+    if (!strcmp(call, "audio_on")) game_starts++;
     if (!strcmp(call, "perf_on") && at_game < 0) marker_at_game = access(marker, F_OK) == 0;
     if (!strcmp(call, "dim_on") && at_dim < 0) at_dim = now;
     if (!strcmp(call, "dim_off") && at_undim < 0) at_undim = now;
@@ -153,6 +154,7 @@ static void run(const char *name, void (*scenario)(void))
     pid_t pid = fork();
     if (pid < 0) { perror("fork"); failures++; return; }
     if (pid == 0) {
+        failures = 0; // this scenario's own, not the ones before it
         scenario();
         fflush(NULL);
         _exit(failures ? 1 : 0);

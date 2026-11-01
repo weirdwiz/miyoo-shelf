@@ -21,7 +21,10 @@ read of its register 0 means Mini Plus (Onion: `axp 0`). The Plus also has
 
 `/dev/fb0`, 640x480, 32 bpp XRGB, virtual height of at least two pages; pan with
 `FBIOPAN_DISPLAY` (it waits for vblank). The panel is mounted upside down, so frames are
-rotated 180 degrees before scan-out.
+rotated 180 degrees before scan-out. Games run on the clock at the core's frame rate
+(59.7275 fps for GB and GBA), not the panel's: a frame goes to the hidden page and a
+flipper thread pans to it at the next vblank, so at 60 Hz one frame in ~220 stays up for
+two refreshes. *Unverified*: the panel's refresh rate (the probe measures it).
 
 Later units (Mini v4 from late 2023, later Mini Plus) have a 752x560 panel timing with a
 750x559 visible area. Onion reads it from `Current TimingWidth=` in
@@ -67,6 +70,12 @@ SigmaStar MI_AO through `libmi_sys.so` and `libmi_ao.so`: `MI_SYS_Init`,
 `MI_AO_SendFrame(0, 0, &frame, timeout_ms)` with interleaved s16 stereo. Shelf loads these
 with `dlopen` so the same binary also runs where they are absent (the VM).
 
+Latency: Shelf sends 512-sample periods into a 3-period AO buffer (`u32PtNumPerFrm` 512,
+`u32FrmNum` 3) behind a game ring kept around 24 ms, ~60 ms from the game to the speaker;
+the constants are together in `src/platform.h`. *Unverified*: that MI_AO takes buffers
+that small and plays them without underruns. Crackle in games would mean a longer period
+or a deeper buffer there.
+
 Volume in dB, -60..+30: `MI_AO_SetVolume(0, db)`, or the `/dev/mi_ao` ioctls
 `MI_AO_SETVOLUME 0x4008690b`, `MI_AO_GETVOLUME 0xc008690c`, `MI_AO_SETMUTE 0x4008690d` with
 `uint64_t arg[2] = {sizeof(int[2]), (uintptr_t)int[2]{0, value}}`. Level 0-20 maps to
@@ -92,6 +101,8 @@ There's no kernel suspend (`/sys/power/state` offers none). Standby is a softwar
 pause emulation, mute audio, backlight 0, panel off (GPIO 4), CPU governor `powersave`
 (`/sys/devices/system/cpu/cpufreq/policy0/scaling_governor`), then wait for POWER. Shelf
 saves the game after the panel is off, and powers off after 10 minutes asleep. Games run
-on `performance`; the home screen and the paused in-game menu on `ondemand`.
+on `performance`, from before the core and ROM load until the save on the way out is
+written (also when leaving from the menu, or powering off with the panel already dark);
+the home screen and the paused in-game menu on `ondemand`.
 Power off: `sync`, then `poweroff` (*unverified* on the Plus, where Onion uses its own
 `shutdown` script). Every save, and the resume marker, is written and `fsync`ed before.
