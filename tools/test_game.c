@@ -12,6 +12,7 @@
 #include "../src/game.h"
 #include "../src/icons.h"
 #include "../src/library.h"
+#include "../src/text.h"
 #include "../src/ui.h"
 #include "fake_platform.h"
 
@@ -487,6 +488,10 @@ int main(int argc, char **argv)
     CHECK(!resumes()[0]);
     CHECK(chmod(dir, 0755) == 0);
 
+    // Every in-game menu above opened the same loaded UI: the two font files (Bold and
+    // ExtraBold) were read once for the whole run, not once per menu.
+    CHECK(font_files_read() == 2);
+    ui_free();
     icons_free();
     lib_free(&lib);
     if (failures) return 1;

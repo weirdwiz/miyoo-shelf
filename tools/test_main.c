@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "../src/library.h"
+#include "../src/text.h"
 #include "fake_platform.h"
 
 int shelf_main(void);
@@ -122,9 +123,11 @@ static int frame_counter(const Image *f)
 // When each logged call first happened, for the checks.
 static double at_dim, at_undim, at_standby, at_wake, at_off, at_game;
 static int marker_at_game = -1; // the marker still existed when the game started
+static int game_starts;
 static void times(const char *call)
 {
     double now = platform_now();
+    if (!strcmp(call, "perf_on")) game_starts++;
     if (!strcmp(call, "perf_on") && at_game < 0) marker_at_game = access(marker, F_OK) == 0;
     if (!strcmp(call, "dim_on") && at_dim < 0) at_dim = now;
     if (!strcmp(call, "dim_off") && at_undim < 0) at_undim = now;
@@ -139,6 +142,7 @@ static void start(double limit)
     fp_reset();
     fp_limit(limit);
     at_dim = at_undim = at_standby = at_wake = at_off = at_game = -1;
+    game_starts = 0;
     fp_on_call(times);
 }
 
@@ -229,6 +233,23 @@ static void boots_into_the_game(void)
     CHECK(marked(""));
 }
 
+// Home -> game -> menu -> home, three times over: the UI is loaded once (Bold and
+// ExtraBold are each read from the card once), however often home and the menu open.
+static void cycles_read_fonts_once(void)
+{
+    start(120);
+    for (int i = 0; i < 3; i++) {
+        double t = 1 + i * 10;
+        fp_press_at(t, BTN_A);        // home: play Alpha
+        fp_press_at(t + 4, BTN_MENU); // the in-game menu
+        fp_press_at(t + 6, BTN_B);    // back to Shelf
+    }
+    fp_press_at(40, BTN_QUIT);
+    CHECK(shelf_main() == 0);
+    CHECK(font_files_read() == 2);
+    CHECK(game_starts == 3);      // each visit really played, then came home
+}
+
 // No marker: home.
 static void boots_home(void)
 {
@@ -311,6 +332,7 @@ int main(int argc, char **argv)
     run("then home again", boots_home);
     run("home powers off", home_powers_off);
     run("and boots home", boots_home);
+    run("home and menu cycles load the fonts once", cycles_read_fonts_once);
     run("a resume that fails is tried once", bad_resume_tried_once);
     run("then home", boots_home);
     run("an unknown game isn't resumed", unknown_game);

@@ -97,6 +97,7 @@ make test         # library, UI, loop, graphics and full play-session tests
 make test-player  # libretro host against a fake core (make test-player-asan for sanitizers)
 make test-updater # the boot script, on the host
 make shots        # regenerate docs/screenshots (no dependencies)
+make bench-ui     # how long the home screen and in-game menu take to come up, cycle after cycle
 ```
 
 On a real device, an empty `.shelf/probe` file on the card makes the next boot write a
@@ -120,7 +121,9 @@ an emulated CPU. `docs/hardware.md` lists what Shelf touches on the real device;
 marked *unverified* there — battery percentage on the Mini Plus, power off, and the audio
 setup — have not been checked on hardware yet.
 
-Code: `src/main.c` orchestration, `ui.c` screens, `game.c` play session and in-game menu,
+Code: `src/main.c` orchestration, `ui.c` screens (loaded once and entered per visit: fonts,
+glyphs, background and sprites stay resident, about 6 MB, while a game runs; see `ui.h`),
+`game.c` play session and in-game menu,
 `player.c` libretro host, `scale.c` game scaling, `library.c` card scan plus recents,
 favorites and play time, `icons.c` art cache, `platform_mm.c` the device (fb0, evdev, SDL 1.2
 audio, sysfs), `platform_sdl2.c` the simulator.

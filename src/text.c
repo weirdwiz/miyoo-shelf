@@ -20,6 +20,10 @@ typedef struct {
 } Glyph;
 
 struct Font {
+    char path[512];
+    float px;
+    int refs;
+    Font *next;
     unsigned char *data;
     stbtt_fontinfo info;
     float scale;
@@ -29,6 +33,12 @@ struct Font {
 
 // Several Font sizes share one file in memory.
 static struct { char path[512]; unsigned char *data; int refs; } files[4];
+static unsigned file_reads;
+// Fonts in use, so asking for the same file and size again shares the face and its glyph
+// cache instead of rasterizing every glyph twice.
+static Font *loaded;
+
+unsigned font_files_read(void) { return file_reads; }
 
 static unsigned char *file_acquire(const char *path)
 {
@@ -43,6 +53,7 @@ static unsigned char *file_acquire(const char *path)
     if (data && fread(data, 1, n, fp) != (size_t)n) { free(data); data = NULL; }
     fclose(fp);
     if (!data) return NULL;
+    file_reads++;
     for (int i = 0; i < 4; i++)
         if (!files[i].data) {
             snprintf(files[i].path, sizeof files[i].path, "%s", path);
@@ -61,14 +72,22 @@ static void file_release(unsigned char *data)
 
 Font *font_load(const char *path, float px)
 {
+    for (Font *l = loaded; l; l = l->next)
+        if (l->px == px && !strcmp(l->path, path)) { l->refs++; return l; }
     Font *f = calloc(1, sizeof *f);
     if (!f) return NULL;
     f->data = file_acquire(path);
     if (!f->data || !stbtt_InitFont(&f->info, f->data, stbtt_GetFontOffsetForIndex(f->data, 0))) {
         fprintf(stderr, "shelf: cannot load font %s\n", path);
+        if (f->data) file_release(f->data);
         free(f);
         return NULL;
     }
+    snprintf(f->path, sizeof f->path, "%s", path);
+    f->px = px;
+    f->refs = 1;
+    f->next = loaded;
+    loaded = f;
     f->scale = stbtt_ScaleForPixelHeight(&f->info, px);
     int asc, desc, gap;
     stbtt_GetFontVMetrics(&f->info, &asc, &desc, &gap);
@@ -79,7 +98,9 @@ Font *font_load(const char *path, float px)
 
 void font_free(Font *f)
 {
-    if (!f) return;
+    if (!f || --f->refs > 0) return;
+    for (Font **p = &loaded; *p; p = &(*p)->next)
+        if (*p == f) { *p = f->next; break; }
     for (int i = 0; i < CACHE_SIZE; i++) free(f->cache[i].bitmap);
     file_release(f->data);
     free(f);

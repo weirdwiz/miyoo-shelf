@@ -6,8 +6,12 @@
 
 typedef struct Font Font;
 
+// Loading a path and size that is already loaded returns the same Font (and glyph cache),
+// so every font_load wants its own font_free.
 Font *font_load(const char *path, float px);
 void font_free(Font *f);
+// Font files read from disk so far (loading another size of a file in use reads nothing).
+unsigned font_files_read(void);
 int font_height(const Font *f); // ascent - descent, in pixels
 int text_width(Font *f, const char *s);
 // Draws with the top of the line box at y. Returns the advance.

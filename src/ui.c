@@ -82,16 +82,28 @@ typedef struct {
 enum { V_HOME, V_FOLDER };
 static const char *SORTS[] = {"A–Z", "Recent first", "Favorites first"};
 
+// Everything up to `view` is resident: loaded once and kept for the whole process, because
+// rebuilding it on every visit to the home screen or the in-game menu is what made both
+// slow to open (fonts and their glyphs from the SD card, the background, the folders).
+// Everything from `view` on is the state of one visit and is zeroed when the next one
+// begins (view_reset), so a field added there needs no extra care. The sprite caches below
+// (tiles, footer, detail panel) are resident too; they are keyed on what they were drawn
+// from and are dropped by ui_set_dark.
 static struct {
     Library *lib;
-    Font *title, *body, *small, *label;
-    Image *bg, *layer, *scene;
-    int scene_dirty;
-    unsigned art_revision, scene_builds;
+    char font_dir[PATH_LEN];
+    int loaded;              // the resident part is built
+    Font *title, *body, *small, *label; // body and small are the same face and size: one Font
+    Image *bg, *layer, *scene; // bg is always in the user's palette
     Folder folders[MAX_SYSTEMS + 2];
     int nfolders;
+    int dark;                // the user's palette index (the switcher always draws dark)
+    Settings set;            // Options panel values; see ui_set_settings
+    int battery, charging;   // see ui_set_status
 
-    int view;
+    int view;                // from here on: this visit's state
+    int scene_dirty;
+    unsigned art_revision, scene_builds;
     int redraw;              // the next ui_draw would differ from the last one
     long drawn_minute;       // status clock minute, art and card revisions last drawn
     unsigned drawn_art, drawn_cards;
@@ -116,15 +128,14 @@ static struct {
     int launch_ready;
     int sound;               // pending UI click
 
-    int dark;                // palette index
-    Settings set;            // Options panel values; see ui_set_settings
     int options, osel;       // Options panel open, its selected row
     int oconfirm;            // "power off?" is waiting for a second A
     int action;              // pending UiAction
-    int battery, charging;   // see ui_set_status
     char toast[128];         // message over the home screen, "" when none
     double toast_set;         // wall seconds when it was set; it lives on wall time
 } S;
+// Zeroes this visit's state (the heap blocks it owns are freed first, see view_reset).
+#define VIEW_ZERO() memset(&S.view, 0, sizeof S - (size_t)((char *)&S.view - (char *)&S))
 
 // Options rows, top to bottom.
 enum { O_BRIGHT, O_VOLUME, O_SCREEN, O_DARK, O_OFF, O_COUNT };
@@ -189,20 +200,54 @@ static void folders_refresh(void)
     }
 }
 
+// Draws the dot background in the user's palette, replacing the old one (kept when out of
+// memory: old dots rather than none).
 static int build_bg(void)
 {
-    S.bg = img_new(SCREEN_W, SCREEN_H);
-    if (!S.bg) return -1;
-    gfx_clear(S.bg, rgb(C_BG));
+    Image *bg = img_new(SCREEN_W, SCREEN_H);
+    if (!bg) return -1;
+    gfx_clear(bg, rgb(PALETTES[S.dark].bg));
     for (int y = 8; y < SCREEN_H; y += 16)
-        for (int x = 8; x < SCREEN_W; x += 16) gfx_fill_rrect(S.bg, x - 1.3f, y - 1.3f, 2.6f, 2.6f, 1.3f, rgb(C_DOT));
+        for (int x = 8; x < SCREEN_W; x += 16)
+            gfx_fill_rrect(bg, x - 1.3f, y - 1.3f, 2.6f, 2.6f, 1.3f, rgb(PALETTES[S.dark].dot));
+    img_free(S.bg);
+    S.bg = bg;
     return 0;
 }
 
-int ui_init(Library *lib, const char *font_dir)
+static void sw_leave(void);
+static void sw_free(void);
+
+static void folders_free(void)
 {
+    for (int i = 0; i < S.nfolders; i++) free(S.folders[i].games);
+    memset(S.folders, 0, sizeof S.folders);
+    S.nfolders = 0;
+}
+
+// The folders list the library as it is now: recents and favorites change between visits.
+static int folders_build(void)
+{
+    folders_free();
+    int bad = add_folder(F_ALL, -1, "All games", 0x2b3040) || add_folder(F_FAV, -1, "Favorites", 0xa8610a);
+    for (int i = 0; !bad && i < S.lib->nsys; i++)
+        bad = add_folder(F_SYS, i, S.lib->sys[i].label, S.lib->sys[i].color);
+    if (bad) folders_free();
+    return bad;
+}
+
+// Loads what stays for the whole process: the fonts (each file read once; body and small
+// are the same face and size and so one Font with one glyph cache), the frame buffers and
+// the background. A no-op while loaded from the same font folder.
+static int resident_load(const char *font_dir)
+{
+    if (S.loaded && !strcmp(S.font_dir, font_dir)) return 0;
+    if (S.loaded) ui_free(); // another font folder: start over
+    int dark = P == &PALETTES[1]; // what ui_set_dark chose before the first ui_init
     memset(&S, 0, sizeof S);
-    S.lib = lib;
+    S.dark = dark;
+    P = &PALETTES[dark];
+    snprintf(S.font_dir, sizeof S.font_dir, "%s", font_dir);
     char bold[PATH_LEN], xbold[PATH_LEN];
     snprintf(bold, sizeof bold, "%s/Shelf-Bold.ttf", font_dir);
     snprintf(xbold, sizeof xbold, "%s/Shelf-ExtraBold.ttf", font_dir);
@@ -213,28 +258,63 @@ int ui_init(Library *lib, const char *font_dir)
     S.small = font_load(bold, 18);
     S.layer = img_new(SCREEN_W, SCREEN_H);
     S.scene = img_new(SCREEN_W, SCREEN_H);
-    S.scene_dirty = 1;
-    int bad = !S.title || !S.body || !S.small || !S.label || !S.layer || !S.scene || build_bg() ||
-              add_folder(F_ALL, -1, "All games", 0x2b3040) || add_folder(F_FAV, -1, "Favorites", 0xa8610a);
-    for (int i = 0; !bad && i < lib->nsys; i++) bad = add_folder(F_SYS, i, lib->sys[i].label, lib->sys[i].color);
-    if (bad) { ui_free(); return -1; } // ui_free undoes any part of this
-
-    S.launching = -1;
-    S.battery = -1;
-    S.dark = P == &PALETTES[1];
+    if (!S.title || !S.body || !S.small || !S.label || !S.layer || !S.scene || build_bg()) {
+        ui_free(); // undoes any part of this
+        return -1;
+    }
     settings_defaults(&S.set);
     S.set.dark = S.dark;
-    S.enter.x = S.enter.t = 1;
-    for (int i = 0; i < home_count(); i++) S.hscale[i].x = S.hscale[i].t = 1;
-    S.track.x = S.track.t = CENTER_X;
-    S.redraw = 1;
+    S.battery = -1;
+    S.loaded = 1;
     return 0;
 }
 
+// Starts a visit: this visit's state back to a blank page, the folders rebuilt from the
+// library, the palette the user's. The caches stay, and are told what may have changed.
+static int view_reset(void)
+{
+    sw_leave();
+    free(S.fgames);
+    free(S.fscale);
+    VIEW_ZERO();
+    P = &PALETTES[S.dark];
+    if (folders_build()) { ui_free(); return -1; }
+    S.launching = -1;
+    S.enter.x = S.enter.t = 1;
+    for (int i = 0; i < home_count(); i++) S.hscale[i].x = S.hscale[i].t = 1;
+    S.track.x = S.track.t = CENTER_X;
+    S.scene_dirty = S.redraw = 1;
+    panel_invalidate(); // play time, sessions and last played moved on while away
+    return 0;
+}
+
+int ui_loaded(void) { return S.loaded; }
+
+int ui_init(Library *lib, const char *font_dir)
+{
+    if (resident_load(font_dir)) return -1;
+    S.lib = lib;
+    return view_reset();
+}
+
+int ui_enter_home(void)
+{
+    return S.loaded ? view_reset() : -1;
+}
+
+// The visit is over: what it borrowed (the switcher's screenshots and hooks) goes, and
+// the palette is the user's again. Fonts, glyphs, background and sprite caches stay.
+void ui_leave(void)
+{
+    sw_leave();
+    if (S.loaded) P = &PALETTES[S.dark];
+}
+
+// The process is done with the UI: frees everything, resident part included.
 void ui_free(void)
 {
     sw_free();
-    for (int i = 0; i < S.nfolders; i++) free(S.folders[i].games);
+    folders_free();
     free(S.fgames);
     free(S.fscale);
     img_free(S.bg);
@@ -243,6 +323,7 @@ void ui_free(void)
     tiles_free();
     status_free();
     font_free(S.title); font_free(S.body); font_free(S.small); font_free(S.label);
+    if (S.loaded) P = &PALETTES[S.dark]; // the switcher may have left the dark one set
     memset(&S, 0, sizeof S);
 }
 
@@ -379,13 +460,16 @@ int ui_take_action(void)
 
 void ui_set_dark(int dark)
 {
-    P = &PALETTES[dark ? 1 : 0];
-    S.dark = dark ? 1 : 0;
-    S.set.dark = S.dark;
-    if (!S.bg) return; // before ui_init: build_bg picks the palette up
-    Image *old = S.bg;
-    if (build_bg()) S.bg = old; // out of memory: keep the old dots rather than none
-    else img_free(old);
+    dark = dark ? 1 : 0;
+    if (!S.loaded) { // before ui_init: ui_init picks the palette up from P
+        P = &PALETTES[dark];
+        return;
+    }
+    int changed = dark != S.dark;
+    S.dark = S.set.dark = dark;
+    P = sw_on() ? &PALETTES[1] : &PALETTES[dark]; // the switcher is dark whatever the theme
+    if (!changed) return;
+    build_bg(); // out of memory keeps the old dots rather than none
     tiles_free(); // sprites carry the palette's shadow; the footer strip its background
     S.scene_dirty = S.redraw = 1;
 }
@@ -755,6 +839,7 @@ static void draw_folder_raw(Image *c, const Folder *f, float cx, float cy, float
 #define TILE_PAD 8
 typedef struct {
     int kind, id, size, big;
+    unsigned stamp;      // what a folder's tile shows besides art: its game count, name and colour
     const Image *source; // icon the sprite was built from: the game's art, or a folder's first with art
     Image *image;
     unsigned used;
@@ -786,15 +871,27 @@ static void tiles_free(void)
     tile_clock = 0;
 }
 
+// A game's tile only changes with its art; a folder's also with its count (a favorite
+// toggled, or a library that changed while the sprites stayed resident).
+static unsigned tile_stamp(int kind, int id)
+{
+    if (kind == 0) return 0;
+    const Folder *f = &S.folders[id];
+    unsigned h = (unsigned)f->ngames * 2654435761u ^ f->color;
+    for (const char *c = f->label; *c; c++) h = h * 31 + (unsigned char)*c;
+    return h;
+}
+
 static const Image *tile_sprite(int kind, int id, int size, int big)
 {
     const Image *source = kind == 0 ? icon_get(id, big) : folder_thumb(&S.folders[id]);
+    unsigned stamp = tile_stamp(kind, id);
     TileSprite *slot = NULL;
     for (int i = 0; i < TILE_CACHE_CAP; i++) {
         TileSprite *t = &tiles[i];
         if (t->image && t->kind == kind && t->id == id &&
             t->size == size && t->big == big) {
-            if (t->source == source) {
+            if (t->source == source && t->stamp == stamp) {
                 t->used = ++tile_clock;
                 return t->image;
             }
@@ -809,6 +906,7 @@ static const Image *tile_sprite(int kind, int id, int size, int big)
     slot->kind = kind; slot->id = id; slot->size = size; slot->big = big;
     slot->used = ++tile_clock;
     slot->source = source;
+    slot->stamp = stamp;
     float center = TILE_PAD + size / 2.f;
     if (kind == 0) draw_game_raw(slot->image, id, center, center, size, big);
     else draw_folder_raw(slot->image, &S.folders[id], center, center, size);
@@ -1452,16 +1550,19 @@ void ui_draw(Image *c)
 #define SW_SMALL .86f
 #define SW_SPRITE_PAD 8
 
+// The switcher's resident part is its selection ring and the two chrome bands' buffers;
+// from `on` on is one visit's state (sw_leave).
 static struct {
+    uint8_t *ring;             // selection ring coverage at full card size, 9-sliced
+    Band top, bottom;          // status, notice and titles; position dots and footer
+
     int on, running;           // switcher view; over a paused game, recents[0] is it
     const Image *(*card)(int), *(*full)(int);
     void (*select)(int);
     unsigned (*revision)(void);
     Image *sprites[MAX_RECENT];
     Image *small[MAX_RECENT];  // sprites[i] at SW_SMALL, for cards at rest
-    uint8_t *ring;             // selection ring coverage at full card size, 9-sliced
     const Image *sprite_src[MAX_RECENT], *sprite_icon[MAX_RECENT];
-    Image *home_bg;           // Shelf's own background: B fades to it, as Shelf starts on it
     Spring zoom;              // 0: selected card fills the screen, 1: in the row
     int closing, close_to;    // UI_SW_* being animated to, and the recent
     float home_t;             // B: fade-out progress
@@ -1469,8 +1570,8 @@ static struct {
     int layer_ok;             // S.layer holds the scene behind a zoom; reused while it's still
     unsigned layer_rev;       // card + art revisions it was drawn with
     char notice[64];          // a question over the row ("Restart the game?"); "" when none
-    Band top, bottom;         // status, notice and titles; position dots and footer
 } W;
+#define SW_ZERO() memset(&W.on, 0, sizeof W - (size_t)((char *)&W.on - (char *)&W))
 
 void ui_switch_hooks(const Image *(*card)(int), const Image *(*full)(int), void (*select)(int),
                      unsigned (*revision)(void))
@@ -1519,16 +1620,21 @@ static void sw_select(int i)
     if (W.select) W.select(i);
 }
 
-int ui_init_switcher(Library *lib, const char *font_dir, int from_game, int running)
+// Shelf's own background is what B fades to, as Shelf starts on it: S.bg, in the user's
+// palette. The row itself is drawn dark, over a dimmed game.
+int ui_enter_switcher(int from_game, int running)
 {
-    if (ui_init(lib, font_dir)) return -1;
+    if (!S.loaded) return -1;
+    // The hooks are set before the visit begins and go with it (ui_leave).
+    const Image *(*card)(int) = W.card, *(*full)(int) = W.full;
+    void (*select)(int) = W.select;
+    unsigned (*revision)(void) = W.revision;
+    if (view_reset()) return -1;
+    W.card = card; W.full = full; W.select = select; W.revision = revision;
     W.on = 1;
     W.running = running;
-    W.home_bg = S.bg;     // in the user's palette
-    P = &PALETTES[1];     // the switcher is always dark: it sits over a dimmed game
-    S.bg = NULL;
-    if (build_bg()) { ui_free(); return -1; }
-    for (int k = 0; k < lib->nrecent; k++) S.hscale[k].x = S.hscale[k].t = SW_SMALL;
+    P = &PALETTES[1];
+    for (int k = 0; k < S.lib->nrecent; k++) S.hscale[k].x = S.hscale[k].t = SW_SMALL;
     sw_select(0);
     S.track.x = S.track.t;
     S.hscale[0].x = 1;
@@ -1538,11 +1644,32 @@ int ui_init_switcher(Library *lib, const char *font_dir, int from_game, int runn
     return 0;
 }
 
-static void sw_free(void)
+int ui_init_switcher(Library *lib, const char *font_dir, int from_game, int running)
+{
+    // Hooks set for this visit survive a resident reload (another font folder).
+    const Image *(*card)(int) = W.card, *(*full)(int) = W.full;
+    void (*select)(int) = W.select;
+    unsigned (*revision)(void) = W.revision;
+    if (resident_load(font_dir)) return -1;
+    W.card = card; W.full = full; W.select = select; W.revision = revision;
+    S.lib = lib;
+    return ui_enter_switcher(from_game, running);
+}
+
+// A visit ends: the screenshots it showed (and the sprites made from them) are the game
+// menu's to free, so they go now. The ring and the bands' buffers stay.
+static void sw_leave(void)
 {
     for (int i = 0; i < MAX_RECENT; i++) { img_free(W.sprites[i]); img_free(W.small[i]); }
+    SW_ZERO();
+    // What the bands drew (titles, selection) belongs to the recents of that visit.
+    W.top.key[0] = W.bottom.key[0] = 0;
+}
+
+static void sw_free(void)
+{
+    sw_leave();
     free(W.ring);
-    img_free(W.home_bg);
     band_free(&W.top); band_free(&W.bottom);
     memset(&W, 0, sizeof W);
 }
@@ -1802,7 +1929,7 @@ static void sw_draw(Image *c)
         sw_draw_scene(S.layer, 0);
         W.layer_ok = 0;
         float a = W.home_t > 1 ? 1 : W.home_t;
-        gfx_lerp(c, S.layer, W.home_bg, (uint8_t)(a * 255));
+        gfx_lerp(c, S.layer, S.bg, (uint8_t)(a * 255));
         return;
     }
     float z = W.zoom.x;

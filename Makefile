@@ -3,6 +3,7 @@
 #   make run       build + run the simulator against fixture/SDCARD
 #   make fixture   (re)build the sample SD card
 #   make test      build and run the tests
+#   make bench-ui  time the home screen and in-game menu coming up (host)
 #   make shots     headless screenshots into docs/screenshots
 #   make mm        cross-compile for the Miyoo in its toolchain container (podman or docker)
 #   make clean
@@ -22,10 +23,10 @@ FIXTURE := fixture/SDCARD
 # wait for.
 FIXTURE_READY := $(FIXTURE)/.shelf/data/recents.json
 
-.PHONY: sim run fixture clean test shots mm mm-inner
+.PHONY: sim run fixture clean test shots mm mm-inner bench-ui
 
 test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUILD)/test-scale $(BUILD)/test-fb-geometry \
-      $(BUILD)/test-ui-cache $(BUILD)/test-loop $(BUILD)/test-ui-alloc $(BUILD)/test-game $(BUILD)/test-palette $(BUILD)/test-power $(BUILD)/test-hw-mm $(BUILD)/test-main $(FIXTURE_READY)
+      $(BUILD)/test-ui-cache $(BUILD)/test-ui-resident $(BUILD)/test-loop $(BUILD)/test-ui-alloc $(BUILD)/test-game $(BUILD)/test-palette $(BUILD)/test-power $(BUILD)/test-hw-mm $(BUILD)/test-main $(FIXTURE_READY)
 	$(BUILD)/test-scale
 	$(BUILD)/test-fb-geometry
 	$(BUILD)/test-power
@@ -35,6 +36,7 @@ test: $(BUILD)/test-library $(BUILD)/test-rrect $(BUILD)/test-scaled-blit $(BUIL
 	$(BUILD)/test-scaled-blit
 	$(BUILD)/test-palette "$(CURDIR)/$(FIXTURE)" "$(CURDIR)/assets/fonts"
 	$(BUILD)/test-ui-cache "$(CURDIR)/$(FIXTURE)" "$(CURDIR)/assets/fonts"
+	$(BUILD)/test-ui-resident "$(CURDIR)/$(FIXTURE)" "$(CURDIR)/assets/fonts"
 	$(BUILD)/test-loop "$(CURDIR)/$(FIXTURE)" "$(CURDIR)/assets/fonts"
 	$(BUILD)/test-ui-alloc "$(CURDIR)/$(FIXTURE)" "$(CURDIR)/assets/fonts"
 	$(BUILD)/test-game "$(CURDIR)/$(BUILD)/test-game-work" "$(CURDIR)/assets/fonts" "$(CURDIR)/$(BUILD)/fake_core.so"
@@ -56,12 +58,24 @@ $(BUILD)/test-ui-cache: tools/test_ui_cache.c src/ui.c src/icons.c src/library.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tools/test_ui_cache.c src/icons.c src/library.c src/settings.c src/text.c src/gfx.c third_party/cJSON.c -lm
 
+$(BUILD)/test-ui-resident: tools/test_ui_resident.c src/ui.c src/icons.c src/library.c src/settings.c src/text.c src/gfx.c $(wildcard src/*.h)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -o $@ tools/test_ui_resident.c src/icons.c src/library.c src/settings.c src/text.c src/gfx.c third_party/cJSON.c -lm -lpthread
+
 # The UI's sources with every allocation routed through the fault injector.
 FAILALLOC_SRC := src/ui.c src/icons.c src/text.c src/gfx.c
 $(BUILD)/test-ui-alloc: tools/test_ui_alloc.c tools/failalloc.c tools/failalloc.h $(FAILALLOC_SRC) src/library.c $(wildcard src/*.h)
 	@mkdir -p $(BUILD)/failalloc
 	for f in $(FAILALLOC_SRC); do $(CC) $(CFLAGS) -include tools/failalloc.h -c $$f -o $(BUILD)/failalloc/$$(basename $$f .c).o || exit 1; done
 	$(CC) $(CFLAGS) -o $@ tools/test_ui_alloc.c tools/failalloc.c $(patsubst src/%.c,$(BUILD)/failalloc/%.o,$(FAILALLOC_SRC)) src/library.c src/settings.c third_party/cJSON.c -lm -lpthread
+
+# How long the home screen and the in-game menu take to come up, cycle after cycle.
+$(BUILD)/bench-ui: tools/bench_ui.c src/ui.c src/icons.c src/library.c src/settings.c src/text.c src/gfx.c $(wildcard src/*.h) Makefile
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(BENCH_FLAGS) -Wl,--wrap=fopen -DBENCH_RESIDENT -o $@ tools/bench_ui.c src/ui.c src/icons.c src/library.c src/settings.c src/text.c src/gfx.c third_party/cJSON.c -lm -lpthread
+
+bench-ui: $(BUILD)/bench-ui $(FIXTURE_READY)
+	$(BUILD)/bench-ui "$(CURDIR)/$(FIXTURE)" "$(CURDIR)/assets/fonts" $(CYCLES)
 
 $(BUILD)/test-scaled-blit: tools/test_scaled_blit.c src/gfx.c src/gfx.h
 	@mkdir -p $(BUILD)
