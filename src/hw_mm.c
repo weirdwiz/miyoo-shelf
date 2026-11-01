@@ -125,17 +125,46 @@ int hw_volume_db(int level)
 
 int hw_volume_muted(int level) { return level <= 0; }
 
-// Mini SAR ADC counts to battery percent, per docs/hardware.md.
+// Onion's measured Mini Li-ion curve and ADC conversion: https://github.com/OnionUI/Onion/blob/main/src/batmon/batmon.c
+static const struct { double v, pct; } battery_curve[] = {
+    {4.20,100},{4.13,95},{4.06,90},{4.02,85},{3.99,80},{3.95,75},
+    {3.92,70},{3.88,65},{3.85,60},{3.81,55},{3.78,50},{3.74,45},
+    {3.71,40},{3.67,35},{3.64,30},{3.56,25},{3.49,20},{3.42,15},
+    {3.30,10},{3.14,5},{3.00,0}
+};
+
 int hw_adc_percent(int adc)
 {
-    double pct;
-    if (adc >= 578) return 100;
-    if (adc >= 528) pct = adc - 478.0;
-    else if (adc >= 512) pct = adc * 2.125 - 1068.0;
-    else if (adc >= 480) pct = adc * 0.51613 - 243.742;
-    else return 0;
-    int p = (int)lround(pct);
-    return p < 0 ? 0 : (p > 100 ? 100 : p);
+    double v = (adc - 148) * 0.01;
+    if (v >= battery_curve[0].v) return 100;
+    for (size_t i = 0; i + 1 < sizeof battery_curve / sizeof battery_curve[0]; i++) {
+        if (v <= battery_curve[i].v && v > battery_curve[i + 1].v) {
+            double pct = battery_curve[i + 1].pct +
+                (v - battery_curve[i + 1].v) * (battery_curve[i].pct - battery_curve[i + 1].pct) /
+                (battery_curve[i].v - battery_curve[i + 1].v);
+            return (int)pct;
+        }
+    }
+    return 0;
+}
+
+int hw_mini_percent(int adc, int charging)
+{
+    static int samples[10], count, next, minimum = 101, was_charging;
+    if (charging != was_charging) {
+        count = next = 0;
+        minimum = 101;
+        was_charging = charging;
+    }
+    if (charging) return hw_adc_percent(adc);
+    samples[next] = adc;
+    next = (next + 1) % 10;
+    if (count < 10) count++;
+    int sum = 0;
+    for (int i = 0; i < count; i++) sum += samples[i];
+    int pct = hw_adc_percent(sum / count);
+    if (pct < minimum) minimum = pct;
+    return minimum;
 }
 
 // One "key":<int> field of axp_test's single-line JSON.
@@ -163,7 +192,7 @@ int hw_parse_axp(const char *json, int *charging)
     int pct, ch = 0;
     if (!json || !json_field(json, "battery", &pct)) return -1;
     json_field(json, "charging", &ch);
-    if (charging) *charging = ch != 0;
+    if (charging) *charging = ch == 3;
     return pct < 0 ? 0 : (pct > 100 ? 100 : pct);
 }
 
@@ -379,7 +408,7 @@ static int battery_mini(int *charging)
         } sample = { 0, 0 };
         if (ioctl(fd, SAR_READ, &sample) == 0) {
             *charging = charge_gpio();
-            return hw_adc_percent(sample.adc);
+            return hw_mini_percent(sample.adc, *charging);
         }
     }
 #else

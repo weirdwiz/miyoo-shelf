@@ -16,6 +16,7 @@ int hw_duty(int level);
 int hw_volume_db(int level);
 int hw_volume_muted(int level);
 int hw_adc_percent(int adc);
+int hw_mini_percent(int adc, int charging);
 int hw_parse_axp(const char *json, int *charging);
 
 static char root[512];
@@ -172,16 +173,25 @@ static void test_mappings(void)
     CHECK(hw_volume_db(19) == 2);
     CHECK(hw_volume_db(1) == -46);
 
-    CHECK(hw_adc_percent(578) == 100);
-    CHECK(hw_adc_percent(600) == 100);
-    CHECK(hw_adc_percent(540) == 62);
-    CHECK(hw_adc_percent(520) == 37);
-    CHECK(hw_adc_percent(490) == 9);
-    CHECK(hw_adc_percent(470) == 0);
+    CHECK(hw_adc_percent(568) == 100); // 4.20 V
+    CHECK(hw_adc_percent(561) == 95);  // 4.13 V
+    CHECK(hw_adc_percent(448) == 0);   // 3.00 V
+    CHECK(hw_adc_percent(554) == 90);  // 4.06 V
+    CHECK(hw_adc_percent(557) == 92);  // interpolated between 4.06 and 4.13
+    CHECK(hw_adc_percent(400) == 0);
+    CHECK(hw_mini_percent(561, 1) == 95); // charging resets discharge state
+    CHECK(hw_mini_percent(554, 0) == 90); // transition clears charge history
+    CHECK(hw_mini_percent(568, 0) == 90); // sticky minimum while discharging
+    CHECK(hw_mini_percent(568, 1) == 100); // charging transition clears minimum
+    CHECK(hw_mini_percent(561, 0) == 95); // discharging transition resets sample history
 
     int charging = 7;
     CHECK(hw_parse_axp("{\"battery\":73, \"voltage\":3900, \"charging\":1}", &charging) == 73);
+    CHECK(charging == 0); // axp_test uses 3 for charging
+    CHECK(hw_parse_axp("{\"battery\":73,\"charging\":3}", &charging) == 73);
     CHECK(charging == 1);
+    CHECK(hw_parse_axp("{\"battery\":73,\"charging\":2}", &charging) == 73);
+    CHECK(charging == 0);
     CHECK(hw_parse_axp("{\"battery\":4, \"voltage\":3300, \"charging\":0}", &charging) == 4);
     CHECK(charging == 0);
     CHECK(hw_parse_axp("{\"voltage\":3300}", &charging) == -1);
