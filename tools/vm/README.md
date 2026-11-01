@@ -19,6 +19,12 @@ make vm-selftest  # device-toolchain binary runs, fb0 pans to its second page, k
 | `pixel.py out.png x,y` | prints pixel colours from a screenshot |
 | `stop.sh` | powers off |
 
+To play by hand, boot with a window: `VM_DISPLAY=cocoa sh tools/vm/start.sh` (stop a
+headless VM first), then `make mm dist && sh tools/vm/run_shelf.sh`. With the window
+focused the keyboard is the device's buttons: arrows = d-pad, Space = A, Left Ctrl = B,
+Left Shift = X, Left Alt = Y, E / T = L1 / R1, Tab / Backspace = L2 / R2, Enter = START,
+Right Ctrl = SELECT, Esc = MENU. Ctrl-Alt-G releases a grabbed mouse/keyboard.
+
 Shares (9p): `build/vm/sdcard` (or `VM_SDCARD`) is the guest's `/mnt/SDCARD`; the repo is
 `/mnt/repo`, read-only.
 
