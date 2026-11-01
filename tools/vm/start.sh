@@ -1,7 +1,9 @@
 #!/bin/sh
 # Boots the VM in the background (headless): framebuffer /dev/fb0 640x480x32 with two
 # pages, a virtio keyboard on /dev/input/event*, /mnt/SDCARD and /mnt/repo shared over 9p.
-# VM_DISPLAY=cocoa opens the screen in a window whose keyboard drives Shelf (see README).
+# VM_DISPLAY=cocoa (macOS) or gtk/sdl (Linux) opens the screen in a window whose keyboard
+# drives Shelf (see README). VM_PANEL=752x560 gives the panel of a Mini v4 or a later
+# Mini Plus instead of 640x480.
 set -eu
 . "$(dirname "$0")/common.sh"
 if vm_running; then echo "vm: already running"; exit 0; fi
@@ -9,19 +11,20 @@ if vm_running; then echo "vm: already running"; exit 0; fi
 mkdir -p "$SDCARD"
 rm -f $MON $VM/monitor-rec.sock
 t0=$(date +%s)
-# A window can't survive QEMU's -daemonize fork on macOS, so a windowed VM runs as a plain
-# background process instead.
+# A window can't survive QEMU's -daemonize fork (on macOS at least), so a windowed VM runs
+# as a plain background process instead.
 display=${VM_DISPLAY:-none}
+panel=${VM_PANEL:-640x480}
 detach=-daemonize
 [ "$display" = none ] || detach=
 vm_qemu() {
 qemu-system-arm -M virt,highmem=off -cpu cortex-a15 -smp 2 -m 1024 \
 	-kernel $KERNEL -initrd $INITRD \
-	-append "root=LABEL=cloudimg-rootfs rw console=ttyAMA0 video=640x480 drm_kms_helper.drm_fbdev_overalloc=200 fbcon=map:9 vt.global_cursor_default=0 quiet" \
+	-append "root=LABEL=cloudimg-rootfs rw console=ttyAMA0 video=$panel drm_kms_helper.drm_fbdev_overalloc=200 fbcon=map:9 vt.global_cursor_default=0 quiet" \
 	-drive if=none,file=$DISK,id=hd,format=qcow2 -device virtio-blk-pci,drive=hd \
 	-drive if=none,file=$SEED,id=seed,format=raw,readonly=on -device virtio-blk-pci,drive=seed \
 	-netdev user,id=net,hostfwd=tcp:127.0.0.1:$PORT-:22 -device virtio-net-pci,netdev=net \
-	-device virtio-gpu-pci,xres=640,yres=480 -device virtio-keyboard-pci \
+	-device virtio-gpu-pci,xres=${panel%x*},yres=${panel#*x} -device virtio-keyboard-pci \
 	-virtfs local,path="$SDCARD",mount_tag=sdcard,security_model=none,id=sdcard \
 	-virtfs local,path="$PWD",mount_tag=repo,security_model=none,readonly=on,id=repo \
 	-display $display -monitor unix:$MON,server,nowait \

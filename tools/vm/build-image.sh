@@ -8,7 +8,8 @@ mkdir -p $VM "$SDCARD"
 for f in $BASE_IMG $KERNEL $INITRD; do
 	[ -s "$f" ] || curl -sfL -o "$f.part" "$BASE_URL/$( [ "$f" = $BASE_IMG ] || echo unpacked/)$(basename "$f")" && mv "$f.part" "$f" 2>/dev/null || true
 done
-echo "$BASE_SHA  $BASE_IMG" | shasum -a 256 -c - >/dev/null || { echo "vm: base image checksum mismatch" >&2; exit 1; }
+sha=$(sha256sum $BASE_IMG 2>/dev/null || shasum -a 256 $BASE_IMG)
+[ "${sha%% *}" = $BASE_SHA ] || { echo "vm: base image checksum mismatch" >&2; exit 1; }
 [ -f $KEY ] || ssh-keygen -q -t ed25519 -N '' -C shelf-vm -f $KEY
 if [ ! -f $DISK ]; then
 	qemu-img create -q -f qcow2 -b "$(basename $BASE_IMG)" -F qcow2 $DISK 6G
@@ -36,6 +37,12 @@ runcmd:
   - [sh, -c, "systemctl disable --now snapd.service snapd.socket snapd.seeded.service unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer motd-news.timer || true"]
   - [sh, -c, "mkdir -p /mnt/SDCARD /mnt/repo; mount -a || true; touch /var/lib/shelf-vm-ready"]
 UD
-	hdiutil makehybrid -quiet -iso -joliet -default-volume-name cidata -o $SEED $d
+	if command -v hdiutil >/dev/null; then
+		hdiutil makehybrid -quiet -iso -joliet -default-volume-name cidata -o $SEED $d
+	else
+		for iso in xorrisofs genisoimage mkisofs; do command -v $iso >/dev/null && break; done
+		command -v $iso >/dev/null || { echo "vm: need hdiutil, xorrisofs, genisoimage or mkisofs to make the seed" >&2; exit 1; }
+		$iso -quiet -output $SEED -volid cidata -joliet -rock $d
+	fi
 fi
 echo "vm: image ready ($DISK, $SEED)"
