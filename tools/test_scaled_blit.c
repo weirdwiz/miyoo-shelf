@@ -10,8 +10,10 @@ static void reference_blit(Image *dst, const Image *src, float x, float y, float
         return;
     }
     int x0 = (int)floorf(x), y0 = (int)floorf(y), x1 = (int)ceilf(x + w), y1 = (int)ceilf(y + h);
-    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0;
-    if (x1 > dst->w) x1 = dst->w; if (y1 > dst->h) y1 = dst->h;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > dst->w) x1 = dst->w;
+    if (y1 > dst->h) y1 = dst->h;
     float kx = src->w / w, ky = src->h / h;
     for (int yy = y0; yy < y1; yy++) {
         float fy = (yy + .5f - y) * ky;
