@@ -134,7 +134,7 @@ MM_BUILD := $(BUILD)/mm
 MM_SRC := $(CORE_SRC) src/platform_mm.c src/audio_mm.c src/hw_mm.c
 
 mm:
-	$(CONTAINER) run --rm --platform linux/amd64 -v "$(CURDIR)":/root/workspace -w /root/workspace $(TOOLCHAIN) \
+	$(CONTAINER) run --rm --platform linux/amd64 -v "$(CURDIR)":/root/workspace:z -w /root/workspace $(TOOLCHAIN) \
 		/bin/bash -c "source /root/.bashrc && make mm-inner"
 
 mm-inner: $(MM_BUILD)/shelf

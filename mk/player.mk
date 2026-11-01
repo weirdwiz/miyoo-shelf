@@ -40,7 +40,7 @@ $(BUILD)/player-cli: tools/player_cli.c $(PLAYER_DEPS)
 	$(CC) $(CFLAGS) -o $@ tools/player_cli.c src/player.c $(PLAYER_LIBS)
 
 player-cli-mm:
-	$(CONTAINER) run --rm --platform linux/amd64 -v "$(CURDIR)":/root/workspace -w /root/workspace $(TOOLCHAIN) \
+	$(CONTAINER) run --rm --platform linux/amd64 -v "$(CURDIR)":/root/workspace:z -w /root/workspace $(TOOLCHAIN) \
 		/bin/bash -c "source /root/.bashrc && make player-cli-mm-inner"
 
 # Runs inside the toolchain container.

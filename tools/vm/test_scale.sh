@@ -15,7 +15,7 @@ FLAGS="-O3 -marm -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -std=c11 -Wal
 
 build() { # build <output name> [extra cflags]
 	mkdir -p build/mm
-	$CONTAINER run --rm --platform linux/amd64 -v "$PWD":/root/workspace -w /root/workspace \
+	$CONTAINER run --rm --platform linux/amd64 -v "$PWD":/root/workspace:z -w /root/workspace \
 		"$TOOLCHAIN" /bin/bash -c \
 		"source /root/.bashrc && \${CROSS_COMPILE}gcc $FLAGS ${2:-} -o build/mm/$1 tools/test_scale.c src/scale.c -lm"
 }
