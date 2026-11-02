@@ -96,6 +96,34 @@ static void build_card(const char *work)
     CHECK(write_file(path, recents, sizeof recents - 1) == 0);
 }
 
+/* ---------- the core options a session sent ---------- */
+
+static char option_log[PATH_LEN * 2]; // FAKE_CORE_OPTION_LOG: what the fake core was given
+
+// The value the fake core read for `key` after its last `event` ("load"), or "" if none.
+static const char *sent(const char *event, const char *key)
+{
+    static char value[128];
+    char line[256];
+    int in = 0;
+    value[0] = 0;
+    FILE *f = fopen(option_log, "r");
+    if (!f) return value;
+    while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\n")] = 0;
+        if (!strchr(line, '=')) { in = !strcmp(line, event); if (in) value[0] = 0; continue; }
+        size_t n = strlen(key);
+        if (in && !strncmp(line, key, n) && line[n] == '=') snprintf(value, sizeof value, "%s", line + n + 1);
+    }
+    fclose(f);
+    return value;
+}
+
+static void write_text(const char *path, const char *text)
+{
+    CHECK(write_file(path, text, strlen(text)) == 0);
+}
+
 /* ---------- reading what a session left behind ---------- */
 
 static void saved(int game, const char *ext, char *out, int n)
@@ -550,6 +578,43 @@ int main(int argc, char **argv)
     CHECK(fp()->power_off == 1);
     CHECK(!resumes()[0]);
     CHECK(chmod(dir, 0755) == 0);
+
+    // Each system's core is given Shelf's defaults; the options file still overrides them.
+    snprintf(option_log, sizeof option_log, "%s/options.log", argv[1]);
+    setenv("FAKE_CORE_OPTION_LOG", option_log, 1);
+    fp_reset();
+    fp_limit(5);
+    fp_press_at(0.4, BTN_MENU);
+    fp_press_at(1.0, BTN_B);
+    CHECK(session(alpha, &next) == GAME_HOME);
+    CHECK(!strcmp(sent("load", "gambatte_gb_colorization"), "internal"));
+    CHECK(!strcmp(sent("load", "gambatte_gb_internal_palette"), "GB - Pocket"));
+    CHECK(!strcmp(sent("load", "gambatte_gbc_color_correction"), "GBC only"));
+    CHECK(!strcmp(sent("load", "gambatte_gbc_color_correction_mode"), "accurate"));
+    CHECK(!strcmp(sent("load", "gambatte_mix_frames"), "disabled"));
+    CHECK(!strcmp(sent("load", "gambatte_gb_bootloader"), "disabled"));
+    CHECK(!sent("load", "mgba_color_correction")[0]); // nothing for the other core
+    fp_reset();
+    fp_limit(5);
+    fp_press_at(0.4, BTN_MENU);
+    fp_press_at(1.0, BTN_B);
+    CHECK(session(gamma, &next) == GAME_HOME);
+    CHECK(!strcmp(sent("load", "mgba_color_correction"), "GBA"));
+    CHECK(!strcmp(sent("load", "mgba_interframe_blending"), "OFF"));
+    CHECK(!strcmp(sent("load", "mgba_skip_bios"), "ON"));
+    CHECK(!sent("load", "gambatte_gb_colorization")[0]);
+    char opt[PATH_LEN * 2];
+    snprintf(opt, sizeof opt, "%s/.shelf/data/mgba.opt", sd);
+    write_text(opt, "mgba_interframe_blending = \"mix\"\n");
+    fp_reset();
+    fp_limit(5);
+    fp_press_at(0.4, BTN_MENU);
+    fp_press_at(1.0, BTN_B);
+    CHECK(session(gamma, &next) == GAME_HOME);
+    CHECK(!strcmp(sent("load", "mgba_interframe_blending"), "mix"));
+    CHECK(!strcmp(sent("load", "mgba_color_correction"), "GBA"));
+    unlink(opt);
+    unsetenv("FAKE_CORE_OPTION_LOG");
 
     // Every in-game menu above opened the same loaded UI: the two font files (Bold and
     // ExtraBold) were read once for the whole run, not once per menu.

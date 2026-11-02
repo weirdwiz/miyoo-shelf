@@ -26,6 +26,7 @@
 #define ROW_COUNTER 3
 #define ROW_INPUT 4
 #define ROW_TAGS 5
+#define ROW_LIVE 6
 
 static const char *core_path = "build/fake_core.so";
 static char work[512], saves[600], saves_ro[600];
@@ -116,6 +117,7 @@ static unsigned bits_at(int row, int x0, int count)
 static unsigned format_code(void) { return bits_at(ROW_TAGS, 0, 2); }
 static unsigned frame_counter(void) { return bits_at(ROW_COUNTER, 0, 8); }
 static unsigned input_mask(void) { return bits_at(ROW_INPUT, 0, 16); }
+static unsigned tint_code(void) { return bits_at(ROW_LIVE, 0, 2); }
 
 static void config(PlayerConfig *cfg, const char *core, const char *rom_path, const char *save_dir,
                    const char *stem, const char *options)
@@ -348,6 +350,56 @@ static void test_options(void)
     CHECK(format_code() == 0, "no option file means core defaults, got format %u", format_code());
     player_close();
     printf("core options\n");
+}
+
+static void open_with(const char *options, const PlayerOption *defs, int ndefs)
+{
+    PlayerConfig cfg;
+    char err[256];
+
+    config(&cfg, core_path, rom, saves, "live", options);
+    cfg.defaults = defs;
+    cfg.ndefaults = ndefs;
+    if (player_open(&cfg, err, sizeof err) != 0) fail_at(__LINE__, "open failed: %s", err);
+}
+
+// Shelf's defaults sit between the core's own and the options file.
+static void test_shelf_defaults(void)
+{
+    static const PlayerOption red[] = { { "fake_tint", "red" }, { "fake_format", "xrgb" } };
+    static const PlayerOption bad[] = { { "fake_tint", "green" }, { NULL, "x" }, { "fake_format", NULL },
+                                        { "fake_format", "" } };
+    char path[600];
+    snprintf(path, sizeof path, "%s/live.opt", work);
+    setenv("FAKE_CORE_NO_DUPES", "1", 1); // every frame redraws row 6
+
+    for (int legacy = 0; legacy < 2; legacy++) {
+        if (legacy) setenv("FAKE_CORE_LEGACY_OPTIONS", "1", 1);
+
+        open_with(NULL, red, 2);
+        player_run();
+        CHECK(tint_code() == 1, "Shelf's default should win over the core's, got tint %u", tint_code());
+        CHECK(format_code() == 1, "every default applies, got format %u", format_code());
+        player_close();
+
+        // The options file wins over Shelf's defaults, for the keys it sets.
+        write_text(path, "fake_tint = \"blue\"\n");
+        open_with(path, red, 2);
+        player_run();
+        CHECK(tint_code() == 2, "the options file should win over Shelf's default, got tint %u", tint_code());
+        CHECK(format_code() == 1, "keys the file leaves out keep Shelf's default, got format %u", format_code());
+        player_close();
+
+        // A default the core doesn't allow, and malformed entries, change nothing.
+        open_with(NULL, bad, 4);
+        player_run();
+        CHECK(tint_code() == 0 && format_code() == 0, "invalid defaults fall back to the core's (tint %u, format %u)",
+              tint_code(), format_code());
+        player_close();
+    }
+    unsetenv("FAKE_CORE_LEGACY_OPTIONS");
+    unsetenv("FAKE_CORE_NO_DUPES");
+    printf("Shelf's option defaults\n");
 }
 
 static void test_state(void)
@@ -737,6 +789,7 @@ int main(int argc, char **argv)
     test_dupe();
     test_input();
     test_options();
+    test_shelf_defaults();
     test_state();
     test_sram();
     test_sram_write_failure();

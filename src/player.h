@@ -8,6 +8,12 @@
 
 #include <stdint.h>
 
+// A core option, by the key and value the core declares (`gambatte_mix_frames`, `disabled`).
+typedef struct {
+    const char *key;
+    const char *value;
+} PlayerOption;
+
 typedef struct {
     const char *core_path;    // e.g. /mnt/SDCARD/.shelf/cores/mgba_libretro.so
     const char *rom_path;
@@ -15,6 +21,10 @@ typedef struct {
     const char *save_dir;     // <stem>.srm / <stem>.rtc live here; created if missing
     const char *stem;         // ROM file name without extension
     const char *options_path; // RetroArch-style `key = "value"` lines; NULL or missing: core defaults
+    // Shelf's own defaults, over the core's. The options file overrides any of them. A value
+    // the core doesn't allow is ignored and the core's default stays.
+    const PlayerOption *defaults;
+    int ndefaults;
     int sample_rate;          // output rate player_audio_read produces, e.g. 48000
     int buffer_ms;            // audio kept buffered ahead of the reader; 0: 32 ms
 } PlayerConfig;

@@ -3,12 +3,14 @@
 //
 // Keys: a b start select up down left right l r x y l2 r2. SHELF_AUDIO_DUMP=<path> writes
 // the resampled 48 kHz stereo output as raw s16le. Optional SHELF_SYSTEM_DIR,
-// SHELF_SAVE_DIR and SHELF_OPTIONS pick the frontend directories and option file.
+// SHELF_SAVE_DIR and SHELF_OPTIONS pick the frontend directories and option file. Shelf's
+// own option defaults for the core (by its file name, <core>_libretro.so) apply as in Shelf.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
+#include "../src/core_options.h"
 #include "../src/player.h"
 
 #define MAX_EVENTS 256
@@ -82,6 +84,16 @@ static void stem_of(const char *path, char *out, size_t n)
     if (dot && dot != out) *dot = 0;
 }
 
+// "gambatte" from ".../gambatte_libretro.so".
+static void core_name(const char *path, char *out, size_t n)
+{
+    const char *base = strrchr(path, '/');
+    char *end;
+    snprintf(out, n, "%s", base ? base + 1 : path);
+    end = strstr(out, "_libretro");
+    if (end) *end = 0;
+}
+
 static int write_ppm(const char *path, const PlayerFrame *f)
 {
     FILE *out = fopen(path, "wb");
@@ -105,7 +117,7 @@ int main(int argc, char **argv)
 {
     PlayerConfig cfg;
     Event events[MAX_EVENTS];
-    char stem[256], err[256];
+    char stem[256], err[256], core[64];
     const char *dump_path;
     FILE *dump = NULL;
     int16_t *audio;
@@ -133,6 +145,8 @@ int main(int argc, char **argv)
     cfg.save_dir = getenv("SHELF_SAVE_DIR");
     cfg.stem = stem;
     cfg.options_path = getenv("SHELF_OPTIONS");
+    core_name(argv[1], core, sizeof core);
+    cfg.defaults = core_defaults(core, &cfg.ndefaults);
     cfg.sample_rate = 48000;
     if (!cfg.system_dir) cfg.system_dir = ".";
     if (!cfg.save_dir) cfg.save_dir = ".";

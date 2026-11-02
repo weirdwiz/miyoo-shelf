@@ -9,7 +9,7 @@
 PLAYER_LIBS := -ldl -lpthread -lm
 PLAYER_ASAN := -fsanitize=address,undefined -fno-omit-frame-pointer -g
 PLAYER_MM_CFLAGS := -O2 -marm -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -std=c11 -D_DEFAULT_SOURCE -D_FILE_OFFSET_BITS=64
-PLAYER_DEPS := src/player.c src/player.h src/platform.h third_party/libretro.h
+PLAYER_DEPS := src/player.c src/player.h src/core_options.c src/core_options.h src/platform.h third_party/libretro.h
 
 $(BUILD)/fake_core.so: tools/fake_core.c third_party/libretro.h
 	@mkdir -p $(BUILD)
@@ -37,7 +37,7 @@ player-cli: $(BUILD)/player-cli
 
 $(BUILD)/player-cli: tools/player_cli.c $(PLAYER_DEPS)
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) -o $@ tools/player_cli.c src/player.c $(PLAYER_LIBS)
+	$(CC) $(CFLAGS) -o $@ tools/player_cli.c src/player.c src/core_options.c $(PLAYER_LIBS)
 
 player-cli-mm:
 	$(CONTAINER) run --rm --platform linux/amd64 -v "$(CURDIR)":/root/workspace:z -w /root/workspace $(TOOLCHAIN) \
@@ -50,4 +50,4 @@ $(MM_BUILD)/player-cli: tools/player_cli.c $(PLAYER_DEPS)
 	@mkdir -p $(MM_BUILD)
 	$(CROSS_COMPILE)gcc $(PLAYER_MM_CFLAGS) \
 		-Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers \
-		-o $@ tools/player_cli.c src/player.c $(PLAYER_LIBS)
+		-o $@ tools/player_cli.c src/player.c src/core_options.c $(PLAYER_LIBS)

@@ -13,7 +13,7 @@ CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers
 BUILD := build
 
-CORE_SRC := src/main.c src/loop.c src/gfx.c src/text.c src/library.c src/icons.c src/ui.c src/game.c src/settings.c src/scale.c src/player.c src/probe.c src/power.c third_party/cJSON.c
+CORE_SRC := src/main.c src/loop.c src/gfx.c src/text.c src/library.c src/icons.c src/ui.c src/game.c src/settings.c src/scale.c src/player.c src/core_options.c src/probe.c src/power.c third_party/cJSON.c
 SIM_SRC := $(CORE_SRC) src/platform_sdl2.c
 SDL_CFLAGS = $(shell sdl2-config --cflags)
 SDL_LIBS = $(shell sdl2-config --libs)
@@ -104,7 +104,7 @@ $(BUILD)/test-rrect: tools/test_rrect.c src/gfx.c src/gfx.h
 
 # One play session end to end: the real player, game loop and UI drive the fake core
 # through a fake platform, so the in-game menu, standby and saving can be scripted.
-SESSION_SRC := src/game.c src/player.c src/loop.c src/scale.c src/ui.c src/icons.c src/text.c \
+SESSION_SRC := src/game.c src/player.c src/core_options.c src/loop.c src/scale.c src/ui.c src/icons.c src/text.c \
                src/gfx.c src/library.c src/settings.c src/power.c third_party/cJSON.c tools/fake_platform.c
 SESSION_DEPS := $(wildcard src/*.h) tools/fake_platform.h
 

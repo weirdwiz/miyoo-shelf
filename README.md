@@ -45,6 +45,16 @@ commits: gambatte for GB and GBC, mGBA for GBA (`make cores`).
   Screen scaling is Sharp (sharp-bilinear fill), Smooth (bilinear fill) or Integer (whole
   multiples, nearest neighbour).
 - The status bar shows the clock, battery level and charging; navigation plays a click.
+- **Colours** look right without a settings screen. Game Boy games get the Game Boy
+  Pocket's soft grey-green instead of plain grey; Game Boy Color and Game Boy Advance
+  games are colour corrected to look like those consoles' own screens. Frame blending is
+  off (it costs battery) and boot logos are skipped.
+
+### Core options
+
+Shelf sets the cores' options it cares about itself (`src/core_options.c`). A
+RetroArch-style `.shelf/data/gambatte.opt` or `mgba.opt` (`key = "value"` lines) overrides
+any of them, and sets anything else the core offers.
 
 ## Controls
 

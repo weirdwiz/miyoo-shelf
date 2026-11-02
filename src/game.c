@@ -20,6 +20,7 @@
 #include "../third_party/stb_image_write.h"
 #pragma GCC diagnostic pop
 
+#include "core_options.h"
 #include "icons.h"
 #include "loop.h"
 #include "player.h"
@@ -626,8 +627,12 @@ int game_play(Library *lib, int game, const GameSettings *set, int *switch_to)
     snprintf(dev, sizeof dev, SD_PREFIX "/.shelf/data/%s.opt", core);
     host_path(dev, options, sizeof options);
 
-    PlayerConfig cfg = {s.core, s.rom, bios, s.save_dir, s.stem, options, PLATFORM_AUDIO_RATE,
-                        PLATFORM_AUDIO_RING_MS};
+    int ndefaults;
+    const PlayerOption *defaults = core_defaults(core, &ndefaults);
+    PlayerConfig cfg = {.core_path = s.core, .rom_path = s.rom, .system_dir = bios,
+                        .save_dir = s.save_dir, .stem = s.stem, .options_path = options,
+                        .defaults = defaults, .ndefaults = ndefaults,
+                        .sample_rate = PLATFORM_AUDIO_RATE, .buffer_ms = PLATFORM_AUDIO_RING_MS};
     char err[160];
     // Full speed from here to the save on the way out: reading the ROM, loading the core
     // and restoring the state are part of the wait for the game to start.

@@ -6,14 +6,17 @@ set -eu
 . "$(dirname "$0")/common.sh"
 vm_running || sh tools/vm/start.sh
 # rom core frames frame-sha256-prefix note
+# Frames are taken with Shelf's option defaults (src/core_options.c), as the device shows
+# them: dmg_sound in the Game Boy Pocket palette, the GBA ROMs colour corrected.
+# cpu_instrs and ucity are Game Boy Color carts, which the core's default already corrected.
 cat > $VM/cores.list <<'L'
 cpu_instrs.gb gambatte 3600 420bf19ceea1b08f Passed all tests
-dmg_sound.gb gambatte 2400 dd0465a38ab09aa6 Passed
-gba-memory.gba mgba 600 8978019f4d7f4361 All tests passed
-gba-arm.gba mgba 600 a3a84ee78789e49a Failed test 522 (upstream mGBA; native build matches)
-gba-thumb.gba mgba 600 b6186a62d799aa35 Failed test 230 (upstream mGBA; native build matches)
+dmg_sound.gb gambatte 2400 2afb3e98f22c3e1f Passed
+gba-memory.gba mgba 600 ecfda6390e5c6964 All tests passed
+gba-arm.gba mgba 600 e90802e3237a340a Failed test 522 (upstream mGBA; native build matches)
+gba-thumb.gba mgba 600 ac1420e1f610d288 Failed test 230 (upstream mGBA; native build matches)
 ucity.gbc gambatte 900 63a953424838ac0d title screen
-gematrix.gba mgba 900 eeec3d36b959546b title screen
+gematrix.gba mgba 900 93df93ce427c7079 title screen
 L
 fail=0
 while read -r rom core frames want note; do

@@ -60,9 +60,14 @@ typedef struct {
     int nallowed;
 } Option;
 
+// Where a configured value came from; a stronger source replaces a weaker one's value,
+// whichever is read first.
+enum { FROM_DEFAULT, FROM_FILE };
+
 typedef struct {
     const char *key;
     const char *value;
+    int from;
 } RawOption;
 
 typedef struct {
@@ -159,11 +164,17 @@ static int copy_str(char *dst, const char *src)
 
 // --- core options -------------------------------------------------------------
 
-static const char *raw_get(const char *key)
+static RawOption *raw_find(const char *key)
 {
     for (int i = 0; i < nraw; i++)
-        if (!strcmp(raw[i].key, key)) return raw[i].value;
+        if (!strcmp(raw[i].key, key)) return &raw[i];
     return NULL;
+}
+
+static const char *raw_get(const char *key)
+{
+    RawOption *r = raw_find(key);
+    return r ? r->value : NULL;
 }
 
 static char *trim(char *s)
@@ -176,21 +187,36 @@ static char *trim(char *s)
     return s;
 }
 
-static int raw_set(const char *key, const char *value)
+// Records `value` for `key` unless a stronger source already set it.
+static int raw_set(const char *key, const char *value, int from)
 {
-    for (int i = 0; i < nraw; i++) {
-        if (!strcmp(raw[i].key, key)) {
-            raw[i].value = arena_str(value);
-            return raw[i].value ? 0 : -1;
-        }
+    RawOption *r = raw_find(key);
+    if (r) {
+        const char *v;
+        if (r->from > from) return 0;
+        if (!(v = arena_str(value))) return -1;
+        r->value = v;
+        r->from = from;
+        return 0;
     }
     RawOption *p = realloc(raw, (size_t)(nraw + 1) * sizeof *p);
     if (!p) return -1;
     raw = p;
     raw[nraw].key = arena_str(key);
     raw[nraw].value = arena_str(value);
+    raw[nraw].from = from;
     if (!raw[nraw].key || !raw[nraw].value) return -1;
     nraw++;
+    return 0;
+}
+
+// Shelf's own values for some options; malformed entries are skipped.
+static int raw_set_list(const PlayerOption *list, int n, int from)
+{
+    for (int i = 0; list && i < n; i++)
+        if (list[i].key && list[i].key[0] && list[i].value && list[i].value[0] &&
+            raw_set(list[i].key, list[i].value, from))
+            return -1;
     return 0;
 }
 
@@ -216,7 +242,7 @@ static void options_load(const char *path)
             value[n - 1] = 0;
             value++;
         }
-        if (key[0] && value[0]) raw_set(key, value);
+        if (key[0] && value[0]) raw_set(key, value, FROM_FILE);
     }
     fclose(f);
 }
@@ -267,7 +293,8 @@ static int opt_set(const char *key, const char *def, const char *const *values, 
         o->nallowed = nvalues;
     }
 
-    // The configured value wins when the core allows it, otherwise the default.
+    // The configured value (Shelf's or the options file's) wins when the core allows it,
+    // otherwise the core's default.
     want = raw_get(o->key);
     if (want && opt_allows(o, want)) chosen = want;
     if (!chosen && def && opt_allows(o, def)) chosen = def;
@@ -860,6 +887,10 @@ int player_open(const PlayerConfig *cfg, char *err, int errlen)
         goto fail;
     }
     options_load(cfg->options_path);
+    if (raw_set_list(cfg->defaults, cfg->ndefaults, FROM_DEFAULT)) {
+        fail(err, errlen, "out of memory for the core options");
+        goto fail;
+    }
     if (mkdir(save_dir, 0755) != 0 && errno != EEXIST) {
         // Not fatal: the game still runs, its saves will report write errors.
     }
