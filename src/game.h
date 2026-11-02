@@ -5,6 +5,7 @@
 
 #include "library.h"
 #include "scale.h"
+#include "settings.h"
 
 enum {
     GAME_FAILED = -1,   // nothing was loaded; game_error() says why
@@ -18,6 +19,9 @@ enum {
 typedef struct {
     ScaleMode scale;      // how game frames fill the screen
     const char *font_dir; // fonts for the in-game menu
+    // The saved settings: the game's colours come from them, and the in-game menu's
+    // colour row changes them and saves settings.json. NULL: the defaults, never saved.
+    Settings *settings;
 } GameSettings;
 
 // Plays `game` (an index into lib->games) until the player leaves it. Saves the state,

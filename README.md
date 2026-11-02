@@ -17,6 +17,10 @@ commits: gambatte for GB and GBC, mGBA for GBA (`make cores`).
 |---|---|---|
 | ![](docs/screenshots/5-dark.png) | ![](docs/screenshots/7-ingame-menu.png) | ![](docs/screenshots/8-options.png) |
 
+| Colours (START in a game) | Palette, real gambatte in the VM | Colours, real mGBA in the VM |
+|---|---|---|
+| ![](docs/screenshots/9-ingame-colours.png) | ![](docs/screenshots/vm-palette.png) | ![](docs/screenshots/vm-colours.png) |
+
 ## Using it
 
 - **Home** is one row: recent games first, then the folders. L1 jumps to the recents, R1 to
@@ -45,11 +49,38 @@ commits: gambatte for GB and GBC, mGBA for GBA (`make cores`).
   Screen scaling is Sharp (sharp-bilinear fill), Smooth (bilinear fill) or Integer (whole
   multiples, nearest neighbour).
 - The status bar shows the clock, battery level and charging; navigation plays a click.
+- **Colours** look right without a settings screen. Game Boy games get the Game Boy
+  Pocket's soft grey-green instead of plain grey; Game Boy Color and Game Boy Advance
+  games are colour corrected to look like those consoles' own screens. Frame blending is
+  off (it costs battery) and boot logos are skipped. **START** in the in-game menu, on the
+  paused game, opens its one colour choice under its card: **Palette** for a Game Boy game
+  (Pocket, Green, Teal, Mono, shown as swatches) or **Colours** for a Game Boy Color or
+  Advance game (correction on or off). LEFT/RIGHT/A change it, B puts it away. The card
+  shows the change at once, the game resumes with it, and it is saved to `settings.json`
+  for every game of that kind. Whether a game is Game Boy or Game Boy Color comes from
+  its cartridge header, not its folder.
+
+### Core options
+
+Shelf sets the cores' options it cares about itself (`src/core_options.c`), in three
+layers, weakest first:
+
+1. Shelf's defaults (frame blending off, boot logos skipped, accurate GBC correction).
+2. A RetroArch-style `.shelf/data/gambatte.opt` or `mgba.opt` (`key = "value"` lines):
+   overrides any default, and sets anything else the core offers.
+3. The game's in-game choice, for the keys that choice controls and no others: a Game Boy
+   game's Palette sets `gambatte_gb_colorization`, `gambatte_gb_internal_palette` (and its
+   pack's palette key); a Game Boy Color game's Colours sets
+   `gambatte_gbc_color_correction`; a Game Boy Advance game's Colours sets
+   `mgba_color_correction`. What was last chosen in the menu is what the game shows,
+   whatever the file says; for every other key, including the ones a different kind of
+   game's choice would set, the file wins.
 
 ## Controls
 
-D-pad moves · A play/open · B back · X favorite · Y sort · L1/R1 first/last · START options ·
-MENU switcher in a game, options elsewhere · POWER sleep, hold to power off.
+D-pad moves · A play/open · B back · X favorite · Y sort · L1/R1 first/last · START options
+(in the in-game menu: the paused game's colours) · MENU switcher in a game, options
+elsewhere · POWER sleep, hold to power off.
 
 ## Card layout
 

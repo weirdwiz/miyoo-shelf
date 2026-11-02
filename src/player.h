@@ -8,6 +8,12 @@
 
 #include <stdint.h>
 
+// A core option, by the key and value the core declares (`gambatte_mix_frames`, `disabled`).
+typedef struct {
+    const char *key;
+    const char *value;
+} PlayerOption;
+
 typedef struct {
     const char *core_path;    // e.g. /mnt/SDCARD/.shelf/cores/mgba_libretro.so
     const char *rom_path;
@@ -15,6 +21,14 @@ typedef struct {
     const char *save_dir;     // <stem>.srm / <stem>.rtc live here; created if missing
     const char *stem;         // ROM file name without extension
     const char *options_path; // RetroArch-style `key = "value"` lines; NULL or missing: core defaults
+    // Shelf's own defaults, over the core's. The options file overrides any of them. A value
+    // the core doesn't allow is ignored and the core's default stays.
+    const PlayerOption *defaults;
+    int ndefaults;
+    // The player's choices in Shelf (colour correction, palette): over the options file
+    // too, for the keys they set. The same strength as player_set_option.
+    const PlayerOption *choices;
+    int nchoices;
     int sample_rate;          // output rate player_audio_read produces, e.g. 48000
     int buffer_ms;            // audio kept buffered ahead of the reader; 0: 32 ms
 } PlayerConfig;
@@ -49,6 +63,21 @@ void player_set_input(unsigned mask);
 // Runs exactly one emulated frame (retro_run).
 void player_run(void);
 const PlayerFrame *player_frame(void);
+// Changes a core option while the game runs, over Shelf's defaults and the options file.
+// The core is told before its next frame (RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE) and
+// re-reads the options it can change live. Returns 1 when the value changed, 0 when it
+// already had it, -1 when the core has no such option or doesn't allow the value.
+int player_set_option(const char *key, const char *value);
+// Runs `frames` frames (1..8) with the buttons last set, keeps the last frame they drew in
+// player_frame(), and puts the game back exactly where it was: the core's state, SRAM and
+// RTC. The frames make no sound; what was buffered before is left as it was. For showing a
+// paused game with an option just changed. Returns 0; -1 (nothing run) when the game can't
+// be snapshotted; PLAYER_PEEK_LOST when the core couldn't take its state back. Then the game
+// is ahead of where it was paused and may not match its saves, so from then on the player
+// refuses to save anything of it (player_save_state, player_save_sram, and player_close
+// writes nothing) or to peek again: end the session.
+int player_peek(int frames);
+#define PLAYER_PEEK_LOST (-2)
 double player_fps(void);  // the core's frames per second (av_info timing)
 void player_reset(void);
 
@@ -57,7 +86,8 @@ void player_reset(void);
 int player_save_state(const char *path);
 int player_load_state(const char *path);
 // Writes SRAM (and RTC when the core has one) when it changed since the last write.
-// Atomic like save states. Returns 0 when saved or unchanged, -1 on a write error.
+// Atomic like save states. Returns 0 when saved or unchanged, -1 on a write error (or after
+// PLAYER_PEEK_LOST).
 int player_save_sram(void);
 
 // Resampled interleaved stereo at cfg->sample_rate. Fills `frames` frames, padding with

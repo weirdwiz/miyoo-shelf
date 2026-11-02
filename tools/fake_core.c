@@ -3,7 +3,12 @@
 //
 // FAKE_CORE_LEGACY_OPTIONS=1 makes it register options through the deprecated
 // SET_VARIABLES call, so both frontend option paths get exercised. FAKE_CORE_NO_DUPES=1
-// makes every frame a new one.
+// makes every frame a new one. `fake_tint` (off|red|blue) is re-read whenever the frontend
+// reports a variable update, like the real cores' colour options; row 6 shows it and how
+// many updates the core has seen. The core also declares, free-form, the gambatte and mGBA
+// options Shelf sets, and with FAKE_CORE_OPTION_LOG=<path> writes their values there as
+// `key=value` lines after a `load` or `update` line, so session tests can see what Shelf sent.
+// FAKE_CORE_FAIL_UNSERIALIZE=<n> makes the nth retro_unserialize since the game loaded fail.
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +41,39 @@ static unsigned last_input;
 static double audio_acc;
 static uint16_t audio_pos;
 static uint8_t screen[MAX_W * MAX_H * 4];
+static unsigned tint, updates;
+
+static void tint_read(void)
+{
+    struct retro_variable var = { "fake_tint", NULL };
+    tint = 0;
+    if (!env || !env(RETRO_ENVIRONMENT_GET_VARIABLE, &var) || !var.value) return;
+    if (!strcmp(var.value, "red")) tint = 1;
+    else if (!strcmp(var.value, "blue")) tint = 2;
+}
+
+// The real cores' options Shelf sets, declared here without values (any value goes).
+static const char *const REAL_KEYS[] = {
+    "gambatte_gb_colorization", "gambatte_gb_internal_palette", "gambatte_gb_palette_twb64_1",
+    "gambatte_gb_palette_pixelshift_1", "gambatte_gbc_color_correction",
+    "gambatte_gbc_color_correction_mode", "gambatte_mix_frames", "gambatte_gb_bootloader",
+    "mgba_color_correction", "mgba_interframe_blending", "mgba_skip_bios",
+};
+#define NREAL (sizeof REAL_KEYS / sizeof *REAL_KEYS)
+
+static void options_log(const char *mode, const char *event)
+{
+    const char *path = getenv("FAKE_CORE_OPTION_LOG");
+    FILE *f;
+    if (!path || !path[0] || !env || !(f = fopen(path, mode))) return;
+    fprintf(f, "%s\n", event);
+    for (size_t i = 0; i < NREAL; i++) {
+        struct retro_variable var = { REAL_KEYS[i], NULL };
+        if (env(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+            fprintf(f, "%s=%s\n", var.key, var.value);
+    }
+    fclose(f);
+}
 
 static void option_read(void)
 {
@@ -54,9 +92,15 @@ static void set_options_legacy(void)
 {
     struct retro_variable vars[] = {
         { "fake_format", "Output format; rgb565|xrgb|1555" },
+        { "fake_tint", "Tint; off|red|blue" },
         { NULL, NULL },
     };
-    if (env) env(RETRO_ENVIRONMENT_SET_VARIABLES, vars);
+    struct retro_variable all[3 + NREAL];
+    size_t n = 0;
+    for (; vars[n].key; n++) all[n] = vars[n];
+    for (size_t i = 0; i < NREAL; i++) all[n++] = (struct retro_variable){ REAL_KEYS[i], "Shelf" };
+    all[n] = (struct retro_variable){ NULL, NULL };
+    if (env) env(RETRO_ENVIRONMENT_SET_VARIABLES, all);
 }
 
 static void set_options(void)
@@ -77,9 +121,26 @@ static void set_options(void)
                 { { "rgb565", "RGB565" }, { "xrgb", "XRGB8888" }, { "1555", "0RGB1555" }, { NULL, NULL } },
                 "rgb565",
             },
-            { NULL, NULL, NULL, NULL, NULL, NULL, { { NULL, NULL } }, NULL },
+            {
+                "fake_tint",
+                "Tint",
+                "Tint",
+                "Changes live, like a colour correction option",
+                NULL,
+                NULL,
+                { { "off", NULL }, { "red", NULL }, { "blue", NULL }, { NULL, NULL } },
+                "off",
+            },
         };
-        struct retro_core_options_v2 options = { NULL, defs };
+        struct retro_core_option_v2_definition all[sizeof defs / sizeof *defs + NREAL + 1];
+        size_t n = 0;
+        memset(all, 0, sizeof all);
+        for (; n < sizeof defs / sizeof *defs; n++) all[n] = defs[n];
+        for (size_t i = 0; i < NREAL; i++, n++) {
+            all[n].key = REAL_KEYS[i];
+            all[n].desc = "Shelf";
+        }
+        struct retro_core_options_v2 options = { NULL, all };
         if (!env) return;
         if (env(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2, &options)) return;
         set_options_legacy();  // frontend refused V2
@@ -145,6 +206,9 @@ static void draw_frame(void)
     // Row 5: the active pixel format (bits 0-1) and the SRAM byte loaded from disk.
     put_bits(5, 0, 2, code);
     put_bits(5, 8, 8, sram[0]);
+    // Row 6: the tint option (bits 0-1) and how many variable updates were seen (8-15).
+    put_bits(6, 0, 2, tint);
+    put_bits(6, 8, 8, updates);
     // Every fourth frame is a dupe, like a core that skips an idle update.
     int dupe = (frame_counter % 4) == 3 && !getenv("FAKE_CORE_NO_DUPES");
     video(dupe ? NULL : screen, SCREEN_W, SCREEN_H, (size_t)SCREEN_W * pixel_bytes());
@@ -239,6 +303,12 @@ RETRO_API void retro_run(void)
     unsigned mask = 0;
 
     if (poll) poll();
+    bool updated = false;
+    if (env && env(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated) {
+        updates++;
+        tint_read();
+        options_log("a", "update");
+    }
     if (input) {
         for (unsigned id = 0; id < 16; id++)
             if (input(0, RETRO_DEVICE_JOYPAD, 0, id)) mask |= 1u << id;
@@ -275,9 +345,14 @@ RETRO_API bool retro_serialize(void *data, size_t len)
     return true;
 }
 
+static int unserialized; // calls since the game loaded
+
 RETRO_API bool retro_unserialize(const void *data, size_t len)
 {
     const uint8_t *in = data;
+    const char *fail = getenv("FAKE_CORE_FAIL_UNSERIALIZE");
+    unserialized++;
+    if (fail && atoi(fail) == unserialized) return false;
     if (!data || len < STATE_SIZE) return false;
     memcpy(sram, in, SRAM_SIZE);
     frame_counter = (unsigned)in[SRAM_SIZE + 0] | (unsigned)in[SRAM_SIZE + 1] << 8 |
@@ -303,6 +378,10 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
     }
     if (first == 'X') return false;  // the "refused" fixture
     option_read();
+    tint_read();
+    updates = 0;
+    options_log("w", "load");
+    unserialized = 0;
     fmt = format;
     if (!env || !env(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt)) return false;
     memset(sram, 0, sizeof sram);

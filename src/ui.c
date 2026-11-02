@@ -1425,6 +1425,14 @@ static void draw_scale_pills(Image *c, int right, int cy)
     }
 }
 
+// An on/off switch, right-aligned at `right`.
+static void draw_switch(Image *c, int right, int cy, int on)
+{
+    float sw = 52, sh = 32, sx = right - sw, sy = cy - sh / 2;
+    gfx_fill_rrect(c, sx, sy, sw, sh, sh / 2, on ? rgb(C_INK) : rgb(P->line));
+    gfx_fill_rrect(c, sx + (on ? sw - sh : 0) + 4, sy + 4, sh - 8, sh - 8, (sh - 8) / 2, rgb(on ? P->on_ink : 0xffffff));
+}
+
 static void draw_options(Image *c)
 {
     gfx_fill_rect(c, 0, 0, SCREEN_W, SCREEN_H - FOOTER_H, argb(S.dark ? 150 : 110, 10, 12, 18));
@@ -1448,11 +1456,7 @@ static void draw_options(Image *c)
         if (i == O_BRIGHT) draw_level(c, right, cy, S.set.brightness, BRIGHTNESS_MAX);
         if (i == O_VOLUME) draw_level(c, right, cy, S.set.volume, VOLUME_MAX);
         if (i == O_SCREEN) draw_scale_pills(c, right, cy);
-        if (i == O_DARK) { // switch
-            float sw = 52, sh = 32, sx = right - sw, sy = cy - sh / 2;
-            gfx_fill_rrect(c, sx, sy, sw, sh, sh / 2, S.dark ? rgb(C_INK) : rgb(P->line));
-            gfx_fill_rrect(c, sx + (S.dark ? sw - sh : 0) + 4, sy + 4, sh - 8, sh - 8, (sh - 8) / 2, rgb(S.dark ? P->on_ink : 0xffffff));
-        }
+        if (i == O_DARK) draw_switch(c, right, cy, S.dark);
     }
 }
 
@@ -1570,6 +1574,10 @@ static struct {
     int layer_ok;             // S.layer holds the scene behind a zoom; reused while it's still
     unsigned layer_rev;       // card + art revisions it was drawn with
     char notice[64];          // a question over the row ("Restart the game?"); "" when none
+    int crow;                 // UI_COLOURS_*: the paused game's colour row
+    const UiPalette *pals;    // what the Palette row cycles through
+    int npals;
+    int copen;                // the colour row is up under the paused game's card
 } W;
 #define SW_ZERO() memset(&W.on, 0, sizeof W - (size_t)((char *)&W.on - (char *)&W))
 
@@ -1595,6 +1603,39 @@ void ui_switch_card_size(int *w, int *h)
 }
 
 int ui_switch_target(void) { return W.close_to; }
+
+void ui_switch_colours(int row, const UiPalette *palettes, int npalettes)
+{
+    if (row == UI_COLOURS_PALETTE && (!palettes || npalettes < 1)) row = UI_COLOURS_NONE;
+    W.crow = row == UI_COLOURS_SWITCH || row == UI_COLOURS_PALETTE ? row : UI_COLOURS_NONE;
+    W.pals = palettes;
+    W.npals = W.crow == UI_COLOURS_PALETTE ? npalettes : 0;
+    if (W.npals && (S.set.palette < 0 || S.set.palette >= W.npals)) S.set.palette = 0;
+    W.copen = 0;
+    W.layer_ok = 0;
+    S.redraw = 1;
+}
+
+int ui_switch_colours_open(void) { return W.on && W.copen; }
+
+// The colour row is up: LEFT/RIGHT/A change it, B (or START, MENU) puts it away.
+static void sw_colours_button(Button b)
+{
+    int adjust = b == BTN_LEFT ? -1 : (b == BTN_RIGHT || b == BTN_A) ? 1 : 0;
+    if (b == BTN_B || b == BTN_START || b == BTN_MENU) {
+        W.copen = 0;
+    } else if (adjust && W.crow == UI_COLOURS_SWITCH) {
+        S.set.colours = !S.set.colours;
+        S.action = UI_SETTINGS;
+    } else if (adjust && W.npals) {
+        S.set.palette = ((S.set.palette + adjust) % W.npals + W.npals) % W.npals;
+        S.action = UI_SETTINGS;
+    } else {
+        return;
+    }
+    S.sound = 1;
+    W.layer_ok = 0;
+}
 
 static int sw_on(void) { return W.on; }
 
@@ -1686,7 +1727,15 @@ static void sw_close(int action, int i)
 static void sw_button(Button b)
 {
     if (W.closing) return;
+    if (W.copen && b != BTN_QUIT) { sw_colours_button(b); return; }
+    W.copen = 0;
     int n = S.lib->nrecent;
+    if (b == BTN_START && W.crow && W.running && S.sel == 0) { // the paused game's colours
+        W.copen = 1;
+        W.layer_ok = 0;
+        S.sound = 1;
+        return;
+    }
     if (b == BTN_LEFT && S.sel > 0) sw_select(S.sel - 1);
     if (b == BTN_RIGHT && S.sel < n - 1) sw_select(S.sel + 1);
     if (b == BTN_L) sw_select(0);
@@ -1871,7 +1920,8 @@ static void sw_draw_chrome(Image *c)
         }
         band_end(&W.top);
     }
-    snprintf(key, sizeof key, "%d|%d|%d|%d|%s", S.sel, L->nrecent, resume, W.running, W.notice);
+    snprintf(key, sizeof key, "%d|%d|%d|%d|%s|%d|%d", S.sel, L->nrecent, resume, W.running, W.notice,
+             W.crow, W.copen);
     if ((b = band_begin(&W.bottom, SCREEN_H - SW_BOTTOM_Y, key))) {
         const int y0 = SW_BOTTOM_Y;
         if (L->nrecent > 1) {
@@ -1886,14 +1936,56 @@ static void sw_draw_chrome(Image *c)
         const char *const ASK[] = {"A", "Yes", "B", "No"};
         const char *const GAME[] = {"A", resume ? "Resume" : "Play", "B", "Shelf", "SELECT", "Restart",
                                     "MENU", "Back"};
+        // Over the paused game, START opens its colour row: the hint goes before MENU.
+        const char *const COLOURS[] = {"A", "Resume", "B", "Shelf", "SELECT", "Restart", "START",
+                                       W.crow == UI_COLOURS_PALETTE ? "Palette" : "Colours", "MENU", "Back"};
+        const char *const ROW[] = {"A", "Change", "B", "Done"};
         const char *const OTHER[] = {"A", "Play", "B", "Shelf"};
         if (W.notice[0]) draw_footer_raw(b, SCREEN_H - FOOTER_H - y0, ASK, 4);
+        else if (W.copen) draw_footer_raw(b, SCREEN_H - FOOTER_H - y0, ROW, 4);
+        else if (L->nrecent && resume && W.crow) draw_footer_raw(b, SCREEN_H - FOOTER_H - y0, COLOURS, 10);
         else if (L->nrecent) draw_footer_raw(b, SCREEN_H - FOOTER_H - y0, GAME, W.running ? 8 : 4);
         else draw_footer_raw(b, SCREEN_H - FOOTER_H - y0, OTHER, 4);
         band_end(&W.bottom);
     }
     if (W.top.img) gfx_blit(c, W.top.img, 0, 0, 255);
     if (W.bottom.img) gfx_blit(c, W.bottom.img, 0, SW_BOTTOM_Y, 255);
+}
+
+// One palette as four stripes, lightest on the left, ringed when it's the chosen one.
+static void draw_swatch(Image *c, float x, float y, const UiPalette *p, int on)
+{
+    const float w = 40, h = 26, r = 6, q = w / 4;
+    if (on) gfx_stroke_rrect(c, x - 4, y - 4, w + 8, h + 8, r + 4, 2, rgb(C_INK));
+    gfx_fill_rrect(c, x, y, w, h, r, rgb(p->shade[0]));
+    gfx_fill_rrect(c, x + 2 * q, y, 2 * q, h, r, rgb(p->shade[3]));
+    gfx_fill_rect(c, x + q, y, q, h, rgb(p->shade[1]));
+    gfx_fill_rect(c, x + 2 * q, y, q, h, rgb(p->shade[2]));
+}
+
+// The paused game's colour row, one Options row on its own sheet under the card.
+static void sw_draw_colours(Image *c)
+{
+    const int w = 452, h = 68, x = (SCREEN_W - w) / 2, y = SW_BOTTOM_Y - 8;
+    gfx_fill_rrect(c, x + 2, y + 4, w - 4, h - 2, 16, argb(60, 0, 0, 0));
+    gfx_fill_rrect(c, x, y, w, h, 16, rgb(P->panel));
+    int ry = y + 6, rh = h - 12, cy = ry + rh / 2, right = x + w - 24;
+    gfx_fill_rrect(c, x + 10, ry, w - 20, rh, 8, rgb(P->dim_dot));
+    gfx_fill_rrect(c, x + 10, ry, 4, rh, 2, rgb(C_SEL));
+    const char *title = "Colours", *sub;
+    if (W.crow == UI_COLOURS_PALETTE) {
+        title = "Palette";
+        sub = W.pals[S.set.palette].name;
+        const float sw = 40, gap = 14;
+        float sx = right - W.npals * sw - (W.npals - 1) * gap;
+        for (int i = 0; i < W.npals; i++)
+            draw_swatch(c, sx + i * (sw + gap), cy - 13, &W.pals[i], i == S.set.palette);
+    } else {
+        sub = S.set.colours ? "Like the console's own screen" : "As the game draws them";
+        draw_switch(c, right, cy, S.set.colours);
+    }
+    text_draw(c, S.body, title, x + 24, ry + 8, rgb(C_INK));
+    text_draw(c, S.small, sub, x + 24, ry + 32, rgb(C_SUB));
 }
 
 // The row, titles and chrome, without the selected card when `skip_sel`.
@@ -1921,6 +2013,7 @@ static void sw_draw_scene(Image *c, int skip_sel)
             if (pass) sw_ring(c, x, y, w, h, rgb(C_SEL));
         }
     sw_draw_chrome(c);
+    if (W.copen) sw_draw_colours(c);
 }
 
 static void sw_draw(Image *c)

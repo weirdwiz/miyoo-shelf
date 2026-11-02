@@ -60,9 +60,14 @@ typedef struct {
     int nallowed;
 } Option;
 
+// Where a configured value came from; a stronger source replaces a weaker one's value,
+// whichever is read first. FROM_CHOICE: changed while the game runs.
+enum { FROM_DEFAULT, FROM_FILE, FROM_CHOICE };
+
 typedef struct {
     const char *key;
     const char *value;
+    int from;
 } RawOption;
 
 typedef struct {
@@ -86,6 +91,9 @@ static Option *opts;
 static int nopts, opts_cap;
 static RawOption *raw;
 static int nraw;
+static int options_updated; // a change the core hasn't been told about yet
+static int audio_muted;     // a peek is running: its sound is dropped
+static int lost;            // a peek couldn't put the game back: it must not be saved
 
 static uint32_t *fb;
 static size_t fb_px;
@@ -159,11 +167,17 @@ static int copy_str(char *dst, const char *src)
 
 // --- core options -------------------------------------------------------------
 
-static const char *raw_get(const char *key)
+static RawOption *raw_find(const char *key)
 {
     for (int i = 0; i < nraw; i++)
-        if (!strcmp(raw[i].key, key)) return raw[i].value;
+        if (!strcmp(raw[i].key, key)) return &raw[i];
     return NULL;
+}
+
+static const char *raw_get(const char *key)
+{
+    RawOption *r = raw_find(key);
+    return r ? r->value : NULL;
 }
 
 static char *trim(char *s)
@@ -176,21 +190,36 @@ static char *trim(char *s)
     return s;
 }
 
-static int raw_set(const char *key, const char *value)
+// Records `value` for `key` unless a stronger source already set it.
+static int raw_set(const char *key, const char *value, int from)
 {
-    for (int i = 0; i < nraw; i++) {
-        if (!strcmp(raw[i].key, key)) {
-            raw[i].value = arena_str(value);
-            return raw[i].value ? 0 : -1;
-        }
+    RawOption *r = raw_find(key);
+    if (r) {
+        const char *v;
+        if (r->from > from) return 0;
+        if (!(v = arena_str(value))) return -1;
+        r->value = v;
+        r->from = from;
+        return 0;
     }
     RawOption *p = realloc(raw, (size_t)(nraw + 1) * sizeof *p);
     if (!p) return -1;
     raw = p;
     raw[nraw].key = arena_str(key);
     raw[nraw].value = arena_str(value);
+    raw[nraw].from = from;
     if (!raw[nraw].key || !raw[nraw].value) return -1;
     nraw++;
+    return 0;
+}
+
+// Shelf's own values for some options; malformed entries are skipped.
+static int raw_set_list(const PlayerOption *list, int n, int from)
+{
+    for (int i = 0; list && i < n; i++)
+        if (list[i].key && list[i].key[0] && list[i].value && list[i].value[0] &&
+            raw_set(list[i].key, list[i].value, from))
+            return -1;
     return 0;
 }
 
@@ -216,7 +245,7 @@ static void options_load(const char *path)
             value[n - 1] = 0;
             value++;
         }
-        if (key[0] && value[0]) raw_set(key, value);
+        if (key[0] && value[0]) raw_set(key, value, FROM_FILE);
     }
     fclose(f);
 }
@@ -267,7 +296,8 @@ static int opt_set(const char *key, const char *def, const char *const *values, 
         o->nallowed = nvalues;
     }
 
-    // The configured value wins when the core allows it, otherwise the default.
+    // The configured value (Shelf's or the options file's) wins when the core allows it,
+    // otherwise the core's default.
     want = raw_get(o->key);
     if (want && opt_allows(o, want)) chosen = want;
     if (!chosen && def && opt_allows(o, def)) chosen = def;
@@ -398,7 +428,7 @@ static double resample_step(size_t frames)
 static void audio_batch(const int16_t *data, size_t frames)
 {
     double step;
-    if (!ring || !data) return;
+    if (!ring || !data || audio_muted) return;
     step = resample_step(frames);
     for (size_t i = 0; i < frames; i++) {
         int16_t l = data[2 * i], r = data[2 * i + 1];
@@ -593,7 +623,8 @@ static bool env_cb(unsigned command, void *data)
         return true;
     }
     case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
-        if (data) *(bool *)data = false;
+        if (data) *(bool *)data = options_updated != 0;
+        options_updated = 0; // told once: the core re-reads every option it cares about
         return true;
     case RETRO_ENVIRONMENT_SET_VARIABLES:
         return set_variables(data) == 0;
@@ -804,6 +835,8 @@ static void reset_state(void)
     nopts = opts_cap = 0;
     raw = NULL;
     nraw = 0;
+    options_updated = 0;
+    audio_muted = lost = 0;
     arena = NULL;
     narena = arena_cap = 0;
 }
@@ -860,6 +893,11 @@ int player_open(const PlayerConfig *cfg, char *err, int errlen)
         goto fail;
     }
     options_load(cfg->options_path);
+    if (raw_set_list(cfg->defaults, cfg->ndefaults, FROM_DEFAULT) ||
+        raw_set_list(cfg->choices, cfg->nchoices, FROM_CHOICE)) {
+        fail(err, errlen, "out of memory for the core options");
+        goto fail;
+    }
     if (mkdir(save_dir, 0755) != 0 && errno != EEXIST) {
         // Not fatal: the game still runs, its saves will report write errors.
     }
@@ -978,6 +1016,66 @@ void player_run(void)
 
 const PlayerFrame *player_frame(void) { return &frame; }
 
+int player_set_option(const char *key, const char *value)
+{
+    Option *o = NULL;
+    const char *v;
+
+    if (!open_flag || !key || !value || !value[0]) return -1;
+    for (int i = 0; i < nopts && !o; i++)
+        if (!strcmp(opts[i].key, key)) o = &opts[i];
+    if (!o || !opt_allows(o, value)) return -1;
+    // Kept as the strongest source too, so it survives the core declaring its options anew.
+    if (raw_set(key, value, FROM_CHOICE)) return -1;
+    if (o->value && !strcmp(o->value, value)) return 0;
+    if (!(v = arena_str(value))) return -1;
+    o->value = v;
+    options_updated = 1;
+    return 1;
+}
+
+int player_peek(int frames)
+{
+    size_t size;
+    uint8_t *state, *mem[2] = {NULL, NULL};
+    int rc = -1;
+
+    if (!open_flag || lost || frames < 1 || frames > 8) return -1;
+    size = core.serialize_size();
+    if (!size || size > FILE_MAX || !(state = malloc(size))) return -1;
+    if (!core.serialize(state, size)) goto done;
+    // Save states don't always carry the cartridge save (mGBA's leave it out), and a frame
+    // may write to it: it goes back by hand.
+    for (int i = 0; i < 2; i++) {
+        void *data = mems[i].size ? core.get_memory_data(mems[i].id) : NULL;
+        if (!data) continue;
+        if (!(mem[i] = malloc(mems[i].size))) goto done;
+        memcpy(mem[i], data, mems[i].size);
+    }
+    // The frames' sound never happened: the core's output isn't taken while they run, so
+    // what was buffered before plays on untouched.
+    audio_muted = 1;
+    for (int i = 0; i < frames; i++) core.run();
+    audio_muted = 0;
+    if (!core.unserialize(state, size)) {
+        // The game is frames ahead of where it was paused, and its saves may not match its
+        // state: nothing of it may be saved from now on (see player_save_*).
+        lost = 1;
+        rc = PLAYER_PEEK_LOST;
+        goto done;
+    }
+    for (int i = 0; i < 2; i++) {
+        void *data = mem[i] ? core.get_memory_data(mems[i].id) : NULL;
+        if (data) memcpy(data, mem[i], mems[i].size);
+    }
+    rc = 0;
+done:
+    free(mem[0]);
+    free(mem[1]);
+    free(state);
+    return rc;
+}
+
 double player_fps(void) { return timing.fps > 0 ? timing.fps : 60.0; }
 
 void player_reset(void)
@@ -991,7 +1089,7 @@ int player_save_state(const char *path)
     uint8_t *buf;
     int rc = -1;
 
-    if (!open_flag || !path) return -1;
+    if (!open_flag || lost || !path) return -1;
     size = core.serialize_size();
     if (!size || size > FILE_MAX) return -1;
     buf = malloc(size);
@@ -1017,7 +1115,7 @@ int player_load_state(const char *path)
 int player_save_sram(void)
 {
     int rc = 0;
-    if (!open_flag) return -1;
+    if (!open_flag || lost) return -1;
     for (int i = 0; i < 2; i++)
         if (mem_save(&mems[i]) != 0) rc = -1;
     return rc;
