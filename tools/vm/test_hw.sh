@@ -5,6 +5,7 @@
 set -eu
 . "$(dirname "$0")/common.sh"
 vm_running || sh tools/vm/start.sh
+vm_mount_shares
 mkdir -p "$PWD/build/mm"
 TOOLCHAIN=docker.io/aemiii91/miyoomini-toolchain:latest
 MM_FLAGS="-O2 -marm -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -std=c11 -D_DEFAULT_SOURCE"

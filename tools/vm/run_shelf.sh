@@ -23,8 +23,7 @@ fi
 
 [ -x "$DIST/.shelf/bin/shelf" ] || { echo "vm: run 'make mm dist' first" >&2; exit 1; }
 vm_running || sh tools/vm/start.sh
-# The 9p transport can load after fstab has already skipped the card (it has nofail).
-vm_ssh 'mountpoint -q /mnt/SDCARD || { modprobe 9pnet_virtio; mount /mnt/SDCARD; }'
+vm_mount_shares
 stop_shelf
 
 mkdir -p "$SDCARD"

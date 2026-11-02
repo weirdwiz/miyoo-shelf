@@ -5,6 +5,7 @@
 set -eu
 . "$(dirname "$0")/common.sh"
 vm_running || sh tools/vm/start.sh
+vm_mount_shares
 # rom core frames frame-sha256-prefix note
 # Frames are taken with Shelf's option defaults (src/core_options.c), as the device shows
 # them: dmg_sound in the Game Boy Pocket palette, the GBA ROMs colour corrected.
