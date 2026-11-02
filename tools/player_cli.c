@@ -4,7 +4,9 @@
 // Keys: a b start select up down left right l r x y l2 r2. SHELF_AUDIO_DUMP=<path> writes
 // the resampled 48 kHz stereo output as raw s16le. Optional SHELF_SYSTEM_DIR,
 // SHELF_SAVE_DIR and SHELF_OPTIONS pick the frontend directories and option file. Shelf's
-// own option defaults for the core (by its file name, <core>_libretro.so) apply as in Shelf.
+// own option defaults for the core (by its file name, <core>_libretro.so) apply as in Shelf,
+// and its colour choices with the default settings: SHELF_COLOURS=0 turns correction off,
+// SHELF_PALETTE=<0-3> picks a Game Boy palette (core_options.h).
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -118,6 +120,8 @@ int main(int argc, char **argv)
     PlayerConfig cfg;
     Event events[MAX_EVENTS];
     char stem[256], err[256], core[64];
+    PlayerOption choices[CORE_CHOICES_MAX];
+    const char *colours = getenv("SHELF_COLOURS"), *palette = getenv("SHELF_PALETTE");
     const char *dump_path;
     FILE *dump = NULL;
     int16_t *audio;
@@ -147,6 +151,9 @@ int main(int argc, char **argv)
     cfg.options_path = getenv("SHELF_OPTIONS");
     core_name(argv[1], core, sizeof core);
     cfg.defaults = core_defaults(core, &cfg.ndefaults);
+    cfg.choices = choices;
+    cfg.nchoices = core_choices(core, colours ? atoi(colours) != 0 : 1,
+                                palette ? atoi(palette) : PALETTE_DEFAULT, choices, CORE_CHOICES_MAX);
     cfg.sample_rate = 48000;
     if (!cfg.system_dir) cfg.system_dir = ".";
     if (!cfg.save_dir) cfg.save_dir = ".";

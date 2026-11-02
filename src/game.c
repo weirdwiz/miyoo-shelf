@@ -46,6 +46,10 @@ typedef struct {
     PowerBattery battery;    // the newest reading
     double last_input;       // the last press, or change in the buttons held while playing
     int undimmed;            // the last power step woke a dimmed menu
+    const char *core_name;   // "gambatte", "mgba": which options the choices set
+    CoreLcd lcd;             // which colour choice the game gets
+    Settings look;           // the settings it started with (set->settings, or the defaults),
+                             // kept up to date with the colour row's changes
 } Session;
 
 static char problem[192]; // see game_error()
@@ -316,6 +320,50 @@ static void cards_free(Cards *c)
     memset(c, 0, sizeof *c);
 }
 
+/* ---------- colours ---------- */
+
+static UiPalette menu_palettes[PALETTE_COUNT];
+
+// The menu's colour row for this game: a Game Boy game's palette, or colour correction.
+static void colours_row(const Session *s)
+{
+    for (int i = 0; i < PALETTE_COUNT; i++) {
+        const CorePalette *p = core_palette(i);
+        menu_palettes[i].name = p->name;
+        memcpy(menu_palettes[i].shade, p->shade, sizeof p->shade);
+    }
+    ui_switch_colours(s->lcd == LCD_GB ? UI_COLOURS_PALETTE
+                      : s->lcd == LCD_GBC || s->lcd == LCD_GBA ? UI_COLOURS_SWITCH : UI_COLOURS_NONE,
+                      menu_palettes, PALETTE_COUNT);
+}
+
+// The colour row changed a setting: the core gets it now, the paused game's card shows it,
+// and it's saved.
+static void colours_apply(Session *s, Cards *c)
+{
+    Settings want = ui_settings();
+    PlayerOption opts[CORE_CHOICES_MAX];
+    int changed = 0;
+    if (want.colours == s->look.colours && want.palette == s->look.palette) return;
+    s->look.colours = want.colours;
+    s->look.palette = want.palette;
+    int n = core_choices(s->core_name, want.colours, want.palette, opts, CORE_CHOICES_MAX);
+    for (int i = 0; i < n; i++)
+        if (player_set_option(opts[i].key, opts[i].value) > 0) changed = 1;
+    if (s->set->settings) {
+        s->set->settings->colours = want.colours;
+        s->set->settings->palette = want.palette;
+        settings_save(s->set->settings);
+    }
+    // gambatte re-reads its options at the end of a frame, so the second frame shows them.
+    if (!changed || player_peek(2)) return;
+    Image *old = c->live_card;
+    c->live_card = NULL;
+    build_live(c, s->set->scale); // a new card image, so the switcher redraws its sprite
+    img_free(old);
+    c->rev++;
+}
+
 /* ---------- the in-game menu ---------- */
 
 enum { MENU_RESUME = 1, MENU_RESTART, MENU_SWITCH, MENU_HOME, MENU_POWER_OFF }; // 0: still open
@@ -378,6 +426,7 @@ static void menu_button(void *ud, Button b)
         m->done = MENU_POWER_OFF;
         return;
     case BTN_SELECT:
+        if (ui_switch_colours_open()) return; // the colour row has the buttons
         m->confirming = 1;
         ui_switch_notice("Restart the game?");
         return;
@@ -439,6 +488,7 @@ static int menu_after(void *ud)
     Menu *m = ud;
     if (m->done) return 1;
     switch (ui_take_action()) {
+    case UI_SETTINGS: colours_apply(m->s, m->cards); break;
     case UI_SW_RESUME: m->done = MENU_RESUME; break;
     case UI_SW_HOME: m->done = MENU_HOME; break;
     case UI_SW_PLAY: {
@@ -471,6 +521,8 @@ static int run_menu(Session *s)
         return MENU_RESUME;
     }
 
+    ui_set_settings(&s->look); // the rest of the settings carry over: only colours change here
+    colours_row(s);
     platform_performance(0); // a paused game needs no more than the home screen
     ui_set_status(s->battery.valid ? s->battery.percent : -1, s->battery.charging);
     s->last_input = platform_now(); // MENU was just pressed
@@ -622,6 +674,10 @@ int game_play(Library *lib, int game, const GameSettings *set, int *switch_to)
     if (lib->nrecent < 1 || lib->recent[0] != game) lib_mark_played(lib, game);
 
     const char *core = lib->sys[lib->games[game].sys].core;
+    s.core_name = core;
+    s.lcd = core_lcd(core, s.rom);
+    if (set->settings) s.look = *set->settings;
+    else settings_defaults(&s.look);
     char dev[PATH_LEN], bios[PATH_LEN], options[PATH_LEN];
     host_path(SD_PREFIX "/BIOS", bios, sizeof bios);
     snprintf(dev, sizeof dev, SD_PREFIX "/.shelf/data/%s.opt", core);
@@ -629,9 +685,12 @@ int game_play(Library *lib, int game, const GameSettings *set, int *switch_to)
 
     int ndefaults;
     const PlayerOption *defaults = core_defaults(core, &ndefaults);
+    PlayerOption choices[CORE_CHOICES_MAX];
+    int nchoices = core_choices(core, s.look.colours, s.look.palette, choices, CORE_CHOICES_MAX);
     PlayerConfig cfg = {.core_path = s.core, .rom_path = s.rom, .system_dir = bios,
                         .save_dir = s.save_dir, .stem = s.stem, .options_path = options,
                         .defaults = defaults, .ndefaults = ndefaults,
+                        .choices = choices, .nchoices = nchoices,
                         .sample_rate = PLATFORM_AUDIO_RATE, .buffer_ms = PLATFORM_AUDIO_RING_MS};
     char err[160];
     // Full speed from here to the save on the way out: reading the ROM, loading the core

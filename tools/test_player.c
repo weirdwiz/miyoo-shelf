@@ -353,7 +353,8 @@ static void test_options(void)
     printf("core options\n");
 }
 
-static void open_with(const char *options, const PlayerOption *defs, int ndefs)
+static void open_choosing(const char *options, const PlayerOption *defs, int ndefs,
+                          const PlayerOption *choices, int nchoices)
 {
     PlayerConfig cfg;
     char err[256];
@@ -361,7 +362,14 @@ static void open_with(const char *options, const PlayerOption *defs, int ndefs)
     config(&cfg, core_path, rom, saves, "live", options);
     cfg.defaults = defs;
     cfg.ndefaults = ndefs;
+    cfg.choices = choices;
+    cfg.nchoices = nchoices;
     if (player_open(&cfg, err, sizeof err) != 0) fail_at(__LINE__, "open failed: %s", err);
+}
+
+static void open_with(const char *options, const PlayerOption *defs, int ndefs)
+{
+    open_choosing(options, defs, ndefs, NULL, 0);
 }
 
 // Shelf's defaults sit between the core's own and the options file.
@@ -463,6 +471,73 @@ static void test_live_options(void)
     unsetenv("FAKE_CORE_LEGACY_OPTIONS");
     unsetenv("FAKE_CORE_NO_DUPES");
     printf("live core options\n");
+}
+
+// The player's choices win over the options file for the keys they set, and only those.
+static void test_choices(void)
+{
+    static const PlayerOption defs[] = { { "fake_tint", "red" }, { "fake_format", "xrgb" } };
+    static const PlayerOption blue[] = { { "fake_tint", "blue" } };
+    char path[600];
+    snprintf(path, sizeof path, "%s/choices.opt", work);
+    write_text(path, "fake_tint = \"off\"\nfake_format = \"1555\"\n");
+    setenv("FAKE_CORE_NO_DUPES", "1", 1);
+    for (int legacy = 0; legacy < 2; legacy++) {
+        if (legacy) setenv("FAKE_CORE_LEGACY_OPTIONS", "1", 1);
+        open_choosing(path, defs, 2, blue, 1);
+        player_run();
+        CHECK(tint_code() == 2, "a choice beats the options file, got tint %u", tint_code());
+        CHECK(format_code() == 2, "the file still beats Shelf's defaults elsewhere, got format %u", format_code());
+        CHECK(player_set_option("fake_tint", "blue") == 0, "the chosen value is the current one");
+        player_close();
+        open_choosing(NULL, defs, 2, blue, 1);
+        player_run();
+        CHECK(tint_code() == 2 && format_code() == 1, "a choice beats a default (tint %u, format %u)",
+              tint_code(), format_code());
+        player_close();
+    }
+    unsetenv("FAKE_CORE_LEGACY_OPTIONS");
+    unsetenv("FAKE_CORE_NO_DUPES");
+    printf("Shelf's choices\n");
+}
+
+// A peek shows the next frames and leaves the game, its saves and its sound as they were.
+static void test_peek(void)
+{
+    static const PlayerOption red[] = { { "fake_tint", "red" } };
+    char srm[700], rtc[700];
+    snprintf(srm, sizeof srm, "%s/live.srm", saves);
+    snprintf(rtc, sizeof rtc, "%s/live.rtc", saves);
+    remove(srm);
+    remove(rtc);
+    setenv("FAKE_CORE_NO_DUPES", "1", 1);
+    CHECK(player_peek(2) == -1, "no player, no peek");
+    open_with(NULL, red, 1);
+    player_set_input(PLAYER_A);
+    run_frames(5);
+    CHECK(frame_counter() == 4, "five runs show counter 4, got %u", frame_counter());
+    CHECK(player_save_sram() == 0, "the saves are written");
+    CHECK(remove(srm) == 0 && remove(rtc) == 0, "SRAM and RTC were saved");
+    int queued = player_audio_queued();
+    CHECK(queued > 0, "the frames buffered sound");
+    CHECK(player_peek(0) == -1 && player_peek(9) == -1, "a peek is 1 to 8 frames");
+
+    CHECK(player_set_option("fake_tint", "blue") == 1, "a change to show");
+    CHECK(player_peek(2) == 0, "the peek runs");
+    CHECK(tint_code() == 2, "the peeked frame has the new value, tint %u", tint_code());
+    CHECK(frame_counter() == 6, "two frames on, counter 6, got %u", frame_counter());
+    CHECK(input_mask() == PLAYER_A, "with the buttons held, got %#x", input_mask());
+    CHECK(player_audio_queued() == queued, "the peek's sound is dropped (%d buffered, was %d)",
+          player_audio_queued(), queued);
+    CHECK(player_save_sram() == 0, "nothing to save");
+    CHECK(access(srm, F_OK) != 0 && access(rtc, F_OK) != 0, "SRAM and RTC are as they were");
+
+    run_frames(1);
+    CHECK(frame_counter() == 5, "the game goes on from where it was, counter 5, got %u", frame_counter());
+    CHECK(tint_code() == 2, "with the new value, tint %u", tint_code());
+    player_close();
+    unsetenv("FAKE_CORE_NO_DUPES");
+    printf("peeking at a paused game\n");
 }
 
 static void test_state(void)
@@ -854,6 +929,8 @@ int main(int argc, char **argv)
     test_options();
     test_shelf_defaults();
     test_live_options();
+    test_choices();
+    test_peek();
     test_state();
     test_sram();
     test_sram_write_failure();

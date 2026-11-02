@@ -45,7 +45,7 @@ void ui_reset_home(void);
 // Requests from the Options panel and the switcher view, taken once each.
 enum {
     UI_NONE,
-    UI_SETTINGS,   // brightness, volume, screen or theme changed: apply and save
+    UI_SETTINGS,   // brightness, volume, screen, theme or colours changed: apply and save
     UI_POWER_OFF,  // power off was confirmed in Options
     UI_SW_RESUME,  // back to the paused game
     UI_SW_PLAY,    // start ui_switch_target()
@@ -80,6 +80,18 @@ void ui_switch_card_size(int *w, int *h);
 // NULL clears it.
 void ui_switch_notice(const char *text);
 int ui_switch_target(void);
+// The paused game's colour row, which START opens under its card: a Game Boy game's
+// Palette (one of `npalettes`, cycled with LEFT/RIGHT/A, saved as Settings.palette) or a
+// Game Boy Color or Advance game's Colours switch (Settings.colours). A change asks for
+// UI_SETTINGS like the Options panel. Call after entering the switcher; UI_COLOURS_NONE
+// (the default) offers neither.
+enum { UI_COLOURS_NONE, UI_COLOURS_SWITCH, UI_COLOURS_PALETTE };
+typedef struct {
+    const char *name;
+    uint32_t shade[4]; // 0xRRGGBB, lightest first
+} UiPalette;
+void ui_switch_colours(int row, const UiPalette *palettes, int npalettes);
+int ui_switch_colours_open(void); // the row is up: it owns the buttons until B closes it
 // Benchmark: play the opening zoom again, from full screen into the row.
 void ui_switch_reopen(void);
 

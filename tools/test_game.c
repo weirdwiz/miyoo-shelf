@@ -29,6 +29,7 @@ static char sd[PATH_LEN]; // the fake SD card's root
 static char fonts[PATH_LEN];
 static char core[PATH_LEN];
 static GameSettings gs;
+static Settings prefs; // what main would hold: the in-game colour row saves into it
 
 /* ---------- the fake SD card ---------- */
 
@@ -122,6 +123,19 @@ static const char *sent(const char *event, const char *key)
 static void write_text(const char *path, const char *text)
 {
     CHECK(write_file(path, text, strlen(text)) == 0);
+}
+
+// settings.json as the colour row left it.
+static int settings_has(const char *text)
+{
+    char path[PATH_LEN], buf[1024] = "";
+    host_path(DATA_DIR "/settings.json", path, sizeof path);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    buf[n] = 0;
+    fclose(f);
+    return strstr(buf, text) != NULL;
 }
 
 /* ---------- reading what a session left behind ---------- */
@@ -614,6 +628,92 @@ int main(int argc, char **argv)
     CHECK(!strcmp(sent("load", "mgba_interframe_blending"), "mix"));
     CHECK(!strcmp(sent("load", "mgba_color_correction"), "GBA"));
     unlink(opt);
+
+    // The colour row. A Game Boy game: START opens its palette, RIGHT and A step through
+    // them, SELECT doesn't ask to restart while the row is up, B puts it away. Each step
+    // reaches the core at once and is saved.
+    settings_defaults(&prefs);
+    gs.settings = &prefs;
+    fp_reset();
+    fp_limit(20);
+    fp_press_at(1.0, BTN_MENU);
+    fp_press_at(1.6, BTN_START);
+    fp_press_at(1.8, BTN_RIGHT);  // Green
+    fp_press_at(2.0, BTN_SELECT); // ignored
+    fp_press_at(2.2, BTN_A);      // Teal: A changes the row, it doesn't confirm a restart
+    fp_press_at(2.4, BTN_B);      // the row goes
+    fp_press_at(2.8, BTN_A);      // and A resumes
+    fp_press_at(4.0, BTN_MENU);
+    fp_press_at(4.6, BTN_B);
+    long played_to = state_counter(alpha);
+    CHECK(session(alpha, &next) == GAME_HOME);
+    CHECK(state_counter(alpha) > played_to + 60); // resumed and played on: no restart
+    CHECK(prefs.palette == PALETTE_TEAL && prefs.colours == 1);
+    CHECK(settings_has("\"palette\": \"teal\""));
+    CHECK(!strcmp(sent("update", "gambatte_gb_internal_palette"), "GB - Light"));
+    CHECK(!strcmp(sent("update", "gambatte_gb_colorization"), "internal"));
+    // The next session starts in it, and the saved settings agree.
+    fp_reset();
+    fp_limit(5);
+    fp_press_at(0.4, BTN_MENU);
+    fp_press_at(1.0, BTN_B);
+    CHECK(session(alpha, &next) == GAME_HOME);
+    CHECK(!strcmp(sent("load", "gambatte_gb_internal_palette"), "GB - Light"));
+    Settings loaded;
+    CHECK(settings_load(&loaded) == 0 && loaded.palette == PALETTE_TEAL && loaded.colours == 1);
+    // LEFT goes back and wraps: Teal, Green, Pocket, Mono (the core's colorization off).
+    fp_reset();
+    fp_limit(20);
+    fp_press_at(1.0, BTN_MENU);
+    fp_press_at(1.6, BTN_START);
+    for (int i = 0; i < 3; i++) fp_press_at(1.8 + 0.2 * i, BTN_LEFT);
+    fp_press_at(2.6, BTN_START); // START puts it away too
+    fp_press_at(3.0, BTN_B);
+    CHECK(session(alpha, &next) == GAME_HOME);
+    CHECK(prefs.palette == PALETTE_MONO && settings_has("\"palette\": \"mono\""));
+    CHECK(!strcmp(sent("update", "gambatte_gb_colorization"), "disabled"));
+    // The choice beats a palette in the options file; the file keeps the rest.
+    snprintf(opt, sizeof opt, "%s/.shelf/data/gambatte.opt", sd);
+    write_text(opt, "gambatte_gb_colorization = \"auto\"\ngambatte_mix_frames = \"mix\"\n");
+    prefs.palette = PALETTE_GREEN;
+    fp_reset();
+    fp_limit(5);
+    fp_press_at(0.4, BTN_MENU);
+    fp_press_at(1.0, BTN_B);
+    CHECK(session(alpha, &next) == GAME_HOME);
+    CHECK(!strcmp(sent("load", "gambatte_gb_colorization"), "internal"));
+    CHECK(!strcmp(sent("load", "gambatte_gb_internal_palette"), "PixelShift - Pack 1"));
+    CHECK(!strcmp(sent("load", "gambatte_gb_palette_pixelshift_1"), "PixelShift 23 - GB Kiosk 2"));
+    CHECK(!strcmp(sent("load", "gambatte_mix_frames"), "mix"));
+    unlink(opt);
+
+    // A Game Boy Advance game: START opens its Colours switch, A turns correction off.
+    fp_reset();
+    fp_limit(20);
+    fp_press_at(1.0, BTN_MENU);
+    fp_press_at(1.6, BTN_START);
+    fp_press_at(1.8, BTN_A);
+    fp_press_at(2.2, BTN_B);
+    fp_press_at(2.6, BTN_B);
+    CHECK(session(gamma, &next) == GAME_HOME);
+    CHECK(prefs.colours == 0 && settings_has("\"colours\": false"));
+    CHECK(!strcmp(sent("update", "mgba_color_correction"), "OFF"));
+    fp_reset();
+    fp_limit(5);
+    fp_press_at(0.4, BTN_MENU);
+    fp_press_at(1.0, BTN_B);
+    CHECK(session(gamma, &next) == GAME_HOME);
+    CHECK(!strcmp(sent("load", "mgba_color_correction"), "OFF"));
+    // The row only opens over the paused game: START on another card does nothing.
+    fp_reset();
+    fp_limit(20);
+    fp_press_at(1.0, BTN_MENU);
+    fp_press_at(1.6, BTN_RIGHT);
+    fp_press_at(1.8, BTN_START);
+    fp_press_at(2.0, BTN_A); // so A plays the other card
+    CHECK(session(gamma, &next) == GAME_SWITCH);
+    CHECK(prefs.colours == 0);
+    gs.settings = NULL;
     unsetenv("FAKE_CORE_OPTION_LOG");
 
     // Every in-game menu above opened the same loaded UI: the two font files (Bold and

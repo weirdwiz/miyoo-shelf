@@ -397,7 +397,7 @@ int main(void)
         for (;;) {
             if (want < 0) break;
             if (lib_mark_played(&lib, want)) fprintf(stderr, "shelf: couldn't save recents\n");
-            GameSettings gs = {set.scale, font_dir};
+            GameSettings gs = {set.scale, font_dir, &set}; // the colour row saves into set
             int next = -1;
             int result = game_play(&lib, want, &gs, &next);
             if (game_error()[0]) snprintf(toast, sizeof toast, "%s", game_error());

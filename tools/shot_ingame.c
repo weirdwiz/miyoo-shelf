@@ -1,7 +1,8 @@
 // docs/screenshots/7-ingame-menu.png: the in-game menu over a running fake-core game.
 // It plays the newest recent through the real game loop on the fake platform, pauses into
-// the switcher, and writes the settled menu. Usage:
-//   shot-ingame <SDCARD> <fonts> <fake core .so> <out.ppm>
+// the switcher, and writes the settled menu. With `colours`, START opens the paused game's
+// colour row first (9-ingame-colours.png). Usage:
+//   shot-ingame <SDCARD> <fonts> <fake core .so> <out.ppm> [colours]
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,8 +27,8 @@ static int write_ppm(const Image *img, const char *out)
 
 int main(int argc, char **argv)
 {
-    if (argc != 5) {
-        fprintf(stderr, "usage: %s <SDCARD> <fonts> <fake core .so> <out.ppm>\n", argv[0]);
+    if (argc != 5 && !(argc == 6 && !strcmp(argv[5], "colours"))) {
+        fprintf(stderr, "usage: %s <SDCARD> <fonts> <fake core .so> <out.ppm> [colours]\n", argv[0]);
         return 2;
     }
     setenv("SHELF_CORE", argv[3], 1);
@@ -38,13 +39,16 @@ int main(int argc, char **argv)
         return 1;
     }
     icons_init(&lib);
-    GameSettings set = {SCALE_SHARP, argv[2]};
+    GameSettings set = {SCALE_SHARP, argv[2], NULL};
+    int colours = argc == 6;
 
     fp_reset();
     fp_limit(30);
-    fp_press_at(1.5, BTN_MENU); // pause into the switcher
-    fp_capture_at(2.6);         // once its cards have all arrived
-    fp_press_at(3.4, BTN_B);    // leave again so the tool can finish
+    fp_press_at(1.5, BTN_MENU);                // pause into the switcher
+    if (colours) fp_press_at(2.6, BTN_START);  // the paused game's colour row, drawn at once
+    fp_capture_at(2.6);                        // once its cards have all arrived
+    if (colours) fp_press_at(3.2, BTN_B);
+    fp_press_at(3.4, BTN_B);                   // leave again so the tool can finish
     int next = -1;
     int result = game_play(&lib, lib.recent[0], &set, &next);
 

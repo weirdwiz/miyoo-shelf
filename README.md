@@ -17,6 +17,10 @@ commits: gambatte for GB and GBC, mGBA for GBA (`make cores`).
 |---|---|---|
 | ![](docs/screenshots/5-dark.png) | ![](docs/screenshots/7-ingame-menu.png) | ![](docs/screenshots/8-options.png) |
 
+| Colours (START in a game) | Palette, real gambatte in the VM | Colours, real mGBA in the VM |
+|---|---|---|
+| ![](docs/screenshots/9-ingame-colours.png) | ![](docs/screenshots/vm-palette.png) | ![](docs/screenshots/vm-colours.png) |
+
 ## Using it
 
 - **Home** is one row: recent games first, then the folders. L1 jumps to the recents, R1 to
@@ -48,18 +52,32 @@ commits: gambatte for GB and GBC, mGBA for GBA (`make cores`).
 - **Colours** look right without a settings screen. Game Boy games get the Game Boy
   Pocket's soft grey-green instead of plain grey; Game Boy Color and Game Boy Advance
   games are colour corrected to look like those consoles' own screens. Frame blending is
-  off (it costs battery) and boot logos are skipped.
+  off (it costs battery) and boot logos are skipped. **START** in the in-game menu, on the
+  paused game, opens its one colour choice under its card: **Palette** for a Game Boy game
+  (Pocket, Green, Teal, Mono, shown as swatches) or **Colours** for a Game Boy Color or
+  Advance game (correction on or off). LEFT/RIGHT/A change it, B puts it away. The card
+  shows the change at once, the game resumes with it, and it is saved to `settings.json`
+  for every game of that kind. Whether a game is Game Boy or Game Boy Color comes from
+  its cartridge header, not its folder.
 
 ### Core options
 
-Shelf sets the cores' options it cares about itself (`src/core_options.c`). A
-RetroArch-style `.shelf/data/gambatte.opt` or `mgba.opt` (`key = "value"` lines) overrides
-any of them, and sets anything else the core offers.
+Shelf sets the cores' options it cares about itself (`src/core_options.c`), in three
+layers, weakest first:
+
+1. Shelf's defaults (frame blending off, boot logos skipped, accurate GBC correction).
+2. A RetroArch-style `.shelf/data/gambatte.opt` or `mgba.opt` (`key = "value"` lines):
+   overrides any default, and sets anything else the core offers.
+3. The in-game Palette and Colours choices, for the few keys they control:
+   `gambatte_gb_colorization`, `gambatte_gb_internal_palette` (and its pack's palette key),
+   `gambatte_gbc_color_correction`, `mgba_color_correction`. The last thing chosen in the
+   menu is what the game shows, whatever the file says; for every other key the file wins.
 
 ## Controls
 
-D-pad moves · A play/open · B back · X favorite · Y sort · L1/R1 first/last · START options ·
-MENU switcher in a game, options elsewhere · POWER sleep, hold to power off.
+D-pad moves · A play/open · B back · X favorite · Y sort · L1/R1 first/last · START options
+(in the in-game menu: the paused game's colours) · MENU switcher in a game, options
+elsewhere · POWER sleep, hold to power off.
 
 ## Card layout
 

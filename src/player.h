@@ -25,6 +25,10 @@ typedef struct {
     // the core doesn't allow is ignored and the core's default stays.
     const PlayerOption *defaults;
     int ndefaults;
+    // The player's choices in Shelf (colour correction, palette): over the options file
+    // too, for the keys they set. The same strength as player_set_option.
+    const PlayerOption *choices;
+    int nchoices;
     int sample_rate;          // output rate player_audio_read produces, e.g. 48000
     int buffer_ms;            // audio kept buffered ahead of the reader; 0: 32 ms
 } PlayerConfig;
@@ -64,6 +68,11 @@ const PlayerFrame *player_frame(void);
 // re-reads the options it can change live. Returns 1 when the value changed, 0 when it
 // already had it, -1 when the core has no such option or doesn't allow the value.
 int player_set_option(const char *key, const char *value);
+// Runs `frames` frames (1..8) with the buttons last set, keeps the last frame they drew in
+// player_frame(), and puts the game back exactly where it was: the core's state, SRAM, RTC
+// and buffered sound. For showing a paused game with an option just changed. Returns 0, or
+// -1 (nothing run) when the game can't be saved and restored.
+int player_peek(int frames);
 double player_fps(void);  // the core's frames per second (av_info timing)
 void player_reset(void);
 

@@ -890,7 +890,8 @@ int player_open(const PlayerConfig *cfg, char *err, int errlen)
         goto fail;
     }
     options_load(cfg->options_path);
-    if (raw_set_list(cfg->defaults, cfg->ndefaults, FROM_DEFAULT)) {
+    if (raw_set_list(cfg->defaults, cfg->ndefaults, FROM_DEFAULT) ||
+        raw_set_list(cfg->choices, cfg->nchoices, FROM_CHOICE)) {
         fail(err, errlen, "out of memory for the core options");
         goto fail;
     }
@@ -1028,6 +1029,48 @@ int player_set_option(const char *key, const char *value)
     o->value = v;
     options_updated = 1;
     return 1;
+}
+
+int player_peek(int frames)
+{
+    size_t size;
+    uint8_t *state, *mem[2] = {NULL, NULL};
+    int rc = -1;
+
+    if (!open_flag || frames < 1 || frames > 8) return -1;
+    size = core.serialize_size();
+    if (!size || size > FILE_MAX || !(state = malloc(size))) return -1;
+    if (!core.serialize(state, size)) goto done;
+    // Save states don't always carry the cartridge save (mGBA's leave it out), and a frame
+    // may write to it: it goes back by hand.
+    for (int i = 0; i < 2; i++) {
+        void *data = mems[i].size ? core.get_memory_data(mems[i].id) : NULL;
+        if (!data) continue;
+        if (!(mem[i] = malloc(mems[i].size))) goto done;
+        memcpy(mem[i], data, mems[i].size);
+    }
+    uint32_t head = atomic_load_explicit(&ring_head, memory_order_acquire);
+    double was_phase = phase, was_err = drc_err, was_sum = drc_sum, was_step = step_cur;
+    unsigned was_since = step_since;
+    int16_t was_l = prev_l, was_r = prev_r;
+    int was_prev = have_prev;
+    for (int i = 0; i < frames; i++) core.run();
+    rc = core.unserialize(state, size) ? 0 : -1;
+    for (int i = 0; i < 2; i++) {
+        void *data = mem[i] ? core.get_memory_data(mems[i].id) : NULL;
+        if (data) memcpy(data, mem[i], mems[i].size);
+    }
+    // The frames' sound never happened: drop it, and what was buffered before plays on.
+    phase = was_phase; drc_err = was_err; drc_sum = was_sum; step_cur = was_step;
+    step_since = was_since; prev_l = was_l; prev_r = was_r; have_prev = was_prev;
+    uint32_t tail = atomic_load_explicit(&ring_tail, memory_order_acquire);
+    if (head - tail <= ring_cap) atomic_store_explicit(&ring_head, head, memory_order_release);
+    else player_audio_flush();
+done:
+    free(mem[0]);
+    free(mem[1]);
+    free(state);
+    return rc;
 }
 
 double player_fps(void) { return timing.fps > 0 ? timing.fps : 60.0; }

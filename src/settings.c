@@ -16,6 +16,8 @@ void settings_defaults(Settings *s)
     s->brightness = 7;
     s->volume = 12;
     s->scale = SCALE_SHARP;
+    s->colours = 1;
+    s->palette = PALETTE_DEFAULT;
 }
 
 // Reads key into *out when it holds a number inside [lo, hi]; anything else keeps what
@@ -32,7 +34,7 @@ int settings_load(Settings *s)
 {
     if (!s) return -1;
     settings_defaults(s);
-    char path[PATH_LEN], buf[1024];
+    char path[PATH_LEN], buf[2048];
     host_path(SETTINGS_PATH, path, sizeof path);
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
@@ -51,6 +53,12 @@ int settings_load(Settings *s)
     if (cJSON_IsString(scale))
         for (int i = 0; i < SCALE_MODES; i++)
             if (!strcmp(scale->valuestring, SCALE_NAMES[i])) s->scale = (ScaleMode)i;
+    cJSON *colours = cJSON_GetObjectItem(j, "colours");
+    if (cJSON_IsBool(colours)) s->colours = cJSON_IsTrue(colours);
+    cJSON *palette = cJSON_GetObjectItem(j, "palette");
+    if (cJSON_IsString(palette))
+        for (int i = 0; i < PALETTE_COUNT; i++)
+            if (!strcmp(palette->valuestring, core_palette(i)->id)) s->palette = i;
     cJSON_Delete(j);
     return 0;
 }
@@ -59,9 +67,14 @@ int settings_save(const Settings *s)
 {
     if (!s) return -1;
     int scale = s->scale >= 0 && s->scale < SCALE_MODES ? (int)s->scale : SCALE_SHARP;
-    char json[160];
-    snprintf(json, sizeof json, "{\"dark\": %s, \"brightness\": %d, \"volume\": %d, \"scale\": \"%s\"}\n",
-             s->dark ? "true" : "false", s->brightness, s->volume, SCALE_NAMES[scale]);
+    const CorePalette *palette = core_palette(s->palette);
+    if (!palette) palette = core_palette(PALETTE_DEFAULT);
+    char json[256];
+    snprintf(json, sizeof json,
+             "{\"dark\": %s, \"brightness\": %d, \"volume\": %d, \"scale\": \"%s\", "
+             "\"colours\": %s, \"palette\": \"%s\"}\n",
+             s->dark ? "true" : "false", s->brightness, s->volume, SCALE_NAMES[scale],
+             s->colours ? "true" : "false", palette->id);
     if (lib_write_json(SETTINGS_PATH, json)) {
         fprintf(stderr, "shelf: couldn't save the settings\n");
         return -1;

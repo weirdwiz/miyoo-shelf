@@ -46,33 +46,33 @@ $(BUILD)/test-library: tools/test_library.c src/library.c src/library.h third_pa
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -o $@ tools/test_library.c src/library.c third_party/cJSON.c
 
-$(BUILD)/test-loop: tools/test_loop.c src/loop.c src/ui.c src/icons.c src/library.c src/settings.c src/text.c src/gfx.c $(wildcard src/*.h)
+$(BUILD)/test-loop: tools/test_loop.c src/loop.c src/ui.c src/icons.c src/library.c src/settings.c src/core_options.c src/text.c src/gfx.c $(wildcard src/*.h)
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) -o $@ tools/test_loop.c src/loop.c src/ui.c src/icons.c src/library.c src/settings.c src/text.c src/gfx.c third_party/cJSON.c -lm -lpthread
+	$(CC) $(CFLAGS) -o $@ tools/test_loop.c src/loop.c src/ui.c src/icons.c src/library.c src/settings.c src/core_options.c src/text.c src/gfx.c third_party/cJSON.c -lm -lpthread
 
-$(BUILD)/test-palette: tools/test_palette.c src/ui.c src/library.c src/icons.c src/settings.c src/text.c src/gfx.c third_party/cJSON.c third_party/cJSON.h $(wildcard src/*.h)
+$(BUILD)/test-palette: tools/test_palette.c src/ui.c src/library.c src/icons.c src/settings.c src/core_options.c src/text.c src/gfx.c third_party/cJSON.c third_party/cJSON.h $(wildcard src/*.h)
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) -o $@ tools/test_palette.c src/icons.c src/settings.c src/text.c src/gfx.c third_party/cJSON.c -lm
+	$(CC) $(CFLAGS) -o $@ tools/test_palette.c src/icons.c src/settings.c src/core_options.c src/text.c src/gfx.c third_party/cJSON.c -lm
 
-$(BUILD)/test-ui-cache: tools/test_ui_cache.c src/ui.c src/icons.c src/library.c src/settings.c src/text.c src/gfx.c $(wildcard src/*.h)
+$(BUILD)/test-ui-cache: tools/test_ui_cache.c src/ui.c src/icons.c src/library.c src/settings.c src/core_options.c src/text.c src/gfx.c $(wildcard src/*.h)
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) -o $@ tools/test_ui_cache.c src/icons.c src/library.c src/settings.c src/text.c src/gfx.c third_party/cJSON.c -lm
+	$(CC) $(CFLAGS) -o $@ tools/test_ui_cache.c src/icons.c src/library.c src/settings.c src/core_options.c src/text.c src/gfx.c third_party/cJSON.c -lm
 
-$(BUILD)/test-ui-resident: tools/test_ui_resident.c src/ui.c src/icons.c src/library.c src/settings.c src/text.c src/gfx.c $(wildcard src/*.h)
+$(BUILD)/test-ui-resident: tools/test_ui_resident.c src/ui.c src/icons.c src/library.c src/settings.c src/core_options.c src/text.c src/gfx.c $(wildcard src/*.h)
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) -o $@ tools/test_ui_resident.c src/icons.c src/library.c src/settings.c src/text.c src/gfx.c third_party/cJSON.c -lm -lpthread
+	$(CC) $(CFLAGS) -o $@ tools/test_ui_resident.c src/icons.c src/library.c src/settings.c src/core_options.c src/text.c src/gfx.c third_party/cJSON.c -lm -lpthread
 
 # The UI's sources with every allocation routed through the fault injector.
 FAILALLOC_SRC := src/ui.c src/icons.c src/text.c src/gfx.c
 $(BUILD)/test-ui-alloc: tools/test_ui_alloc.c tools/failalloc.c tools/failalloc.h $(FAILALLOC_SRC) src/library.c $(wildcard src/*.h)
 	@mkdir -p $(BUILD)/failalloc
 	for f in $(FAILALLOC_SRC); do $(CC) $(CFLAGS) -include tools/failalloc.h -c $$f -o $(BUILD)/failalloc/$$(basename $$f .c).o || exit 1; done
-	$(CC) $(CFLAGS) -o $@ tools/test_ui_alloc.c tools/failalloc.c $(patsubst src/%.c,$(BUILD)/failalloc/%.o,$(FAILALLOC_SRC)) src/library.c src/settings.c third_party/cJSON.c -lm -lpthread
+	$(CC) $(CFLAGS) -o $@ tools/test_ui_alloc.c tools/failalloc.c $(patsubst src/%.c,$(BUILD)/failalloc/%.o,$(FAILALLOC_SRC)) src/library.c src/settings.c src/core_options.c third_party/cJSON.c -lm -lpthread
 
 # How long the home screen and the in-game menu take to come up, cycle after cycle.
-$(BUILD)/bench-ui: tools/bench_ui.c src/ui.c src/icons.c src/library.c src/settings.c src/text.c src/gfx.c $(wildcard src/*.h) Makefile
+$(BUILD)/bench-ui: tools/bench_ui.c src/ui.c src/icons.c src/library.c src/settings.c src/core_options.c src/text.c src/gfx.c $(wildcard src/*.h) Makefile
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) $(BENCH_FLAGS) -Wl,--wrap=fopen -DBENCH_RESIDENT -o $@ tools/bench_ui.c src/ui.c src/icons.c src/library.c src/settings.c src/text.c src/gfx.c third_party/cJSON.c -lm -lpthread
+	$(CC) $(CFLAGS) $(BENCH_FLAGS) -Wl,--wrap=fopen -DBENCH_RESIDENT -o $@ tools/bench_ui.c src/ui.c src/icons.c src/library.c src/settings.c src/core_options.c src/text.c src/gfx.c third_party/cJSON.c -lm -lpthread
 
 bench-ui: $(BUILD)/bench-ui $(FIXTURE_READY)
 	$(BUILD)/bench-ui "$(CURDIR)/$(FIXTURE)" "$(CURDIR)/assets/fonts" $(CYCLES)
@@ -143,8 +143,8 @@ clean:
 
 # Headless screenshots into docs/screenshots (keys: U D L R A B Y X l r s, where l/r are L1/R1
 # and s is START; names ending -dark use the dark theme). Playing a game rewrites the
-# fixture's recents, so restore them after. 7- comes from the in-game menu over a running
-# fake-core game (tools/shot_ingame.c), the rest from the simulator without a window.
+# fixture's recents, so restore them after. 7- and 9- come from the in-game menu over a
+# running fake-core game (tools/shot_ingame.c), the rest from the simulator without a window.
 .PHONY: shots
 shots: sim $(FIXTURE_READY) $(BUILD)/shot-ingame $(BUILD)/fake_core.so
 	@mkdir -p docs/screenshots $(BUILD)/shots
@@ -162,6 +162,12 @@ shots: sim $(FIXTURE_READY) $(BUILD)/shot-ingame $(BUILD)/fake_core.so
 		$(CURDIR)/$(FIXTURE) $(CURDIR)/assets/fonts $(CURDIR)/$(BUILD)/fake_core.so \
 		$(BUILD)/shots/7-ingame-menu.ppm
 	@python3 -I tools/img.py $(BUILD)/shots/7-ingame-menu.ppm docs/screenshots/7-ingame-menu.png
+	@cp $(BUILD)/shots/recents.bak $(FIXTURE_READY)
+	@SHELF_ROOT=$(CURDIR)/$(FIXTURE) SHELF_FONTS=$(CURDIR)/assets/fonts $(BUILD)/shot-ingame \
+		$(CURDIR)/$(FIXTURE) $(CURDIR)/assets/fonts $(CURDIR)/$(BUILD)/fake_core.so \
+		$(BUILD)/shots/9-ingame-colours.ppm colours
+	@python3 -I tools/img.py $(BUILD)/shots/9-ingame-colours.ppm docs/screenshots/9-ingame-colours.png
+	@cp $(BUILD)/shots/recents.bak $(FIXTURE_READY)
 	@ls docs/screenshots
 
 # ---------- Miyoo Mini Plus ----------
