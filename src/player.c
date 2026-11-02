@@ -61,8 +61,8 @@ typedef struct {
 } Option;
 
 // Where a configured value came from; a stronger source replaces a weaker one's value,
-// whichever is read first.
-enum { FROM_DEFAULT, FROM_FILE };
+// whichever is read first. FROM_CHOICE: changed while the game runs.
+enum { FROM_DEFAULT, FROM_FILE, FROM_CHOICE };
 
 typedef struct {
     const char *key;
@@ -91,6 +91,7 @@ static Option *opts;
 static int nopts, opts_cap;
 static RawOption *raw;
 static int nraw;
+static int options_updated; // a change the core hasn't been told about yet
 
 static uint32_t *fb;
 static size_t fb_px;
@@ -620,7 +621,8 @@ static bool env_cb(unsigned command, void *data)
         return true;
     }
     case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
-        if (data) *(bool *)data = false;
+        if (data) *(bool *)data = options_updated != 0;
+        options_updated = 0; // told once: the core re-reads every option it cares about
         return true;
     case RETRO_ENVIRONMENT_SET_VARIABLES:
         return set_variables(data) == 0;
@@ -831,6 +833,7 @@ static void reset_state(void)
     nopts = opts_cap = 0;
     raw = NULL;
     nraw = 0;
+    options_updated = 0;
     arena = NULL;
     narena = arena_cap = 0;
 }
@@ -1008,6 +1011,24 @@ void player_run(void)
 }
 
 const PlayerFrame *player_frame(void) { return &frame; }
+
+int player_set_option(const char *key, const char *value)
+{
+    Option *o = NULL;
+    const char *v;
+
+    if (!open_flag || !key || !value || !value[0]) return -1;
+    for (int i = 0; i < nopts && !o; i++)
+        if (!strcmp(opts[i].key, key)) o = &opts[i];
+    if (!o || !opt_allows(o, value)) return -1;
+    // Kept as the strongest source too, so it survives the core declaring its options anew.
+    if (raw_set(key, value, FROM_CHOICE)) return -1;
+    if (o->value && !strcmp(o->value, value)) return 0;
+    if (!(v = arena_str(value))) return -1;
+    o->value = v;
+    options_updated = 1;
+    return 1;
+}
 
 double player_fps(void) { return timing.fps > 0 ? timing.fps : 60.0; }
 

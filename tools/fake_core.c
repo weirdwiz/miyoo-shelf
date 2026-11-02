@@ -3,10 +3,11 @@
 //
 // FAKE_CORE_LEGACY_OPTIONS=1 makes it register options through the deprecated
 // SET_VARIABLES call, so both frontend option paths get exercised. FAKE_CORE_NO_DUPES=1
-// makes every frame a new one. `fake_tint` (off|red|blue) is a second option; row 6 shows
-// it. The core also declares, free-form, the gambatte and mGBA options Shelf sets, and with
-// FAKE_CORE_OPTION_LOG=<path> writes their values there as `key=value` lines when a game
-// loads, so session tests can see what Shelf sent.
+// makes every frame a new one. `fake_tint` (off|red|blue) is re-read whenever the frontend
+// reports a variable update, like the real cores' colour options; row 6 shows it and how
+// many updates the core has seen. The core also declares, free-form, the gambatte and mGBA
+// options Shelf sets, and with FAKE_CORE_OPTION_LOG=<path> writes their values there as
+// `key=value` lines after a `load` or `update` line, so session tests can see what Shelf sent.
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -301,6 +302,12 @@ RETRO_API void retro_run(void)
     unsigned mask = 0;
 
     if (poll) poll();
+    bool updated = false;
+    if (env && env(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated) {
+        updates++;
+        tint_read();
+        options_log("a", "update");
+    }
     if (input) {
         for (unsigned id = 0; id < 16; id++)
             if (input(0, RETRO_DEVICE_JOYPAD, 0, id)) mask |= 1u << id;

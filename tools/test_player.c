@@ -118,6 +118,7 @@ static unsigned format_code(void) { return bits_at(ROW_TAGS, 0, 2); }
 static unsigned frame_counter(void) { return bits_at(ROW_COUNTER, 0, 8); }
 static unsigned input_mask(void) { return bits_at(ROW_INPUT, 0, 16); }
 static unsigned tint_code(void) { return bits_at(ROW_LIVE, 0, 2); }
+static unsigned updates_seen(void) { return bits_at(ROW_LIVE, 8, 8); }
 
 static void config(PlayerConfig *cfg, const char *core, const char *rom_path, const char *save_dir,
                    const char *stem, const char *options)
@@ -380,6 +381,7 @@ static void test_shelf_defaults(void)
         player_run();
         CHECK(tint_code() == 1, "Shelf's default should win over the core's, got tint %u", tint_code());
         CHECK(format_code() == 1, "every default applies, got format %u", format_code());
+        CHECK(updates_seen() == 0, "nothing changed yet, but the core saw %u updates", updates_seen());
         player_close();
 
         // The options file wins over Shelf's defaults, for the keys it sets.
@@ -400,6 +402,67 @@ static void test_shelf_defaults(void)
     unsetenv("FAKE_CORE_LEGACY_OPTIONS");
     unsetenv("FAKE_CORE_NO_DUPES");
     printf("Shelf's option defaults\n");
+}
+
+// player_set_option changes a value while the game runs, and the core hears about it once.
+static void test_live_options(void)
+{
+    static const PlayerOption red[] = { { "fake_tint", "red" } };
+    char path[600];
+    snprintf(path, sizeof path, "%s/live.opt", work);
+    setenv("FAKE_CORE_NO_DUPES", "1", 1);
+
+    for (int legacy = 0; legacy < 2; legacy++) {
+        if (legacy) setenv("FAKE_CORE_LEGACY_OPTIONS", "1", 1);
+        open_with(NULL, red, 1);
+        player_run();
+        CHECK(player_set_option("fake_tint", "blue") == 1, "a new allowed value is a change");
+        player_run();
+        CHECK(tint_code() == 2, "the core should re-read the option live, got tint %u", tint_code());
+        CHECK(updates_seen() == 1, "one change is one update, got %u", updates_seen());
+        player_run();
+        CHECK(updates_seen() == 1, "the update is reported once, got %u", updates_seen());
+
+        CHECK(player_set_option("fake_tint", "blue") == 0, "the same value is no change");
+        CHECK(player_set_option("fake_tint", "green") == -1, "a value the core doesn't allow is refused");
+        CHECK(player_set_option("no_such_key", "on") == -1, "an unknown key is refused");
+        CHECK(player_set_option("fake_tint", "") == -1, "an empty value is refused");
+        CHECK(player_set_option("fake_tint", NULL) == -1 && player_set_option(NULL, "red") == -1,
+              "a missing key or value is refused");
+        player_run();
+        CHECK(updates_seen() == 1 && tint_code() == 2, "refused changes tell the core nothing (%u, tint %u)",
+              updates_seen(), tint_code());
+
+        // Two changes before the next frame are one update with the newest value.
+        CHECK(player_set_option("fake_tint", "red") == 1 && player_set_option("fake_tint", "off") == 1,
+              "back-to-back changes both apply");
+        player_run();
+        CHECK(updates_seen() == 2 && tint_code() == 0, "one update for both (%u, tint %u)", updates_seen(),
+              tint_code());
+        player_close();
+        CHECK(player_set_option("fake_tint", "red") == -1, "no player, no options");
+
+        // A live change wins over the options file too.
+        write_text(path, "fake_tint = \"blue\"\n");
+        open_with(path, red, 1);
+        player_run();
+        CHECK(tint_code() == 2 && updates_seen() == 0, "the file's value first (tint %u)", tint_code());
+        CHECK(player_set_option("fake_tint", "red") == 1, "a key the options file sets can still change");
+        player_run();
+        CHECK(tint_code() == 1 && updates_seen() == 1, "the live value wins (tint %u, %u updates)", tint_code(),
+              updates_seen());
+        player_close();
+
+        // A new session starts from the configured values again.
+        open_with(NULL, red, 1);
+        player_run();
+        CHECK(tint_code() == 1 && updates_seen() == 0, "nothing carries over (tint %u, %u updates)", tint_code(),
+              updates_seen());
+        player_close();
+    }
+    unsetenv("FAKE_CORE_LEGACY_OPTIONS");
+    unsetenv("FAKE_CORE_NO_DUPES");
+    printf("live core options\n");
 }
 
 static void test_state(void)
@@ -790,6 +853,7 @@ int main(int argc, char **argv)
     test_input();
     test_options();
     test_shelf_defaults();
+    test_live_options();
     test_state();
     test_sram();
     test_sram_write_failure();

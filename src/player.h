@@ -59,6 +59,11 @@ void player_set_input(unsigned mask);
 // Runs exactly one emulated frame (retro_run).
 void player_run(void);
 const PlayerFrame *player_frame(void);
+// Changes a core option while the game runs, over Shelf's defaults and the options file.
+// The core is told before its next frame (RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE) and
+// re-reads the options it can change live. Returns 1 when the value changed, 0 when it
+// already had it, -1 when the core has no such option or doesn't allow the value.
+int player_set_option(const char *key, const char *value);
 double player_fps(void);  // the core's frames per second (av_info timing)
 void player_reset(void);
 
