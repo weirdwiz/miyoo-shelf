@@ -363,7 +363,7 @@ static int colours_apply(Session *s, Cards *c)
         // The game is a preview's frames ahead of where it was paused: saving it now could
         // keep a state that never was. It ends here, as it was last saved.
         s->lost = 1;
-        report_as("Couldn't change the colours; the game wasn't saved",
+        report_as("Couldn't show the colours; the game wasn't saved",
                   "the core couldn't take %s's state back after a colour preview; not saving it", s->stem);
         return 1;
     }
