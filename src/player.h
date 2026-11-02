@@ -69,10 +69,15 @@ const PlayerFrame *player_frame(void);
 // already had it, -1 when the core has no such option or doesn't allow the value.
 int player_set_option(const char *key, const char *value);
 // Runs `frames` frames (1..8) with the buttons last set, keeps the last frame they drew in
-// player_frame(), and puts the game back exactly where it was: the core's state, SRAM, RTC
-// and buffered sound. For showing a paused game with an option just changed. Returns 0, or
-// -1 (nothing run) when the game can't be saved and restored.
+// player_frame(), and puts the game back exactly where it was: the core's state, SRAM and
+// RTC. The frames make no sound; what was buffered before is left as it was. For showing a
+// paused game with an option just changed. Returns 0; -1 (nothing run) when the game can't
+// be snapshotted; PLAYER_PEEK_LOST when the core couldn't take its state back. Then the game
+// is ahead of where it was paused and may not match its saves, so from then on the player
+// refuses to save anything of it (player_save_state, player_save_sram, and player_close
+// writes nothing) or to peek again: end the session.
 int player_peek(int frames);
+#define PLAYER_PEEK_LOST (-2)
 double player_fps(void);  // the core's frames per second (av_info timing)
 void player_reset(void);
 
@@ -81,7 +86,8 @@ void player_reset(void);
 int player_save_state(const char *path);
 int player_load_state(const char *path);
 // Writes SRAM (and RTC when the core has one) when it changed since the last write.
-// Atomic like save states. Returns 0 when saved or unchanged, -1 on a write error.
+// Atomic like save states. Returns 0 when saved or unchanged, -1 on a write error (or after
+// PLAYER_PEEK_LOST).
 int player_save_sram(void);
 
 // Resampled interleaved stereo at cfg->sample_rate. Fills `frames` frames, padding with

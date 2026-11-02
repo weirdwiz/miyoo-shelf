@@ -92,6 +92,8 @@ static int nopts, opts_cap;
 static RawOption *raw;
 static int nraw;
 static int options_updated; // a change the core hasn't been told about yet
+static int audio_muted;     // a peek is running: its sound is dropped
+static int lost;            // a peek couldn't put the game back: it must not be saved
 
 static uint32_t *fb;
 static size_t fb_px;
@@ -426,7 +428,7 @@ static double resample_step(size_t frames)
 static void audio_batch(const int16_t *data, size_t frames)
 {
     double step;
-    if (!ring || !data) return;
+    if (!ring || !data || audio_muted) return;
     step = resample_step(frames);
     for (size_t i = 0; i < frames; i++) {
         int16_t l = data[2 * i], r = data[2 * i + 1];
@@ -834,6 +836,7 @@ static void reset_state(void)
     raw = NULL;
     nraw = 0;
     options_updated = 0;
+    audio_muted = lost = 0;
     arena = NULL;
     narena = arena_cap = 0;
 }
@@ -1037,7 +1040,7 @@ int player_peek(int frames)
     uint8_t *state, *mem[2] = {NULL, NULL};
     int rc = -1;
 
-    if (!open_flag || frames < 1 || frames > 8) return -1;
+    if (!open_flag || lost || frames < 1 || frames > 8) return -1;
     size = core.serialize_size();
     if (!size || size > FILE_MAX || !(state = malloc(size))) return -1;
     if (!core.serialize(state, size)) goto done;
@@ -1049,23 +1052,23 @@ int player_peek(int frames)
         if (!(mem[i] = malloc(mems[i].size))) goto done;
         memcpy(mem[i], data, mems[i].size);
     }
-    uint32_t head = atomic_load_explicit(&ring_head, memory_order_acquire);
-    double was_phase = phase, was_err = drc_err, was_sum = drc_sum, was_step = step_cur;
-    unsigned was_since = step_since;
-    int16_t was_l = prev_l, was_r = prev_r;
-    int was_prev = have_prev;
+    // The frames' sound never happened: the core's output isn't taken while they run, so
+    // what was buffered before plays on untouched.
+    audio_muted = 1;
     for (int i = 0; i < frames; i++) core.run();
-    rc = core.unserialize(state, size) ? 0 : -1;
+    audio_muted = 0;
+    if (!core.unserialize(state, size)) {
+        // The game is frames ahead of where it was paused, and its saves may not match its
+        // state: nothing of it may be saved from now on (see player_save_*).
+        lost = 1;
+        rc = PLAYER_PEEK_LOST;
+        goto done;
+    }
     for (int i = 0; i < 2; i++) {
         void *data = mem[i] ? core.get_memory_data(mems[i].id) : NULL;
         if (data) memcpy(data, mem[i], mems[i].size);
     }
-    // The frames' sound never happened: drop it, and what was buffered before plays on.
-    phase = was_phase; drc_err = was_err; drc_sum = was_sum; step_cur = was_step;
-    step_since = was_since; prev_l = was_l; prev_r = was_r; have_prev = was_prev;
-    uint32_t tail = atomic_load_explicit(&ring_tail, memory_order_acquire);
-    if (head - tail <= ring_cap) atomic_store_explicit(&ring_head, head, memory_order_release);
-    else player_audio_flush();
+    rc = 0;
 done:
     free(mem[0]);
     free(mem[1]);
@@ -1086,7 +1089,7 @@ int player_save_state(const char *path)
     uint8_t *buf;
     int rc = -1;
 
-    if (!open_flag || !path) return -1;
+    if (!open_flag || lost || !path) return -1;
     size = core.serialize_size();
     if (!size || size > FILE_MAX) return -1;
     buf = malloc(size);
@@ -1112,7 +1115,7 @@ int player_load_state(const char *path)
 int player_save_sram(void)
 {
     int rc = 0;
-    if (!open_flag) return -1;
+    if (!open_flag || lost) return -1;
     for (int i = 0; i < 2; i++)
         if (mem_save(&mems[i]) != 0) rc = -1;
     return rc;

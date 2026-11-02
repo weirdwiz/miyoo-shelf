@@ -50,6 +50,7 @@ typedef struct {
     CoreLcd lcd;             // which colour choice the game gets
     Settings look;           // the settings it started with (set->settings, or the defaults),
                              // kept up to date with the colour row's changes
+    int lost;                // the game couldn't be put back after a preview: save nothing
 } Session;
 
 static char problem[192]; // see game_error()
@@ -338,13 +339,13 @@ static void colours_row(const Session *s)
 }
 
 // The colour row changed a setting: the core gets it now, the paused game's card shows it,
-// and it's saved.
-static void colours_apply(Session *s, Cards *c)
+// and it's saved. Returns 1 when the game can't go on (see player_peek).
+static int colours_apply(Session *s, Cards *c)
 {
     Settings want = ui_settings();
     PlayerOption opts[CORE_CHOICES_MAX];
     int changed = 0;
-    if (want.colours == s->look.colours && want.palette == s->look.palette) return;
+    if (want.colours == s->look.colours && want.palette == s->look.palette) return 0;
     s->look.colours = want.colours;
     s->look.palette = want.palette;
     int n = core_choices(s->core_name, want.colours, want.palette, opts, CORE_CHOICES_MAX);
@@ -356,12 +357,23 @@ static void colours_apply(Session *s, Cards *c)
         settings_save(s->set->settings);
     }
     // gambatte re-reads its options at the end of a frame, so the second frame shows them.
-    if (!changed || player_peek(2)) return;
+    if (!changed) return 0;
+    int peek = player_peek(2);
+    if (peek == PLAYER_PEEK_LOST) {
+        // The game is a preview's frames ahead of where it was paused: saving it now could
+        // keep a state that never was. It ends here, as it was last saved.
+        s->lost = 1;
+        report_as("Couldn't change the colours; the game wasn't saved",
+                  "the core couldn't take %s's state back after a colour preview; not saving it", s->stem);
+        return 1;
+    }
+    if (peek) return 0;
     Image *old = c->live_card;
     c->live_card = NULL;
     build_live(c, s->set->scale); // a new card image, so the switcher redraws its sprite
     img_free(old);
     c->rev++;
+    return 0;
 }
 
 /* ---------- the in-game menu ---------- */
@@ -488,7 +500,9 @@ static int menu_after(void *ud)
     Menu *m = ud;
     if (m->done) return 1;
     switch (ui_take_action()) {
-    case UI_SETTINGS: colours_apply(m->s, m->cards); break;
+    case UI_SETTINGS:
+        if (colours_apply(m->s, m->cards)) m->done = MENU_HOME;
+        break;
     case UI_SW_RESUME: m->done = MENU_RESUME; break;
     case UI_SW_HOME: m->done = MENU_HOME; break;
     case UI_SW_PLAY: {
@@ -717,7 +731,7 @@ int game_play(Library *lib, int game, const GameSettings *set, int *switch_to)
     // The menu lowered the clock and standby lowered it further; the save is the last
     // wait before home (or the power going), so it runs at full speed again.
     platform_performance(1);
-    save_session(&s);
+    if (!s.lost) save_session(&s); // lost: game_error() already says why
     // Powering off from a game: the next boot comes straight back to it. Not when the save
     // failed; then home, with the previous state still there to resume by hand.
     if (result == GAME_POWER_OFF && !problem[0] && lib_set_resume(lib, game))

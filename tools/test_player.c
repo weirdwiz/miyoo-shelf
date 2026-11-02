@@ -540,6 +540,53 @@ static void test_peek(void)
     printf("peeking at a paused game\n");
 }
 
+// A peek whose restore fails leaves a game nobody should save: the player refuses to,
+// even when it closes.
+static void test_peek_restore_failure(void)
+{
+    char state[700], srm[700], rtc[700];
+    snprintf(state, sizeof state, "%s/broken.state", work);
+    snprintf(srm, sizeof srm, "%s/broken.srm", saves);
+    snprintf(rtc, sizeof rtc, "%s/broken.rtc", saves);
+    remove(state);
+    open_ok(rom, saves, "broken", NULL);
+    run_frames(5);
+    CHECK(player_save_sram() == 0 && remove(srm) == 0 && remove(rtc) == 0, "the saves were written");
+    setenv("FAKE_CORE_FAIL_UNSERIALIZE", "1", 1);
+    CHECK(player_peek(2) == PLAYER_PEEK_LOST, "a failed restore is reported as such");
+    unsetenv("FAKE_CORE_FAIL_UNSERIALIZE");
+    CHECK(player_save_state(state) == -1 && access(state, F_OK) != 0, "no state is saved after it");
+    CHECK(player_save_sram() == -1 && access(srm, F_OK) != 0 && access(rtc, F_OK) != 0,
+          "nor SRAM or RTC");
+    CHECK(player_peek(2) == -1, "nor another peek run");
+    player_close();
+    CHECK(access(srm, F_OK) != 0 && access(rtc, F_OK) != 0, "closing doesn't save them either");
+    open_ok(rom, saves, "broken", NULL); // the next session starts clean
+    run_frames(1);
+    CHECK(player_save_state(state) == 0 && player_save_sram() == 0, "a new session saves again");
+    player_close();
+    printf("a peek that can't put the game back\n");
+}
+
+// A peek makes no sound: what was buffered before it is exactly what plays after it, even
+// when the ring is nearly full.
+static void test_peek_audio(void)
+{
+    static int16_t before[2 * 16384], after[2 * 16384];
+    open_ok(rom, saves, "peeksound", NULL);
+    run_frames(9);
+    int n = player_audio_read(before, 16384);
+    player_close();
+    open_ok(rom, saves, "peeksound", NULL);
+    run_frames(9);
+    CHECK(player_peek(2) == 0, "the peek runs");
+    int m = player_audio_read(after, 16384);
+    CHECK(n > 4000 && m == n, "the same sound is buffered (%d frames, %d without the peek)", m, n);
+    CHECK(m == n && !memcmp(before, after, (size_t)n * 2 * sizeof *before), "and it's unchanged");
+    player_close();
+    printf("a peek's sound\n");
+}
+
 static void test_state(void)
 {
     char state[600];
@@ -931,6 +978,8 @@ int main(int argc, char **argv)
     test_live_options();
     test_choices();
     test_peek();
+    test_peek_audio();
+    test_peek_restore_failure();
     test_state();
     test_sram();
     test_sram_write_failure();

@@ -155,6 +155,18 @@ static int exists(int game, const char *ext)
     return access(path, F_OK) == 0;
 }
 
+static long srm_counter(int game) // the frame counter the fake core keeps in its SRAM
+{
+    char path[PATH_LEN * 2];
+    unsigned char b[4];
+    saved(game, ".srm", path, sizeof path);
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    size_t n = fread(b, 1, sizeof b, f);
+    fclose(f);
+    return n == 4 ? (long)b[0] | (long)b[1] << 8 | (long)b[2] << 16 | (long)b[3] << 24 : -1;
+}
+
 static long state_counter(int game) // the fake core's frame counter in a saved state
 {
     char path[PATH_LEN * 2];
@@ -713,6 +725,27 @@ int main(int argc, char **argv)
     fp_press_at(2.0, BTN_A); // so A plays the other card
     CHECK(session(gamma, &next) == GAME_SWITCH);
     CHECK(prefs.colours == 0);
+    // The core can't take its state back after showing a colour: the session ends at once
+    // and saves nothing, so the game is as it was last saved, and says why.
+    long state_was = state_counter(alpha), srm_was = srm_counter(alpha);
+    CHECK(state_was > 0 && srm_was > 0);
+    setenv("FAKE_CORE_FAIL_UNSERIALIZE", "2", 1); // the first is the state the session resumes
+    fp_reset();
+    fp_limit(20);
+    fp_press_at(1.0, BTN_MENU);
+    fp_press_at(1.6, BTN_START);
+    fp_press_at(1.8, BTN_RIGHT); // the preview whose restore fails
+    fp_press_at(2.4, BTN_B);     // only reached if the session went on
+    fp_press_at(2.8, BTN_A);
+    fp_press_at(4.0, BTN_POWER_OFF);
+    int lost = session(alpha, &next);
+    unsetenv("FAKE_CORE_FAIL_UNSERIALIZE");
+    CHECK(lost == GAME_HOME);
+    CHECK(game_error()[0] != 0);
+    CHECK(state_counter(alpha) == state_was && srm_counter(alpha) == srm_was);
+    CHECK(!resumes()[0] && fp()->power_off == 0);
+    prefs = (Settings){0};
+    settings_defaults(&prefs);
     gs.settings = NULL;
     unsetenv("FAKE_CORE_OPTION_LOG");
 

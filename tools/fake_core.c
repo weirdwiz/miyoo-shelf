@@ -8,6 +8,7 @@
 // many updates the core has seen. The core also declares, free-form, the gambatte and mGBA
 // options Shelf sets, and with FAKE_CORE_OPTION_LOG=<path> writes their values there as
 // `key=value` lines after a `load` or `update` line, so session tests can see what Shelf sent.
+// FAKE_CORE_FAIL_UNSERIALIZE=<n> makes the nth retro_unserialize since the game loaded fail.
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -344,9 +345,14 @@ RETRO_API bool retro_serialize(void *data, size_t len)
     return true;
 }
 
+static int unserialized; // calls since the game loaded
+
 RETRO_API bool retro_unserialize(const void *data, size_t len)
 {
     const uint8_t *in = data;
+    const char *fail = getenv("FAKE_CORE_FAIL_UNSERIALIZE");
+    unserialized++;
+    if (fail && atoi(fail) == unserialized) return false;
     if (!data || len < STATE_SIZE) return false;
     memcpy(sram, in, SRAM_SIZE);
     frame_counter = (unsigned)in[SRAM_SIZE + 0] | (unsigned)in[SRAM_SIZE + 1] << 8 |
@@ -375,6 +381,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
     tint_read();
     updates = 0;
     options_log("w", "load");
+    unserialized = 0;
     fmt = format;
     if (!env || !env(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt)) return false;
     memset(sram, 0, sizeof sram);
