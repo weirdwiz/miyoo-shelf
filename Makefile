@@ -178,7 +178,7 @@ mm-inner: $(MM_BUILD)/shelf
 
 $(MM_BUILD)/shelf: $(MM_SRC) $(wildcard src/*.h) Makefile
 	@mkdir -p $(MM_BUILD)
-	$(CROSS_COMPILE)gcc -O3 -fno-math-errno -marm -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -std=c11 -D_DEFAULT_SOURCE \
+	$(CROSS_COMPILE)gcc -O3 -fno-math-errno -marm -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -std=c11 -D_DEFAULT_SOURCE -D_FILE_OFFSET_BITS=64 \
 		-Wall -Wno-unused-parameter -Wno-sign-compare -Wno-format-truncation -o $@ $(MM_SRC) -lm -lpthread -ldl
 
 # Self-contained parts (VM harness, cores, player tests) add their own rules here.
