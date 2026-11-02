@@ -20,6 +20,9 @@ vm_ssh() {
 		-o LogLevel=ERROR -o ConnectTimeout=5 -o BatchMode=yes root@127.0.0.1 "$@"
 }
 
+# The shares have nofail in fstab and the 9p transport can load after fstab has run.
+vm_mount_shares() { vm_ssh 'for m in /mnt/repo /mnt/SDCARD; do mountpoint -q $m || { modprobe 9pnet_virtio; mount $m; }; done'; }
+
 # Sends one command to the QEMU monitor and prints its reply.
 vm_monitor() {
 	python3 -I - "$MON" "$1" <<'PY'

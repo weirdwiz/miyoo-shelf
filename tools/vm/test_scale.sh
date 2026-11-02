@@ -25,6 +25,7 @@ build test-scale
 build test-scale-c -DSCALE_NO_NEON
 
 vm_running || sh tools/vm/start.sh
+vm_mount_shares
 
 echo "== NEON build: whole suite (the differential test proves NEON == C) =="
 vm_ssh '/mnt/repo/build/mm/test-scale'

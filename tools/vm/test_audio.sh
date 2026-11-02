@@ -15,5 +15,6 @@ mkdir -p "$(dirname "$OUT")"
 	"source /root/.bashrc && \${CROSS_COMPILE}gcc -O2 -marm -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wno-unused-parameter -o $OUT tools/test_audio_mm.c src/audio_mm.c -ldl -lpthread -lm"
 
 vm_running || sh tools/vm/start.sh
+vm_mount_shares
 vm_ssh "/mnt/repo/$OUT"
 echo "test_audio.sh: ok"

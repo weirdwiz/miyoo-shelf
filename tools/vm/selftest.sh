@@ -4,8 +4,7 @@
 set -eu
 . "$(dirname "$0")/common.sh"
 vm_running || sh tools/vm/start.sh
-# The 9p transport can load after fstab has already skipped the shares (they have nofail).
-vm_ssh 'for m in /mnt/repo /mnt/SDCARD; do mountpoint -q $m || { modprobe 9pnet_virtio; mount $m; }; done'
+vm_mount_shares
 # A running Shelf reads the same keys, so the self-test would never see them.
 vm_ssh 'pkill -x shelf || true'
 [ -x $VM/fbtest ] || podman run --rm --platform linux/amd64 -v "$PWD":/root/workspace:z -w /root/workspace docker.io/aemiii91/miyoomini-toolchain:latest /bin/bash -c "source /root/.bashrc && \${CROSS_COMPILE}gcc -O2 -marm -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard -o $VM/fbtest tools/vm/fbtest.c"

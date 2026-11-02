@@ -27,7 +27,8 @@ Left Shift = X, Left Alt = Y, E / T = L1 / R1, Tab / Backspace = L2 / R2, Enter 
 Right Ctrl = SELECT, Esc = MENU. Ctrl-Alt-G releases a grabbed mouse/keyboard.
 
 Shares (9p): `build/vm/sdcard` (or `VM_SDCARD`) is the guest's `/mnt/SDCARD`; the repo is
-`/mnt/repo`, read-only.
+`/mnt/repo`, read-only. A fast boot can leave them unmounted (`nofail`), so the scripts
+mount them before use.
 
 `VM_PANEL=752x560 make vm-start` boots with the panel of a Mini v4 or a later Mini Plus
 (default 640x480), for checking Shelf's centred canvas. `shot.sh` reads the page on screen
