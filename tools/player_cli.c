@@ -152,7 +152,7 @@ int main(int argc, char **argv)
     core_name(argv[1], core, sizeof core);
     cfg.defaults = core_defaults(core, &cfg.ndefaults);
     cfg.choices = choices;
-    cfg.nchoices = core_choices(core, colours ? atoi(colours) != 0 : 1,
+    cfg.nchoices = core_choices(core, core_lcd(core, argv[2]), colours ? atoi(colours) != 0 : 1,
                                 palette ? atoi(palette) : PALETTE_DEFAULT, choices, CORE_CHOICES_MAX);
     cfg.sample_rate = 48000;
     if (!cfg.system_dir) cfg.system_dir = ".";

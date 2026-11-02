@@ -68,10 +68,13 @@ layers, weakest first:
 1. Shelf's defaults (frame blending off, boot logos skipped, accurate GBC correction).
 2. A RetroArch-style `.shelf/data/gambatte.opt` or `mgba.opt` (`key = "value"` lines):
    overrides any default, and sets anything else the core offers.
-3. The in-game Palette and Colours choices, for the few keys they control:
-   `gambatte_gb_colorization`, `gambatte_gb_internal_palette` (and its pack's palette key),
-   `gambatte_gbc_color_correction`, `mgba_color_correction`. The last thing chosen in the
-   menu is what the game shows, whatever the file says; for every other key the file wins.
+3. The game's in-game choice, for the keys that choice controls and no others: a Game Boy
+   game's Palette sets `gambatte_gb_colorization`, `gambatte_gb_internal_palette` (and its
+   pack's palette key); a Game Boy Color game's Colours sets
+   `gambatte_gbc_color_correction`; a Game Boy Advance game's Colours sets
+   `mgba_color_correction`. What was last chosen in the menu is what the game shows,
+   whatever the file says; for every other key, including the ones a different kind of
+   game's choice would set, the file wins.
 
 ## Controls
 

@@ -1,9 +1,9 @@
 // The core options Shelf sets itself, so games look right without a settings screen.
 //
 // Three layers, weakest first: Shelf's defaults replace the cores' own; a RetroArch-style
-// .shelf/data/<core>.opt file overrides any of them; and the player's two choices in the
-// in-game menu (Colours, Palette) override the few keys they control, whatever the file
-// says (see PlayerConfig).
+// .shelf/data/<core>.opt file overrides any of them; and the game's choice in the in-game
+// menu (Palette for a Game Boy game, Colours for a GBC or GBA game) overrides the few keys
+// that choice controls, whatever the file says (see PlayerConfig).
 #ifndef SHELF_CORE_OPTIONS_H
 #define SHELF_CORE_OPTIONS_H
 
@@ -35,9 +35,11 @@ typedef enum { LCD_NONE, LCD_GB, LCD_GBC, LCD_GBA } CoreLcd;
 // GB folder is still a GBC game). A ROM that can't be read counts as a Game Boy game.
 CoreLcd core_lcd(const char *core, const char *rom_path);
 
-// The options the choices set for a core: colour correction on or off, and the Game Boy
-// palette (an index above). Writes up to `max` into `out`; returns how many.
+// The options a game's one choice sets, and only those: a Game Boy game's palette (an
+// index above), or a Game Boy Color or Advance game's colour correction (on or off). Every
+// other key is left to the defaults and the options file. Writes up to `max` into `out`;
+// returns how many.
 #define CORE_CHOICES_MAX 4
-int core_choices(const char *core, int colours, int palette, PlayerOption *out, int max);
+int core_choices(const char *core, CoreLcd lcd, int colours, int palette, PlayerOption *out, int max);
 
 #endif

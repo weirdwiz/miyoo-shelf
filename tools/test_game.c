@@ -725,6 +725,45 @@ int main(int argc, char **argv)
     fp_press_at(2.0, BTN_A); // so A plays the other card
     CHECK(session(gamma, &next) == GAME_SWITCH);
     CHECK(prefs.colours == 0);
+    // The choices set only what the game's row controls; the options file keeps the rest.
+    // A Game Boy Color cart (by its header, here in the GB folder) gets Colours: Shelf
+    // leaves the file's colorization and palette alone and sets the correction.
+    char beta_rom[PATH_LEN * 2];
+    host_path(lib.games[beta].path, beta_rom, sizeof beta_rom);
+    unsigned char cgb[0x150] = {0};
+    cgb[0x143] = 0x80;
+    CHECK(write_file(beta_rom, cgb, sizeof cgb) == 0);
+    snprintf(opt, sizeof opt, "%s/.shelf/data/gambatte.opt", sd);
+    write_text(opt, "gambatte_gb_colorization = \"auto\"\ngambatte_gb_internal_palette = \"GB - DMG\"\n"
+                    "gambatte_gbc_color_correction = \"always\"\n");
+    prefs.colours = 0;
+    fp_reset();
+    fp_limit(20);
+    fp_press_at(1.0, BTN_MENU);
+    fp_press_at(1.6, BTN_START);
+    fp_press_at(1.8, BTN_A); // Colours back on
+    fp_press_at(2.2, BTN_B);
+    fp_press_at(2.6, BTN_B);
+    CHECK(session(beta, &next) == GAME_HOME);
+    CHECK(!strcmp(sent("load", "gambatte_gbc_color_correction"), "disabled"));
+    CHECK(!strcmp(sent("load", "gambatte_gb_colorization"), "auto"));
+    CHECK(!strcmp(sent("load", "gambatte_gb_internal_palette"), "GB - DMG"));
+    CHECK(!strcmp(sent("update", "gambatte_gbc_color_correction"), "GBC only"));
+    CHECK(!strcmp(sent("update", "gambatte_gb_colorization"), "auto"));
+    CHECK(!strcmp(sent("update", "gambatte_gb_internal_palette"), "GB - DMG"));
+    CHECK(prefs.colours == 1);
+    // A Game Boy game gets Palette: the file's correction stands.
+    fp_reset();
+    fp_limit(5);
+    fp_press_at(0.4, BTN_MENU);
+    fp_press_at(1.0, BTN_B);
+    CHECK(session(alpha, &next) == GAME_HOME);
+    CHECK(!strcmp(sent("load", "gambatte_gbc_color_correction"), "always"));
+    CHECK(!strcmp(sent("load", "gambatte_gb_internal_palette"), "PixelShift - Pack 1")); // Green
+    unlink(opt);
+    unsigned char plain[64] = {0};
+    CHECK(write_file(beta_rom, plain, sizeof plain) == 0);
+
     // The core can't take its state back after showing a colour: the session ends at once
     // and saves nothing, so the game is as it was last saved, and says why.
     long state_was = state_counter(alpha), srm_was = srm_counter(alpha);

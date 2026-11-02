@@ -6,11 +6,14 @@
 #define COUNT(a) (int)(sizeof a / sizeof *a)
 
 // gambatte (GB, GBC). Game Boy Color games are corrected to look like the GBC's own
-// screen with the core's accurate model, and Game Boy games get a palette (both are the
-// player's choices, below). No frame blending: it costs a frame copy and blend every
-// frame, and only a few games need it. The boot logo is skipped when a boot ROM is on the
-// card: A starts the game.
+// screen with the core's accurate model, and Game Boy games get the Pocket palette (each
+// game's choice, below, sets one or the other). No frame blending: it costs a frame copy
+// and blend every frame, and only a few games need it. The boot logo is skipped when a
+// boot ROM is on the card: A starts the game.
 static const PlayerOption GAMBATTE[] = {
+    {"gambatte_gb_colorization", "internal"},
+    {"gambatte_gb_internal_palette", "GB - Pocket"},
+    {"gambatte_gbc_color_correction", "GBC only"},
     {"gambatte_gbc_color_correction_mode", "accurate"},
     {"gambatte_mix_frames", "disabled"},
     {"gambatte_gb_bootloader", "disabled"},
@@ -76,17 +79,18 @@ static int put(PlayerOption *out, int n, int max, const char *key, const char *v
     return n;
 }
 
-int core_choices(const char *core, int colours, int palette, PlayerOption *out, int max)
+int core_choices(const char *core, CoreLcd lcd, int colours, int palette, PlayerOption *out, int max)
 {
     int n = 0;
     if (!core || !out) return 0;
-    if (!strcmp(core, "gambatte")) {
+    if (!strcmp(core, "gambatte") && lcd == LCD_GB) {
         if (palette < 0 || palette >= PALETTE_COUNT) palette = PALETTE_DEFAULT;
-        n = put(out, n, max, "gambatte_gbc_color_correction", colours ? "GBC only" : "disabled");
         n = put(out, n, max, "gambatte_gb_colorization", PALETTES[palette].colorization);
         n = put(out, n, max, "gambatte_gb_internal_palette", PALETTES[palette].internal);
         n = put(out, n, max, PALETTES[palette].pack_key, PALETTES[palette].pack_value);
-    } else if (!strcmp(core, "mgba")) {
+    } else if (!strcmp(core, "gambatte") && lcd == LCD_GBC) {
+        n = put(out, n, max, "gambatte_gbc_color_correction", colours ? "GBC only" : "disabled");
+    } else if (!strcmp(core, "mgba") && lcd == LCD_GBA) {
         // The GBA's own screen was dark and washed out, so games were drawn oversaturated;
         // correcting for it gives the colours their artists saw.
         n = put(out, n, max, "mgba_color_correction", colours ? "GBA" : "OFF");

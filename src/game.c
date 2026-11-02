@@ -348,7 +348,7 @@ static int colours_apply(Session *s, Cards *c)
     if (want.colours == s->look.colours && want.palette == s->look.palette) return 0;
     s->look.colours = want.colours;
     s->look.palette = want.palette;
-    int n = core_choices(s->core_name, want.colours, want.palette, opts, CORE_CHOICES_MAX);
+    int n = core_choices(s->core_name, s->lcd, want.colours, want.palette, opts, CORE_CHOICES_MAX);
     for (int i = 0; i < n; i++)
         if (player_set_option(opts[i].key, opts[i].value) > 0) changed = 1;
     if (s->set->settings) {
@@ -700,7 +700,7 @@ int game_play(Library *lib, int game, const GameSettings *set, int *switch_to)
     int ndefaults;
     const PlayerOption *defaults = core_defaults(core, &ndefaults);
     PlayerOption choices[CORE_CHOICES_MAX];
-    int nchoices = core_choices(core, s.look.colours, s.look.palette, choices, CORE_CHOICES_MAX);
+    int nchoices = core_choices(core, s.lcd, s.look.colours, s.look.palette, choices, CORE_CHOICES_MAX);
     PlayerConfig cfg = {.core_path = s.core, .rom_path = s.rom, .system_dir = bios,
                         .save_dir = s.save_dir, .stem = s.stem, .options_path = options,
                         .defaults = defaults, .ndefaults = ndefaults,
