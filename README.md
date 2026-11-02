@@ -1,10 +1,5 @@
 # Shelf
 
-Shelf turns the SD card of a Miyoo Mini or Mini Plus into a standalone console. It plays
-Game Boy, Game Boy Color and Game Boy Advance games, and nothing else. There is no Onion
-and no RetroArch: the stock firmware runs the card's `.tmp_update/updater` at boot instead
-of its own UI, so the card holds the whole system — games, saves, box art and settings.
-Remove the `.tmp_update` folder and the device boots the stock firmware again.
 
 Games run inside Shelf, through libretro cores cross-built for the device at pinned
 commits: gambatte for GB and GBC, mGBA for GBA (`make cores`).
